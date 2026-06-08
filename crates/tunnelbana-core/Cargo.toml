@@ -1,0 +1,36 @@
+[package]
+name = "tunnelbana-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Core framework for the tunnelbana identity proxy (Context, InternalData, state cookie, routing, config, attribute mapping)."
+
+[dependencies]
+jose-rs.workspace = true
+kryptering.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+regex.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+time.workspace = true
+percent-encoding.workspace = true
+form_urlencoded.workspace = true
+
+# PEM key loading
+rsa.workspace = true
+p256.workspace = true
+p384.workspace = true
+ed25519-dalek.workspace = true
+pkcs8.workspace = true
+pem.workspace = true
+sec1.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "tunnelbana-oidc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reusable OAuth2 / OpenID Connect / OpenID Federation protocol library built on jose-rs."
+
+[dependencies]
+tunnelbana-core = { path = "../tunnelbana-core" }
+jose-rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+base64.workspace = true
+url.workspace = true
+form_urlencoded.workspace = true
+percent-encoding.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

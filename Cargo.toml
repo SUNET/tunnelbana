@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tunnelbana-core",
+    "crates/tunnelbana-oidc",
+    "crates/tunnelbana-plugins",
+    "crates/tunnelbana",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+rust-version = "1.83"
+
+[workspace.dependencies]
+jose-rs = { version = "0.3.1", default-features = false }
+gamlastan = { version = "0.1.0" }
+
+# Async / web
+actix-web = "4"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Templating
+tera = "1"
+
+# Crypto helpers for PEM key loading (PEM -> SoftwareKey -> jose Jwk)
+kryptering = { version = "0.3", default-features = false }
+rsa = "0.9"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "2.1", features = ["pkcs8"] }
+pkcs8 = "0.10"
+pem = "3"
+sec1 = "0.7"
+base64 = "0.22"
+sha2 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors / utilities
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+url = "2"
+percent-encoding = "2"
+form_urlencoded = "1"
+regex = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+

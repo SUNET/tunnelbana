@@ -1,0 +1,26 @@
+//! # tunnelbana-plugins
+//!
+//! Concrete frontends, backends and micro-services, plus [`register_all`] which
+//! installs their constructors into a [`tunnelbana_core::plugin::Registry`].
+
+pub mod federation_frontend;
+pub mod keyload;
+pub mod microservices;
+pub mod oidc_backend;
+pub mod oidc_frontend;
+pub mod saml2_backend;
+pub mod saml2_frontend;
+
+use tunnelbana_core::plugin::Registry;
+
+/// Register every built-in plugin's constructor under its config `type` name.
+pub fn register_all(registry: &mut Registry) {
+    registry.register_frontend("oidc", oidc_frontend::OidcFrontend::build);
+    registry.register_frontend("oidc_federation", federation_frontend::FederationFrontend::build);
+    registry.register_frontend("saml2", saml2_frontend::Saml2Frontend::build);
+    registry.register_backend("oidc", oidc_backend::OidcBackend::build);
+    registry.register_backend("saml2", saml2_backend::Saml2Backend::build);
+    registry.register_microservice("static_attributes", microservices::StaticAttributes::build);
+    registry.register_microservice("filter_attributes", microservices::FilterAttributes::build);
+    registry.register_microservice("custom_routing", microservices::CustomRouting::build);
+}
