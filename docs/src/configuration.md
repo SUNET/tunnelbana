@@ -132,6 +132,13 @@ This gives tunnelbana the same practical split SATOSA uses: discovery chooses
 the target IdP before the backend sends the AuthnRequest, and the ACS verifies
 the response against the IdP that was actually selected for the flow.
 
+The trust anchor for all of this is `mdq.signing_cert_path`: the federation's
+metadata-signing certificate (PEM). Every entity statement fetched from the
+MDQ server is signature-verified against it, so the MDQ server itself never
+has to be trusted. Without it the backend refuses to start unless
+`allow_unverified = true` is set explicitly (testing only). See
+[MDQ options](built-in-plugins.md#mdq-options) for the full key reference.
+
 > **Current boundary:** tunnelbana does **not** yet implement the full
 > SP-initiated Discovery Service Protocol on its own. Today the backend only
 > consumes an incoming `entityID`; if no discovery step injects one, the

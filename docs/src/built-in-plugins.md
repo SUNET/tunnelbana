@@ -228,6 +228,31 @@ name = "Saml2"
   | `mdq.fallback_ttl_secs` | | metadata-driven | Cache TTL used when the metadata omits `validUntil` and `cacheDuration`. |
   | `mdq.allow_unverified` | | `false` | Accept unsigned/unverified metadata. For testing only. |
 
+  ### The MDQ signer certificate
+
+  `mdq.signing_cert_path` points at the **federation's metadata-signing
+  certificate** — a PEM-encoded X.509 certificate, published by the federation
+  operator (e.g. SWAMID, eduGAIN, or your pyFF instance). At startup the
+  backend reads the file and hands it to the `gamlastan-mdq` client, after
+  which **every** EntityDescriptor fetched from the MDQ server is
+  signature-verified against it before being trusted or cached.
+
+  The setting is effectively required: with neither `signing_cert_path` nor
+  `allow_unverified = true`, the backend refuses to start with
+
+  ```text
+  mdq requires signing_cert_path (or allow_unverified=true for testing)
+  ```
+
+  A relative path is resolved against the proxy's working directory, the same
+  convention as `sp_key_path` and `sp_cert_path`.
+
+  > **Key rollover:** the config currently accepts a single certificate, even
+  > though the underlying `gamlastan-mdq` client can hold several trusted
+  > signer certs at once. During a federation signing-key rollover, switch the
+  > file contents at the announced cutover rather than expecting both keys to
+  > be accepted simultaneously.
+
   ### Subject identifier selection
 
   A non-success SAML status (for example a cancelled login) is surfaced as an
