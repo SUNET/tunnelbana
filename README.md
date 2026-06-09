@@ -122,6 +122,7 @@ tables, `${ENV}` interpolation, and an `include` directive per plugin. See
 
 ## Roadmap
 
+- HSM support
 - **OpenID Federation backend** (RP): discovery page, trust-chain resolve of the
   upstream OP, signed request object, `private_key_jwt` token exchange (the OIDC
   RP backend already does the non-federation parts).
