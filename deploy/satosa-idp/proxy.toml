@@ -1,0 +1,65 @@
+# tunnelbana deployment: SAML IdP -> OpenID Federation OP for the
+# realta.labb.sunet.se lab. Mirrors the previous SATOSA-based OP:
+#   * frontend  = OpenID Federation 1.1 OP   (faces downstream federation RPs)
+#   * backend   = SAML2 SP                    (faces upstream IdP samlidp.labb.sunet.se)
+# Published at https://satosa.labb.sunet.se (Caddy terminates TLS -> :8088 -> :8080).
+
+base_url = "https://satosa.labb.sunet.se"
+state_encryption_key = "${TUNNELBANA_STATE_KEY}"
+cookie_name = "TUNNELBANA_STATE"
+cookie_secure = true
+attributes = "config/attributes.toml"
+
+[logging]
+level = "info,tunnelbana=debug"
+format = "json"
+
+# ── Frontend: OpenID Federation OP ──────────────────────────────────────────
+[[frontend]]
+type = "oidc_federation"
+name = "OIDFed"
+  [frontend.config]
+  # The federation entity identifier stays the bare host, independent of where
+  # the protocol endpoints are mounted (/OIDFed/...). The entity configuration is
+  # served at /OIDFed/.well-known/openid-federation and Caddy rewrites the bare
+  # /.well-known/openid-federation to it.
+  entity_id = "https://satosa.labb.sunet.se"
+
+  # OIDC id_token signing key (RSA -> RS256).
+  signing_key_path = "keys/oidc_signing.key"
+  signing_algorithm = "RS256"
+  signing_key_id = "oidc-key-1"
+
+  [frontend.config.federation]
+  # Federation signing key (EC P-256 -> ES256): signs the entity configuration.
+  signing_key_path = "keys/federation_ec.key"
+  signing_algorithm = "ES256"
+  signing_key_id = "federation-key-1"
+  authority_hints = ["https://realta.labb.sunet.se"]
+  organization_name = "Kushal's tunnelbana OP"
+  organization_uri = "https://kushaldas.in"
+  entity_configuration_lifetime = 120
+  rp_cache_ttl = 3600
+
+  # Trust anchor: the realta (inmor) TA. Keys pinned from its live entity
+  # configuration JWKS (https://realta.labb.sunet.se/.well-known/openid-federation).
+  [[frontend.config.federation.trust_anchor]]
+  entity_id = "https://realta.labb.sunet.se"
+  keys = [
+    { kty = "RSA", alg = "RS256", use = "sig", kid = "NbZ2P_LHOpbtEoWQ3ukPR_pnii3Yi8hE7j4ghZaGLOI", e = "AQAB", n = "tZvpP09nS3RHnpP2ussXP2Q7ACdyt2720IUjcFJglq2FIjCgwzwKwEnV-9Y4EsZqshfbhjBuFn3ZfQ-NYb2wFkLg0SdlDC2F3NzdAGWktMR6lRJdv7tesXjVe2iXvtkflxeLPeOdhUCxhCBH2DqfkgKYBOkEUl-p36pJsYlnSfvvC9g_9J5htrLlNFHn1vH8eVweOO-e8HPqJstGzzkO-ZkcnTXLA0wSyE-P3_jAmRPEm_DsveWktMwZ5jHiEwo_rqCiSqA3qqa2vRRN6_QEh9gRNtp4WEkXLK5q0_VW8A_F9Z7z4Pv1JS1ZZxe6OyYA7l6CJynnZ1lrP1QilQZZYw" },
+    { kty = "RSA", alg = "RS256", use = "sig", kid = "jx4OZapVWSZAbLJGt7hFfI-khthAXwgFac7P9HQ3A60", e = "AQAB", n = "ow4cllR_Pbvh35UBhiMP_-xwIMZu5CaIHY9ySXdUr8Qcb5XYVgCcB8dhwexSyuB3_aQbP3nxvSWE8GkcytY-k0WHamHCW044IR0N09rROtXarwp2wmpTu2CLw-42GMkqubPQgC0BfuO62X_usA9w4PSbSXmHiEzm7h_sisgH1MSYVcO5EXaSvCdwiCjb1lSiU82mDFwMkLvQAba0xcwiAZOwAdjDbRUI0R_IXi3MmwjC42_w0gzFMuHV_WUGjAVHcAHHbXShqISHhUBfVzU0FTYZYDf1NYnU6Ndj_3m6OoDWhDfAVr2IN5-V9dIhRER4Jxkkt1NAhFdZED2Pd5IuYw" },
+  ]
+
+# ── Backend: SAML2 SP (upstream IdP samlidp.labb.sunet.se) ───────────────────
+[[backend]]
+type = "saml2"
+name = "Saml2"
+  [backend.config]
+  # SP entity id defaults to <base_url>/Saml2; key/cert reused from the SATOSA OP.
+  sp_key_path = "keys/saml_backend.key"
+  sp_cert_path = "keys/saml_backend.crt"
+  idp_entity_id = "https://samlidp.labb.sunet.se/metadata"
+  idp_sso_url = "https://samlidp.labb.sunet.se/sso"
+  idp_cert_path = "keys/idp.crt"
+  sign_authn_requests = true
+  # ACS served at <base_url>/Saml2/acs (HTTP-POST); SP metadata at /Saml2/metadata.

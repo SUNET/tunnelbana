@@ -1,0 +1,15 @@
+services:
+  tunnelbana-idp:
+    build: .
+    # Reuses the port the SATOSA OP used; Caddy (satosa.labb.sunet.se) -> :8088.
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./config:/app/config
+      - ./keys:/app/keys
+      # Prebuilt binary: rsync a new one and `docker compose restart` — no rebuild.
+      - ./bin:/app/bin:ro
+    environment:
+      TUNNELBANA_STATE_KEY: "${TUNNELBANA_STATE_KEY}"
+      TUNNELBANA_BIND: "0.0.0.0:8080"
+    restart: unless-stopped

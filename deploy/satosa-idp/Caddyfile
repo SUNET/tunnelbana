@@ -1,0 +1,10 @@
+# Reference copy of the Caddy vhost. The live file is
+# /etc/caddy/conf.d/satosa.caddy on realta.labb.sunet.se.
+#
+# The federation entity_id is the bare host, but tunnelbana mounts the entity
+# configuration under /OIDFed, so rewrite the well-known path to it. All other
+# paths (/OIDFed/*, /Saml2/*) pass through unchanged.
+satosa.labb.sunet.se {
+	rewrite /.well-known/openid-federation /OIDFed/.well-known/openid-federation
+	reverse_proxy localhost:8088
+}
