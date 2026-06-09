@@ -9,7 +9,7 @@ Published at **https://satosa.labb.sunet.se** (entity_id is the bare host).
 
 ```
   Federation RP                tunnelbana OP (this)              SAML IdP
-       │   OpenID Federation 1.1       ┌──────────────┐   SAML2 SP    │
+       │   OpenID Federation 1.0       ┌──────────────┐   SAML2 SP    │
        │   + OIDC ─────────────────────►│ oidc_federation│─────────────►│
        │   (trust-chain discovery,      │ frontend (OP)  │  (samlidp.   │
        │    private_key_jwt)            │ + saml2        │   labb...)   │
@@ -28,12 +28,12 @@ Published at **https://satosa.labb.sunet.se** (entity_id is the bare host).
 | ----- | ----- |
 | Deploy dir | `~/tunnelbana-idp` (rsynced from this dir + vendored source) |
 | Container | `tunnelbana-idp-tunnelbana-idp-1`, host `:8088` → container `:8080` |
-| TLS / vhost | `/etc/caddy/conf.d/satosa.caddy` → `localhost:8088` |
+| TLS / vhost | `/etc/caddy/conf.d/satosa.caddy` → `localhost:8088` (backup: `*.pre-tunnelbana.bak`) |
 | Entity config | `https://satosa.labb.sunet.se/.well-known/openid-federation` (Caddy rewrites to `/OIDFed/.well-known/openid-federation`) |
 | OIDC endpoints | `https://satosa.labb.sunet.se/OIDFed/{authorization,token,userinfo,jwks}` |
 | SP metadata | `https://satosa.labb.sunet.se/Saml2/metadata` (registered with samlidp via PUT `/services/satosa.labb.sunet.se`) |
 
-### Keys (reused from the old SATOSA OP, in `keys/`)
+### Keys (in `keys/`)
 
 * `federation_ec.key` — EC P-256, signs the entity configuration (`kid federation-key-1`).
   **This is the key the realta TA pins** in its subordinate statement for
@@ -69,3 +69,4 @@ ssh debian@realta.labb.sunet.se 'cd ~/tunnelbana-idp && docker compose up -d --b
 * `GET /OIDFed/authorization` for federation RPs `satosarp` and `realrp`:
   auto-registers the RP via the TA, then **302 → `samlidp.labb.sunet.se/sso`**
   with a signed SAMLRequest.
+

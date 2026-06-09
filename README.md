@@ -55,7 +55,7 @@ purely by config + which plugins are loaded:
 - **Keys** may be PEM/DER files **or** inline/file JWK(s); everything is
   normalized to a `jose_rs::Jwk` internally.
 
-## What works today
+## What works today (not fully tested)
 
 All four matrix cells are configurable (SAML↔SAML, SAML↔OIDC, OIDC↔SAML,
 OIDC↔OIDC) plus the OpenID Federation OP — by config + plugin selection, no core
@@ -80,6 +80,20 @@ changes.
 - **Micro-services**: `static_attributes`, `filter_attributes` (response path),
   `custom_routing` (request path, backend selection by requester).
 - The full proxy flow (route → state → dispatch → micro-services → state).
+
+This project is being developed heavily. So, it will a few months to be tested
+properly for all the paths.
+
+
+
+Highlights: `tunnelbana-oidc/tests/op_flow.rs` (code+PKCE flow, id_token verify,
+userinfo, `private_key_jwt` with audience checks);
+`tunnelbana-plugins/tests/proxy_oidc_op.rs` (whole-proxy OIDC flow);
+`federation_flow.rs` (entity config + auto-registration via a mocked trust
+anchor + `private_key_jwt`); and `saml_roundtrip.rs` (our IdP signs an assertion
+with real RSA keys, our SP verifies + validates it, and a tampered Response is
+rejected).
+
 
 ### Test coverage
 
