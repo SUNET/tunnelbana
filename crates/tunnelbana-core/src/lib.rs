@@ -14,6 +14,7 @@ pub mod error;
 pub mod http;
 pub mod internal;
 pub mod keys;
+pub mod mac;
 pub mod plugin;
 pub mod proxy;
 pub mod router;

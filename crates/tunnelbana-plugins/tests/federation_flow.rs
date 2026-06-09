@@ -56,11 +56,13 @@ impl HttpClient for MockFederation {
         } else if url.starts_with(&format!("{TA_ID}/resolve")) {
             // Resolve response for the RP, signed by the TA, carrying the RP's
             // relying-party metadata (redirect_uris + public jwks).
-            let mut claims = jose_rs::jwt::Claims::default();
-            claims.iss = Some(TA_ID.to_string());
-            claims.sub = Some(RP_ID.to_string());
-            claims.iat = Some(tunnelbana_core::util::now_secs());
-            claims.exp = Some(tunnelbana_core::util::now_secs() + 3600);
+            let mut claims = jose_rs::jwt::Claims {
+                iss: Some(TA_ID.to_string()),
+                sub: Some(RP_ID.to_string()),
+                iat: Some(tunnelbana_core::util::now_secs()),
+                exp: Some(tunnelbana_core::util::now_secs() + 3600),
+                ..Default::default()
+            };
             claims.extra.insert(
                 "metadata".into(),
                 serde_json::json!({

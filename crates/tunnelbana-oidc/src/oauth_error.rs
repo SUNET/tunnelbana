@@ -17,6 +17,8 @@ pub enum OAuthErrorCode {
     LoginRequired,
     ServerError,
     TemporarilyUnavailable,
+    /// RFC 9449 §5.2 / §7.1 — a presented DPoP proof was malformed or invalid.
+    InvalidDpopProof,
 }
 
 impl OAuthErrorCode {
@@ -33,6 +35,7 @@ impl OAuthErrorCode {
             Self::LoginRequired => "login_required",
             Self::ServerError => "server_error",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::InvalidDpopProof => "invalid_dpop_proof",
         }
     }
 
@@ -95,6 +98,9 @@ impl OAuthError {
     }
     pub fn invalid_grant(msg: impl Into<String>) -> Self {
         Self::new(OAuthErrorCode::InvalidGrant, msg)
+    }
+    pub fn invalid_dpop_proof(msg: impl Into<String>) -> Self {
+        Self::new(OAuthErrorCode::InvalidDpopProof, msg)
     }
 
     /// Render a direct JSON error response (token/userinfo endpoints).

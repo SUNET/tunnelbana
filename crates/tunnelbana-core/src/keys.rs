@@ -204,8 +204,10 @@ mod tests {
         let key = signing_key_from_jwk_json(&jwk.to_json().unwrap(), None, Some("k1")).unwrap();
 
         let header = jose_rs::JoseHeader::jwt_for_alg(key.alg);
-        let mut claims = jose_rs::jwt::Claims::default();
-        claims.iss = Some("issuer".into());
+        let claims = jose_rs::jwt::Claims {
+            iss: Some("issuer".into()),
+            ..Default::default()
+        };
         let token = jose_rs::jwt::encode_with_jwk(&key.jwk, &header, &claims).unwrap();
 
         // Verify with the public JWK.

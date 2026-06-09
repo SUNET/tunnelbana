@@ -202,7 +202,7 @@ mod tests {
         .unwrap();
         let data = filter.process_response(&mut ctx(), data).await.unwrap();
         assert_eq!(data.attr_first("mail"), Some("a@x"));
-        assert!(data.attributes.get("affiliation").is_none());
+        assert!(!data.attributes.contains_key("affiliation"));
     }
 
     #[tokio::test]

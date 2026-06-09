@@ -43,9 +43,13 @@ impl HttpRequestData {
 
     /// Extract a Bearer token from the Authorization header.
     pub fn bearer_token(&self) -> Option<&str> {
-        self.authorization()
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .map(|s| s.trim())
+        let auth = self.authorization()?;
+        let (scheme, token) = auth.split_once(' ')?;
+        if scheme.eq_ignore_ascii_case("Bearer") {
+            Some(token.trim())
+        } else {
+            None
+        }
     }
 }
 

@@ -390,7 +390,7 @@ impl FederationFrontend {
         let token_url = format!("{}/token", self.endpoint_base);
         match self
             .provider
-            .handle_token_request(&form, auth_header.as_deref(), &token_url)
+            .handle_token_request(&form, auth_header.as_deref(), &token_url, None)
             .await
         {
             Ok(resp) => Response::json(&resp)
@@ -407,7 +407,9 @@ impl FederationFrontend {
             return OAuthError::new(OAuthErrorCode::AccessDenied, "missing bearer token")
                 .to_response();
         };
-        match self.provider.userinfo(token).await {
+        // The federation frontend does not offer DPoP, so no proof is presented;
+        // a DPoP-bound token reaching here is rejected by the provider.
+        match self.provider.userinfo(token, None).await {
             Ok(claims) => Response::json(&claims).unwrap_or_else(|e| {
                 OAuthError::new(OAuthErrorCode::ServerError, e.to_string()).to_response()
             }),

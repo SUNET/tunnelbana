@@ -4,7 +4,7 @@
 //! (sealed via [`crate::tokens::TokenCodec`]); id_tokens are signed JWTs. No
 //! server-side session store is consulted at the token or userinfo endpoints.
 
-use crate::client::{Client, ClientStore, AUTH_PRIVATE_KEY_JWT};
+use crate::client::{Client, ClientStore, AUTH_NONE, AUTH_PRIVATE_KEY_JWT};
 use crate::jwt;
 use crate::metadata::ProviderMetadata;
 use crate::oauth_error::{OAuthError, OAuthErrorCode};
@@ -172,23 +172,55 @@ impl Provider {
     /// Handle a token request. `auth_header` is the raw Authorization header
     /// value; `token_url` is this endpoint's absolute URL (for `private_key_jwt`
     /// audience checking).
+    ///
+    /// `dpop` is an already-validated DPoP proof (RFC 9449) for this request, if
+    /// the client presented one — validate it in the web layer with
+    /// [`crate::dpop::validate_proof`] and thread the result here. When present
+    /// the issued access token is sender-constrained (`token_type: DPoP`,
+    /// `cnf.jkt` bound to the proof key).
     pub async fn handle_token_request(
         &self,
         form: &BTreeMap<String, String>,
         auth_header: Option<&str>,
         token_url: &str,
+        dpop: Option<&crate::dpop::DpopProof>,
     ) -> Result<TokenResponse, OAuthError> {
         let grant_type = form
             .get("grant_type")
             .map(|s| s.as_str())
             .ok_or_else(|| OAuthError::invalid_request("missing grant_type"))?;
-        if grant_type != "authorization_code" {
-            return Err(OAuthError::new(
+        match grant_type {
+            "authorization_code" => {
+                self.handle_authorization_code(form, auth_header, token_url, dpop)
+                    .await
+            }
+            "client_credentials" => {
+                self.handle_client_credentials(form, auth_header, token_url, dpop)
+                    .await
+            }
+            other => Err(OAuthError::new(
                 OAuthErrorCode::UnsupportedGrantType,
-                format!("unsupported grant_type: {grant_type}"),
-            ));
+                format!("unsupported grant_type: {other}"),
+            )),
         }
+    }
 
+    /// "DPoP" when the request was DPoP-bound, else "Bearer".
+    fn token_type(dpop: Option<&crate::dpop::DpopProof>) -> &'static str {
+        if dpop.is_some() {
+            "DPoP"
+        } else {
+            "Bearer"
+        }
+    }
+
+    async fn handle_authorization_code(
+        &self,
+        form: &BTreeMap<String, String>,
+        auth_header: Option<&str>,
+        token_url: &str,
+        dpop: Option<&crate::dpop::DpopProof>,
+    ) -> Result<TokenResponse, OAuthError> {
         let client = self.authenticate_client(form, auth_header, token_url).await?;
 
         let code = form
@@ -228,6 +260,7 @@ impl Provider {
             scope: payload.scope.clone(),
             claims: payload.claims.clone(),
             exp: now_secs() + self.lifetimes.access_token_ttl,
+            cnf_jkt: dpop.map(|d| d.jkt.clone()),
         };
         let access_token = self
             .codec
@@ -246,21 +279,128 @@ impl Provider {
 
         Ok(TokenResponse {
             access_token,
-            token_type: "Bearer".to_string(),
+            token_type: Self::token_type(dpop).to_string(),
             expires_in: self.lifetimes.access_token_ttl,
             id_token: Some(id_token),
             scope: Some(payload.scope),
         })
     }
 
+    /// The `client_credentials` grant (RFC 6749 §4.4): service-to-service
+    /// tokens. Authenticates the client, requires the grant to be allowed for
+    /// it, intersects requested ∩ allowed scopes, and mints a sealed access
+    /// token (no id_token — there is no end user). DPoP binding applies.
+    async fn handle_client_credentials(
+        &self,
+        form: &BTreeMap<String, String>,
+        auth_header: Option<&str>,
+        token_url: &str,
+        dpop: Option<&crate::dpop::DpopProof>,
+    ) -> Result<TokenResponse, OAuthError> {
+        let client = self.authenticate_client(form, auth_header, token_url).await?;
+
+        // RFC 6749 §4.4: client_credentials is for confidential clients only. A
+        // public ("none"-auth) client proves no possession of a secret, so issuing
+        // it a token would let anyone who knows the client_id mint tokens. Refuse
+        // it regardless of the registered grant list.
+        if client.token_endpoint_auth_method == AUTH_NONE {
+            return Err(OAuthError::invalid_client(
+                "client_credentials requires confidential client authentication",
+            ));
+        }
+
+        if !client
+            .grant_types
+            .iter()
+            .any(|g| g == "client_credentials")
+        {
+            return Err(OAuthError::invalid_grant(
+                "client_credentials grant not allowed for client",
+            ));
+        }
+
+        // Intersect requested scopes with the client's allowed scopes. With no
+        // `scope` parameter, grant the client's full registered scope set.
+        let allowed: Vec<String> = client
+            .scope
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let granted: Vec<String> = match form.get("scope") {
+            Some(requested) => requested
+                .split_whitespace()
+                .filter(|s| allowed.iter().any(|a| a == s))
+                .map(str::to_string)
+                .collect(),
+            None => allowed.clone(),
+        };
+        if granted.is_empty() {
+            return Err(OAuthError::new(
+                OAuthErrorCode::InvalidScope,
+                "no valid scopes requested",
+            ));
+        }
+        let scope = granted.join(" ");
+
+        // Subject is the client itself for client_credentials.
+        let access_payload = AccessTokenPayload {
+            client_id: client.client_id.clone(),
+            sub: client.client_id.clone(),
+            scope: scope.clone(),
+            claims: BTreeMap::new(),
+            exp: now_secs() + self.lifetimes.access_token_ttl,
+            cnf_jkt: dpop.map(|d| d.jkt.clone()),
+        };
+        let access_token = self
+            .codec
+            .seal_access_token(&access_payload)
+            .map_err(|e| OAuthError::new(OAuthErrorCode::ServerError, e.to_string()))?;
+
+        Ok(TokenResponse {
+            access_token,
+            token_type: Self::token_type(dpop).to_string(),
+            expires_in: self.lifetimes.access_token_ttl,
+            id_token: None,
+            scope: Some(scope),
+        })
+    }
+
     // ── UserInfo endpoint ───────────────────────────────────────────────
 
-    /// Return the userinfo claims for a presented Bearer access token.
-    pub async fn userinfo(&self, access_token: &str) -> Result<serde_json::Value, OAuthError> {
+    /// Return the userinfo claims for a presented access token.
+    ///
+    /// `presented_jkt` is the JWK thumbprint of a DPoP proof the caller validated
+    /// for this request (or `None` for a plain Bearer presentation). When the
+    /// access token is DPoP-bound (`cnf.jkt` sealed in), the binding is enforced
+    /// here per RFC 9449 §7.1: the proof key must match, and a bound token
+    /// presented without a proof (i.e. as plain Bearer) is rejected.
+    pub async fn userinfo(
+        &self,
+        access_token: &str,
+        presented_jkt: Option<&str>,
+    ) -> Result<serde_json::Value, OAuthError> {
         let payload = self
             .codec
             .open_access_token(access_token)
             .map_err(|_| OAuthError::new(OAuthErrorCode::AccessDenied, "invalid access token"))?;
+
+        if let Some(bound_jkt) = payload.cnf_jkt.as_deref() {
+            match presented_jkt {
+                Some(jkt) if jkt == bound_jkt => {}
+                Some(_) => {
+                    return Err(OAuthError::invalid_dpop_proof(
+                        "DPoP proof key does not match the access token's cnf.jkt",
+                    ));
+                }
+                None => {
+                    return Err(OAuthError::invalid_dpop_proof(
+                        "access token is DPoP-bound; a matching DPoP proof is required",
+                    ));
+                }
+            }
+        }
 
         let mut map = serde_json::Map::new();
         map.insert("sub".to_string(), serde_json::Value::String(payload.sub));

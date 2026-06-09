@@ -19,6 +19,7 @@
 #![allow(clippy::large_enum_variant)]
 
 pub mod client;
+pub mod dpop;
 pub mod federation;
 pub mod jwt;
 pub mod metadata;
@@ -30,6 +31,7 @@ pub mod rp;
 pub mod tokens;
 
 pub use client::{Client, ClientStore, InMemoryClientStore};
+pub use dpop::{DpopConfig, DpopError, DpopProof, NoReplayStore, ReplayStore};
 pub use metadata::ProviderMetadata;
 pub use oauth_error::{OAuthError, OAuthErrorCode};
 pub use provider::{Provider, TokenLifetimes, TokenResponse};

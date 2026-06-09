@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tunnelbana_core::keys::{signing_key_from_jwk_json, SigningKey};
 use tunnelbana_oidc::client::{
-    Client, InMemoryClientStore, AUTH_NONE, AUTH_PRIVATE_KEY_JWT,
+    Client, InMemoryClientStore, AUTH_CLIENT_SECRET_POST, AUTH_NONE, AUTH_PRIVATE_KEY_JWT,
 };
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::pkce;
@@ -119,6 +119,7 @@ async fn authorization_code_pkce_flow() {
             ]),
             None,
             "https://op.example.com/token",
+            None,
         )
         .await
         .expect("token exchange");
@@ -147,7 +148,7 @@ async fn authorization_code_pkce_flow() {
     );
 
     // UserInfo with the access token.
-    let userinfo = op.userinfo(&token_resp.access_token).await.unwrap();
+    let userinfo = op.userinfo(&token_resp.access_token, None).await.unwrap();
     assert_eq!(userinfo["sub"], "subject-123");
     assert_eq!(userinfo["email"], "anna@example.com");
 }
@@ -195,6 +196,7 @@ async fn pkce_mismatch_rejected() {
             ]),
             None,
             "https://op.example.com/token",
+            None,
         )
         .await;
     assert!(err.is_err(), "wrong PKCE verifier must be rejected");
@@ -250,6 +252,7 @@ async fn private_key_jwt_client_auth() {
             ]),
             None,
             token_url,
+            None,
         )
         .await
         .expect("private_key_jwt token exchange");
@@ -273,4 +276,199 @@ async fn private_key_jwt_client_auth() {
         )
         .await;
     assert!(err.is_err(), "wrong audience must be rejected");
+}
+
+/// A confidential client using `client_secret_post` to obtain a token via the
+/// `client_credentials` grant; scopes are intersected with the client's set and
+/// no id_token is issued.
+#[tokio::test]
+async fn client_credentials_flow() {
+    let client = Client {
+        client_id: "svc-1".into(),
+        client_secret: Some("svc-secret".into()),
+        redirect_uris: vec![],
+        response_types: vec![],
+        grant_types: vec!["client_credentials".into()],
+        token_endpoint_auth_method: AUTH_CLIENT_SECRET_POST.into(),
+        jwks: None,
+        scope: Some("read write admin".into()),
+        subject_type: "public".into(),
+        client_name: None,
+    };
+    let store = InMemoryClientStore::with_clients(vec![client]);
+    let op = provider_with(store);
+
+    // Request a subset of the allowed scopes (the disallowed "delete" is dropped).
+    let resp = op
+        .handle_token_request(
+            &map(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "svc-1"),
+                ("client_secret", "svc-secret"),
+                ("scope", "read delete admin"),
+            ]),
+            None,
+            "https://op.example.com/token",
+            None,
+        )
+        .await
+        .expect("client_credentials token");
+
+    assert_eq!(resp.token_type, "Bearer");
+    assert!(resp.id_token.is_none(), "no id_token for client_credentials");
+    assert_eq!(resp.scope.as_deref(), Some("read admin"));
+
+    // The sealed access token carries client_id as subject and the granted scope.
+    let opened = op.codec.open_access_token(&resp.access_token).unwrap();
+    assert_eq!(opened.sub, "svc-1");
+    assert_eq!(opened.client_id, "svc-1");
+    assert_eq!(opened.scope, "read admin");
+    assert!(opened.cnf_jkt.is_none(), "no DPoP binding without a proof");
+}
+
+/// A client not registered for the grant is refused.
+#[tokio::test]
+async fn client_credentials_disallowed_grant_rejected() {
+    let client = Client {
+        client_id: "svc-2".into(),
+        client_secret: Some("s".into()),
+        redirect_uris: vec![],
+        response_types: vec![],
+        grant_types: vec!["authorization_code".into()],
+        token_endpoint_auth_method: AUTH_CLIENT_SECRET_POST.into(),
+        jwks: None,
+        scope: Some("read".into()),
+        subject_type: "public".into(),
+        client_name: None,
+    };
+    let store = InMemoryClientStore::with_clients(vec![client]);
+    let op = provider_with(store);
+
+    let err = op
+        .handle_token_request(
+            &map(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "svc-2"),
+                ("client_secret", "s"),
+            ]),
+            None,
+            "https://op.example.com/token",
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, tunnelbana_oidc::OAuthErrorCode::InvalidGrant);
+}
+
+/// Requesting only scopes the client is not allowed yields invalid_scope.
+#[tokio::test]
+async fn client_credentials_empty_scope_intersection_rejected() {
+    let client = Client {
+        client_id: "svc-3".into(),
+        client_secret: Some("s".into()),
+        redirect_uris: vec![],
+        response_types: vec![],
+        grant_types: vec!["client_credentials".into()],
+        token_endpoint_auth_method: AUTH_CLIENT_SECRET_POST.into(),
+        jwks: None,
+        scope: Some("read".into()),
+        subject_type: "public".into(),
+        client_name: None,
+    };
+    let store = InMemoryClientStore::with_clients(vec![client]);
+    let op = provider_with(store);
+
+    let err = op
+        .handle_token_request(
+            &map(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "svc-3"),
+                ("client_secret", "s"),
+                ("scope", "write"),
+            ]),
+            None,
+            "https://op.example.com/token",
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, tunnelbana_oidc::OAuthErrorCode::InvalidScope);
+}
+
+/// A public ("none"-auth) client must not be issued a client_credentials token
+/// even if its registered grant list includes the grant — there is no secret to
+/// prove, so anyone knowing the client_id could otherwise mint tokens.
+#[tokio::test]
+async fn client_credentials_public_client_rejected() {
+    let client = Client {
+        client_id: "pub-svc".into(),
+        client_secret: None,
+        redirect_uris: vec![],
+        response_types: vec![],
+        grant_types: vec!["client_credentials".into()],
+        token_endpoint_auth_method: AUTH_NONE.into(),
+        jwks: None,
+        scope: Some("read".into()),
+        subject_type: "public".into(),
+        client_name: None,
+    };
+    let store = InMemoryClientStore::with_clients(vec![client]);
+    let op = provider_with(store);
+
+    let err = op
+        .handle_token_request(
+            &map(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "pub-svc"),
+            ]),
+            None,
+            "https://op.example.com/token",
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, tunnelbana_oidc::OAuthErrorCode::InvalidClient);
+}
+
+/// A DPoP-bound token request sets token_type=DPoP and seals cnf.jkt into the
+/// access token so userinfo/introspection can read it back.
+#[tokio::test]
+async fn client_credentials_dpop_bound() {
+    use tunnelbana_oidc::dpop::DpopProof;
+
+    let client = Client {
+        client_id: "svc-4".into(),
+        client_secret: Some("s".into()),
+        redirect_uris: vec![],
+        response_types: vec![],
+        grant_types: vec!["client_credentials".into()],
+        token_endpoint_auth_method: AUTH_CLIENT_SECRET_POST.into(),
+        jwks: None,
+        scope: Some("read".into()),
+        subject_type: "public".into(),
+        client_name: None,
+    };
+    let store = InMemoryClientStore::with_clients(vec![client]);
+    let op = provider_with(store);
+
+    let proof = DpopProof {
+        jkt: "the-proof-key-thumbprint".into(),
+    };
+    let resp = op
+        .handle_token_request(
+            &map(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "svc-4"),
+                ("client_secret", "s"),
+            ]),
+            None,
+            "https://op.example.com/token",
+            Some(&proof),
+        )
+        .await
+        .expect("dpop token");
+
+    assert_eq!(resp.token_type, "DPoP");
+    let opened = op.codec.open_access_token(&resp.access_token).unwrap();
+    assert_eq!(opened.cnf_jkt.as_deref(), Some("the-proof-key-thumbprint"));
 }

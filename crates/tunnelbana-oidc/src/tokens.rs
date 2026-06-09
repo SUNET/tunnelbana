@@ -62,6 +62,11 @@ pub struct AccessTokenPayload {
     #[serde(default)]
     pub claims: BTreeMap<String, serde_json::Value>,
     pub exp: u64,
+    /// DPoP confirmation thumbprint (RFC 9449 `cnf.jkt`). Present when the token
+    /// is sender-constrained; sealed into the token so userinfo/introspection
+    /// can read it back without a server lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf_jkt: Option<String>,
 }
 
 /// Seals/opens authorization codes and access tokens.
@@ -193,6 +198,7 @@ mod tests {
             scope: "openid".into(),
             claims: BTreeMap::new(),
             exp: now_secs() + 60,
+            cnf_jkt: None,
         };
         let token = codec.seal_access_token(&payload).unwrap();
         assert!(other.open_access_token(&token).is_err());
@@ -208,6 +214,7 @@ mod tests {
             scope: "openid".into(),
             claims: BTreeMap::new(),
             exp: now_secs() + 60,
+            cnf_jkt: None,
         };
         let token = old.seal_access_token(&payload).unwrap();
 

@@ -38,6 +38,11 @@ pub struct ProviderMetadata {
     #[serde(default)]
     pub request_parameter_supported: bool,
 
+    /// DPoP signing algorithms supported (RFC 9449 §5.1). Empty by default —
+    /// only advertised when a deployment enables DPoP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dpop_signing_alg_values_supported: Vec<String>,
+
     /// Federation / vendor extensions (e.g. `client_registration_types_supported`).
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -62,7 +67,7 @@ impl ProviderMetadata {
             ],
             response_types_supported: vec!["code".into()],
             response_modes_supported: vec!["query".into(), "fragment".into()],
-            grant_types_supported: vec!["authorization_code".into()],
+            grant_types_supported: vec!["authorization_code".into(), "client_credentials".into()],
             subject_types_supported: vec!["public".into(), "pairwise".into()],
             id_token_signing_alg_values_supported: vec!["RS256".into(), "ES256".into()],
             token_endpoint_auth_methods_supported: vec![
@@ -74,6 +79,9 @@ impl ProviderMetadata {
             code_challenge_methods_supported: vec!["S256".into()],
             claims_parameter_supported: true,
             request_parameter_supported: true,
+            // Off by default; a deployment enabling DPoP sets this to e.g.
+            // ["ES256"] (and may add "client_credentials" to grant_types_supported).
+            dpop_signing_alg_values_supported: Vec::new(),
             issuer,
             extra: serde_json::Map::new(),
         }

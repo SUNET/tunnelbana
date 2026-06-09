@@ -121,12 +121,14 @@ async fn saml_idp_signs_and_sp_verifies() {
     assert!(matches!(action, FrontendAction::StartAuth { .. }));
 
     // 2) Backend "authenticated" the user — IdP frontend renders a signed Response.
-    let mut authenticated = InternalData::default();
-    authenticated.subject_id = Some("anna-persistent-id".to_string());
-    authenticated.auth_info = AuthenticationInformation {
-        auth_class_ref: Some("urn:oasis:names:tc:SAML:2.0:ac:classes:Password".into()),
-        timestamp: None,
-        issuer: Some("urn:upstream".into()),
+    let mut authenticated = InternalData {
+        subject_id: Some("anna-persistent-id".to_string()),
+        auth_info: AuthenticationInformation {
+            auth_class_ref: Some("urn:oasis:names:tc:SAML:2.0:ac:classes:Password".into()),
+            timestamp: None,
+            issuer: Some("urn:upstream".into()),
+        },
+        ..Default::default()
     };
     authenticated
         .attributes
@@ -186,8 +188,10 @@ async fn saml_backend_rejects_tampered_response() {
     );
     idp.handle_endpoint(&mut idp_ctx, "sso").await.unwrap();
 
-    let mut authenticated = InternalData::default();
-    authenticated.subject_id = Some("anna".into());
+    let mut authenticated = InternalData {
+        subject_id: Some("anna".into()),
+        ..Default::default()
+    };
     authenticated
         .attributes
         .insert("mail".into(), vec!["anna@example.com".into()]);
