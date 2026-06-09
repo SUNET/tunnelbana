@@ -1,0 +1,24 @@
+# Attribute map: internal name -> per-protocol external names.
+# Mirrors SATOSA's internal_attributes.yaml.
+
+user_id_from_attrs = ["edupersonprincipalname"]
+
+[attributes.mail]
+openid = ["email"]
+saml = ["email", "emailAddress", "mail"]
+
+[attributes.givenname]
+openid = ["given_name"]
+saml = ["givenName"]
+
+[attributes.surname]
+openid = ["family_name"]
+saml = ["sn", "surname"]
+
+[attributes.name]
+openid = ["name"]
+saml = ["cn", "displayName"]
+
+[attributes.edupersonprincipalname]
+openid = ["sub"]
+saml = ["eduPersonPrincipalName"]

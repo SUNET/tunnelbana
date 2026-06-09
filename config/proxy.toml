@@ -1,0 +1,152 @@
+# Example tunnelbana configuration.
+#
+# This example wires an OpenID Connect OP frontend (faces downstream RPs) to an
+# OpenID Connect RP backend (faces an upstream OP) — the OIDC -> OIDC cell of the
+# any-frontend x any-backend matrix. Swap the [[backend]] for `saml2` (once the
+# SAML backend lands) or the [[frontend]] for `oidc_federation` without touching
+# any other section.
+
+base_url = "https://proxy.example.com"
+
+# Secret used to derive the state-cookie AEAD key (via HKDF-SHA256) and the OIDC
+# token-codec key. Must be at least 32 bytes of high-entropy material.
+# Prefer an environment variable in production: state_encryption_key = "${TUNNELBANA_STATE_KEY}"
+state_encryption_key = "change-me-to-a-long-random-secret"
+
+# Optional: previous secrets retained for decryption only, to allow zero-downtime
+# key rotation. Move the old key here when you change state_encryption_key, then
+# drop it once all in-flight cookies have expired (see state_cookie_max_age).
+# previous_state_encryption_keys = ["${TUNNELBANA_STATE_KEY_OLD}"]
+
+cookie_name = "TUNNELBANA_STATE"
+# When cookie_secure is true the cookie is emitted with the __Host- prefix.
+# Set false only for local http testing.
+cookie_secure = true
+# SameSite attribute: "None" (cross-site SSO POST-back), "Lax", or "Strict".
+cookie_same_site = "None"
+# Maximum lifetime of the sealed state cookie, in seconds (default 1800 = 30 min).
+# Enforced both as the cookie Max-Age and as a server-side freshness check.
+state_cookie_max_age = 1800
+
+attributes = "config/attributes.toml"
+
+[logging]
+level = "info"      # tracing EnvFilter directive, e.g. "info,tunnelbana=debug"
+format = "pretty"   # "pretty" or "json"
+
+# ── Frontend: OpenID Provider ───────────────────────────────────────────────
+[[frontend]]
+type = "oidc"
+name = "OIDC"
+  [frontend.config]
+  # Provide the id_token signing key as a PEM file...
+  signing_key_path = "keys/op.key"
+  # ...or inline as a JWK:
+  # signing_jwk = { kty = "EC", crv = "P-256", d = "...", x = "...", y = "..." }
+  signing_algorithm = "ES256"
+  signing_key_id = "op-key-1"
+
+  # Optional: DPoP (RFC 9449) sender-constrained tokens. Disabled by default.
+  # When enabled, a `DPoP` proof header on the token request binds the issued
+  # access token to the proof key (token_type "DPoP", cnf.jkt). Replay of a
+  # proof's jti is rejected within proof_max_age_secs (single-process TTL cache).
+  # The nonce HMAC key is derived from state_encryption_key — not configured here.
+  # [frontend.config.dpop]
+  # enabled = true
+  # proof_max_age_secs = 300   # max age of a proof's iat, and the jti replay window
+  # require_nonce = false      # require a DPoP-Nonce (RFC 9449 §8); challenge if absent
+  # nonce_lifetime_secs = 300  # lifetime of an issued DPoP-Nonce
+
+  # Statically registered RP.
+  [[frontend.config.clients]]
+  client_id = "demo-rp"
+  client_secret = "demo-rp-secret"
+  redirect_uris = ["https://rp.example.com/callback"]
+  response_types = ["code"]
+  token_endpoint_auth_method = "client_secret_basic"
+  # Add "client_credentials" to grant_types for the service-to-service grant
+  # (RFC 6749 §4.4); `scope` lists the space-delimited scopes it may request.
+  # grant_types = ["authorization_code", "client_credentials"]
+  # scope = "read write"
+
+# To run a federation OP instead, replace the block above with:
+#
+# [[frontend]]
+# type = "oidc_federation"
+# name = "OIDFed"
+#   [frontend.config]
+#   signing_key_path = "keys/op.key"
+#   signing_algorithm = "ES256"
+#   [frontend.config.federation]
+#   signing_key_path = "keys/federation.key"
+#   signing_algorithm = "ES256"
+#   signing_key_id = "fed-key-1"
+#   authority_hints = ["https://ta.example.com"]
+#   organization_name = "Example OP"
+#   [[frontend.config.federation.trust_anchor]]
+#   entity_id = "https://ta.example.com"
+#   keys = [ { kty = "EC", crv = "P-256", x = "...", y = "...", kid = "ta-1" } ]
+
+# ── Backend: OpenID Connect RP (upstream OP) ────────────────────────────────
+[[backend]]
+type = "oidc"
+name = "Upstream"
+  [backend.config]
+  issuer = "https://accounts.upstream.example"   # discovery via .well-known
+  client_id = "tunnelbana-rp"
+  client_secret = "upstream-rp-secret"
+  token_endpoint_auth_method = "client_secret_basic"
+  scope = "openid profile email"
+
+# The SUNET vertical (SAML IdP -> OIDC-Federation OP) is a config-only swap:
+# use the `oidc_federation` frontend above and a `saml2` backend here.
+#
+# (a) Static single IdP — the IdP's endpoint and signing cert are pinned here:
+#
+# [[backend]]
+# type = "saml2"
+# name = "Saml2"
+#   [backend.config]
+#   sp_key_path = "keys/sp.key"        # SP private key (PEM)
+#   sp_cert_path = "keys/sp.crt"       # published in SP metadata
+#   idp_entity_id = "https://idp.sunet.se/idp"
+#   idp_sso_url = "https://idp.sunet.se/idp/profile/SAML2/Redirect/SSO"
+#   idp_cert_path = "keys/idp.crt"     # IdP signing cert (verifies the Response)
+#   sign_authn_requests = false
+#   # ACS is served at <base_url>/Saml2/acs ; metadata at <base_url>/Saml2/metadata
+#
+# (b) Dynamic IdP metadata via MDQ (SAML Metadata Query Protocol) ─────────────
+# For a federation (eduGAIN / SWAMID / pyFF / thiss.io) you don't pin one IdP.
+# Instead point the backend at an MDQ server and it resolves each IdP's metadata
+# on demand by entityID, backed by the `gamlastan-mdq` client. The IdP's SSO URL
+# and signing cert then come from the fetched, signature-verified
+# EntityDescriptor, so you DROP idp_sso_url and idp_cert_path.
+#
+# The target IdP for a flow is chosen per request: an `entityID` parameter on the
+# authorization request (e.g. handed back by a discovery service such as
+# SeamlessAccess / thiss.io) selects it; otherwise idp_entity_id is the default.
+# The chosen IdP is persisted in flow state so the ACS verifies the Response
+# against that same IdP's metadata signing cert.
+#
+# [[backend]]
+# type = "saml2"
+# name = "Saml2"
+#   [backend.config]
+#   idp_entity_id = "https://idp.example.org/idp" # default/fallback IdP when no entityID arrives on the auth request
+#   sp_key_path = "keys/sp.key"
+#   sp_cert_path = "keys/sp.crt"
+#   sign_authn_requests = false
+#     [backend.config.mdq]
+#     url = "https://mdq.eduid.se/"             # MDQ server base URL (keep the trailing slash)
+#     signing_cert_path = "keys/mdq-signer.crt" # cert that verifies the signed entity statements
+#     transform = "sha1"                        # entityID→path: "url_encoded" (default) or "sha1" ({sha1}<hex>)
+#     require_role = "idp"                       # fetched metadata must carry an IDPSSODescriptor
+#     fallback_ttl_secs = 3600                   # cache TTL when metadata omits validUntil / cacheDuration
+#     # allow_unverified = true                  # DANGER: skip metadata signature checks — testing only
+
+# ── Optional micro-services (run in listed order) ───────────────────────────
+# [[microservice]]
+# type = "filter_attributes"
+# name = "filter"
+#   [microservice.config]
+#   allowed = ["mail", "givenname", "surname", "edupersonprincipalname"]
