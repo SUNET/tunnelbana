@@ -86,15 +86,6 @@ changes.
 ```
 cargo test            # workspace test suite, clippy clean
 ```
-
-Highlights: `tunnelbana-oidc/tests/op_flow.rs` (code+PKCE flow, id_token verify,
-userinfo, `private_key_jwt` with audience checks);
-`tunnelbana-plugins/tests/proxy_oidc_op.rs` (whole-proxy OIDC flow);
-`federation_flow.rs` (entity config + auto-registration via a mocked trust
-anchor + `private_key_jwt`); and `saml_roundtrip.rs` (our IdP signs an assertion
-with real RSA keys, our SP verifies + validates it, and a tampered Response is
-rejected).
-
 ## Running
 
 ```bash
