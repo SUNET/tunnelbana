@@ -67,9 +67,9 @@ impl OidcBackend {
 
         let auth = match cfg.token_endpoint_auth_method.as_deref() {
             Some("none") => ClientAuth::None,
-            Some("client_secret_post") => ClientAuth::ClientSecretPost(
-                cfg.client_secret.clone().unwrap_or_default(),
-            ),
+            Some("client_secret_post") => {
+                ClientAuth::ClientSecretPost(cfg.client_secret.clone().unwrap_or_default())
+            }
             Some("private_key_jwt") => {
                 let key = load_signing_key(
                     cfg.signing_jwk.as_ref(),
@@ -113,22 +113,16 @@ impl OidcBackend {
             &self.config.token_endpoint,
         ) {
             return Ok(ProviderInfo {
-                issuer: self
-                    .config
-                    .issuer
-                    .clone()
-                    .unwrap_or_else(|| a.clone()),
+                issuer: self.config.issuer.clone().unwrap_or_else(|| a.clone()),
                 authorization_endpoint: a.clone(),
                 token_endpoint: t.clone(),
                 userinfo_endpoint: self.config.userinfo_endpoint.clone(),
                 jwks_uri: self.config.jwks_uri.clone(),
             });
         }
-        let issuer = self
-            .config
-            .issuer
-            .as_ref()
-            .ok_or_else(|| Error::Config("oidc backend needs issuer or explicit endpoints".into()))?;
+        let issuer = self.config.issuer.as_ref().ok_or_else(|| {
+            Error::Config("oidc backend needs issuer or explicit endpoints".into())
+        })?;
         let meta = rp::discover(&self.http, issuer).await?;
         Ok(meta.into())
     }
@@ -201,9 +195,14 @@ impl Backend for OidcBackend {
         let verifier = ctx.state.get_str(&self.name, "code_verifier");
 
         let provider = self.provider_info().await?;
-        let tokens =
-            rp::exchange_code(&self.http, &provider, &self.client, &code, verifier.as_deref())
-                .await?;
+        let tokens = rp::exchange_code(
+            &self.http,
+            &provider,
+            &self.client,
+            &code,
+            verifier.as_deref(),
+        )
+        .await?;
 
         // Verify the id_token.
         let id_token = tokens

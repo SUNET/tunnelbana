@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use jose_rs::jwk::JwkSet;
 use serde::Deserialize;
 use serde_json::Value;
 use tunnelbana_core::attributes::AttributeMapper;
@@ -23,7 +24,6 @@ use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
 use tunnelbana_oidc::provider::{Provider, TokenLifetimes};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::tokens::TokenCodec;
-use jose_rs::jwk::JwkSet;
 
 use crate::keyload::load_signing_key;
 
@@ -254,7 +254,11 @@ impl FederationFrontend {
         let redirect_uris = rp_meta
             .get("redirect_uris")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let jwks: Option<JwkSet> = rp_meta
             .get("jwks")
@@ -435,7 +439,10 @@ impl Frontend for FederationFrontend {
                 "discovery",
             ),
             Route::new(&regex::escape(&self.route("jwks")), "jwks"),
-            Route::new(&regex::escape(&self.route("authorization")), "authorization"),
+            Route::new(
+                &regex::escape(&self.route("authorization")),
+                "authorization",
+            ),
             Route::new(&regex::escape(&self.route("token")), "token"),
             Route::new(&regex::escape(&self.route("userinfo")), "userinfo"),
         ]

@@ -103,10 +103,7 @@ impl AttributeMapper {
 
     /// Compose a subject id from the configured `user_id_from_attrs` (joined
     /// with ':'), reading from internal attributes.
-    pub fn compose_subject_id(
-        &self,
-        internal: &BTreeMap<String, Vec<String>>,
-    ) -> Option<String> {
+    pub fn compose_subject_id(&self, internal: &BTreeMap<String, Vec<String>>) -> Option<String> {
         if self.map.user_id_from_attrs.is_empty() {
             return None;
         }

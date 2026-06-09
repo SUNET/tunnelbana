@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -15,11 +16,13 @@ use gamlastan::core::assertion::attribute::AttributeValue;
 use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
 use gamlastan::crypto::{KeyUsage, KeysManager, SamlSigner, SamlVerifier};
+use gamlastan::metadata::EntityDescriptor;
 use gamlastan::profiles::sso::sp as sp_profile;
 use gamlastan::profiles::sso::web_browser::{self, AuthnRequestOptions};
 use gamlastan::security::config::SecurityConfig;
 use gamlastan::security::validation::{AssertionValidator, ValidationParams};
 use gamlastan::xml::serialize::SamlSerialize;
+use gamlastan_mdq::{MdqClient, MdqTransform, RequiredRole};
 
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
@@ -42,12 +45,21 @@ struct Saml2BackendConfig {
     /// SP certificate (PEM) — published in SP metadata.
     #[serde(default)]
     sp_cert_path: Option<String>,
-    /// Upstream IdP entity id (expected issuer).
+    /// Upstream IdP entity id; the target entity (and expected issuer). In MDQ
+    /// mode this selects which entity's metadata to resolve.
     idp_entity_id: String,
-    /// Upstream IdP SSO endpoint (where AuthnRequests are sent).
-    idp_sso_url: String,
-    /// Upstream IdP signing certificate (PEM) — verifies the Response.
-    idp_cert_path: String,
+    /// Upstream IdP SSO endpoint (where AuthnRequests are sent). Required in
+    /// static mode; in MDQ mode it is resolved from metadata, so leave it unset.
+    #[serde(default)]
+    idp_sso_url: Option<String>,
+    /// Upstream IdP signing certificate (PEM) — verifies the Response. Required
+    /// in static mode; in MDQ mode the signing cert comes from metadata.
+    #[serde(default)]
+    idp_cert_path: Option<String>,
+    /// When present, resolve the IdP's SSO endpoint and signing cert on demand
+    /// from an MDQ server instead of the static `idp_sso_url` / `idp_cert_path`.
+    #[serde(default)]
+    mdq: Option<MdqConfig>,
     #[serde(default)]
     sign_authn_requests: bool,
     #[serde(default)]
@@ -57,14 +69,48 @@ struct Saml2BackendConfig {
     security: Option<String>,
 }
 
+/// `[backend.config.mdq]` — SAML Metadata Query Protocol source for IdP metadata.
+#[derive(Debug, Deserialize)]
+struct MdqConfig {
+    /// MDQ server base URL (a trailing slash is added if missing).
+    url: String,
+    /// PEM cert that signs the MDQ entity statements. Required unless
+    /// `allow_unverified` is set.
+    #[serde(default)]
+    signing_cert_path: Option<String>,
+    /// entityID → request-path transform: `"url_encoded"` (default) or `"sha1"`.
+    #[serde(default)]
+    transform: Option<String>,
+    /// Role the fetched metadata must carry: `"idp"` (default), `"sp"`, `"any"`.
+    #[serde(default)]
+    require_role: Option<String>,
+    /// Cache TTL (seconds) when the document omits `validUntil`/`cacheDuration`.
+    #[serde(default)]
+    fallback_ttl_secs: Option<u64>,
+    /// Accept metadata that cannot be signature-verified (no cert). Insecure;
+    /// testing only.
+    #[serde(default)]
+    allow_unverified: bool,
+}
+
+/// Where the upstream IdP's SSO endpoint and signing cert come from.
+enum IdpMetadata {
+    /// Pinned at build time from `idp_sso_url` + `idp_cert_path`.
+    Static {
+        sso_url: String,
+        verifier: SamlVerifier,
+    },
+    /// Resolved per request from an MDQ server, keyed by `idp_entity_id`.
+    Mdq(MdqClient),
+}
+
 pub struct Saml2Backend {
     name: String,
     sp_entity_id: String,
     acs_url: String,
     idp_entity_id: String,
-    idp_sso_url: String,
+    idp_metadata: IdpMetadata,
     signer: SamlSigner,
-    verifier: SamlVerifier,
     sign_requests: bool,
     name_id_format: Option<String>,
     sp_cert_b64: Option<String>,
@@ -76,13 +122,14 @@ impl Saml2Backend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
         let cfg: Saml2BackendConfig = bx.parse_config()?;
         let module_base = bx.module_base();
-        let sp_entity_id = cfg.sp_entity_id.clone().unwrap_or_else(|| module_base.clone());
+        let sp_entity_id = cfg
+            .sp_entity_id
+            .clone()
+            .unwrap_or_else(|| module_base.clone());
         let acs_url = format!("{module_base}/acs");
 
         let sp_key = std::fs::read(&cfg.sp_key_path)
             .map_err(|e| Error::Config(format!("reading sp_key_path: {e}")))?;
-        let idp_cert = std::fs::read(&cfg.idp_cert_path)
-            .map_err(|e| Error::Config(format!("reading idp_cert_path: {e}")))?;
 
         // Signer keys manager: the SP private key (for signing AuthnRequests).
         let mut sp_signing_key = loader::load_pem_auto(&sp_key, None)
@@ -92,18 +139,28 @@ impl Saml2Backend {
         signer_km.add_key(sp_signing_key);
         let signer = SamlSigner::new(signer_km);
 
-        // Verifier keys manager: the IdP certificate as a verification key
-        // (public key extracted from the X.509) plus the same cert as a trusted
-        // anchor for chain validation.
-        let idp_cert_der = base64::engine::general_purpose::STANDARD
-            .decode(extract_cert_b64(&idp_cert))
-            .map_err(|e| Error::Crypto(format!("decoding idp cert: {e}")))?;
-        let idp_key = loader::load_x509_cert_der(&idp_cert_der)
-            .map_err(|e| Error::Crypto(format!("parsing idp cert: {e}")))?;
-        let mut verifier_km = KeysManager::new();
-        verifier_km.add_key(idp_key);
-        verifier_km.add_trusted_cert(idp_cert_der);
-        let verifier = SamlVerifier::new(verifier_km);
+        // IdP metadata source: MDQ (dynamic, per-entity) when an [mdq] section
+        // is present, else the static idp_sso_url + idp_cert_path pair.
+        let idp_metadata = match &cfg.mdq {
+            Some(mdq_cfg) => IdpMetadata::Mdq(build_mdq_client(mdq_cfg)?),
+            None => {
+                let sso_url = cfg.idp_sso_url.clone().ok_or_else(|| {
+                    Error::Config("saml2 backend requires idp_sso_url (or an [mdq] section)".into())
+                })?;
+                let cert_path = cfg.idp_cert_path.as_ref().ok_or_else(|| {
+                    Error::Config(
+                        "saml2 backend requires idp_cert_path (or an [mdq] section)".into(),
+                    )
+                })?;
+                let idp_cert = std::fs::read(cert_path)
+                    .map_err(|e| Error::Config(format!("reading idp_cert_path: {e}")))?;
+                let idp_cert_der = base64::engine::general_purpose::STANDARD
+                    .decode(extract_cert_b64(&idp_cert))
+                    .map_err(|e| Error::Crypto(format!("decoding idp cert: {e}")))?;
+                let verifier = verifier_from_cert_ders(&[idp_cert_der])?;
+                IdpMetadata::Static { sso_url, verifier }
+            }
+        };
 
         let sp_cert_b64 = match &cfg.sp_cert_path {
             Some(path) => {
@@ -119,9 +176,8 @@ impl Saml2Backend {
             sp_entity_id,
             acs_url,
             idp_entity_id: cfg.idp_entity_id,
-            idp_sso_url: cfg.idp_sso_url,
+            idp_metadata,
             signer,
-            verifier,
             sign_requests: cfg.sign_authn_requests,
             name_id_format: cfg.name_id_format,
             sp_cert_b64,
@@ -136,6 +192,10 @@ impl Saml2Backend {
         } else {
             SecurityConfig::permissive()
         }
+    }
+
+    fn is_dynamic_idp_selection(&self) -> bool {
+        matches!(&self.idp_metadata, IdpMetadata::Mdq(_))
     }
 
     fn build_metadata(&self) -> Result<String> {
@@ -196,7 +256,47 @@ impl Saml2Backend {
             .map_err(|e| Error::Internal(format!("serializing SP metadata: {e}")))
     }
 
-    fn handle_acs(&self, ctx: &mut Context) -> Result<BackendAction> {
+    /// The target IdP for this flow: an `entityID` supplied on the request (e.g.
+    /// a discovery-service return), else the configured default `idp_entity_id`.
+    fn select_target_idp(&self, ctx: &Context) -> String {
+        ctx.request
+            .param("entityID")
+            .map(str::to_string)
+            .unwrap_or_else(|| self.idp_entity_id.clone())
+    }
+
+    /// Dispatch the ACS: resolve the verifier (static cert, or the IdP's signing
+    /// cert fetched from MDQ for the IdP this flow was sent to), then process the
+    /// Response against it.
+    async fn handle_acs(&self, ctx: &mut Context) -> Result<BackendAction> {
+        match &self.idp_metadata {
+            IdpMetadata::Static { verifier, .. } => {
+                self.process_acs(ctx, verifier, &self.idp_entity_id)
+            }
+            IdpMetadata::Mdq(client) => {
+                // Verify against the cert for the IdP we actually sent the request
+                // to (persisted at start_auth) — not the still-unverified issuer
+                // claimed by the Response. Falls back to the configured default.
+                let selected = ctx
+                    .state
+                    .get_str(&self.name, "idp_entity_id")
+                    .unwrap_or_else(|| self.idp_entity_id.clone());
+                let entity = client
+                    .get(&selected)
+                    .await
+                    .map_err(|e| Error::Authn(format!("MDQ lookup for {selected} failed: {e}")))?;
+                let verifier = idp_verifier_from_metadata(&entity)?;
+                self.process_acs(ctx, &verifier, &selected)
+            }
+        }
+    }
+
+    fn process_acs(
+        &self,
+        ctx: &mut Context,
+        verifier: &SamlVerifier,
+        expected_idp_entity_id: &str,
+    ) -> Result<BackendAction> {
         // SAMLResponse arrives via HTTP-POST (form) or HTTP-Redirect (query).
         let saml_response = ctx
             .request
@@ -212,8 +312,7 @@ impl Saml2Backend {
             .map_err(|e| Error::BadRequest(format!("SAMLResponse not UTF-8: {e}")))?;
 
         // 1) Verify the enveloped signature against the IdP certificate.
-        let verify_result = self
-            .verifier
+        let verify_result = verifier
             .verify_enveloped(&xml)
             .map_err(|e| Error::Authn(format!("signature verification failed: {e}")))?;
         if let gamlastan::crypto::VerifyResult::Invalid { reason } = &verify_result {
@@ -264,7 +363,7 @@ impl Saml2Backend {
         };
         let params = ValidationParams {
             received_url: &self.acs_url,
-            expected_idp_entity_id: &self.idp_entity_id,
+            expected_idp_entity_id,
             sp_entity_id: &self.sp_entity_id,
             acs_url: &self.acs_url,
             expected_request_id: expected_id.as_deref(),
@@ -299,12 +398,13 @@ impl Saml2Backend {
             .iter()
             .find(|a| !a.authn_statements.is_empty())
             .ok_or_else(|| Error::Authn("no assertion with an AuthnStatement".into()))?;
-        let name_id = match assertion.subject.as_ref().and_then(|s| s.name_id.as_ref()) {
-            Some(gamlastan::core::assertion::name_id::NameIdOrEncryptedId::NameId(nid)) => {
-                nid.value.clone()
-            }
-            _ => return Err(Error::Authn("missing or unsupported NameID".into())),
-        };
+        let (name_id, name_id_format) =
+            match assertion.subject.as_ref().and_then(|s| s.name_id.as_ref()) {
+                Some(gamlastan::core::assertion::name_id::NameIdOrEncryptedId::NameId(nid)) => {
+                    (nid.value.clone(), nid.format.clone())
+                }
+                _ => return Err(Error::Authn("missing or unsupported NameID".into())),
+            };
         let authn_class_ref = assertion
             .authn_statements
             .first()
@@ -340,6 +440,15 @@ impl Saml2Backend {
             }
         }
         let internal_attrs = self.mapper.to_internal("saml", &external);
+        let subject_type = subject_type_from_name_id_format(name_id_format.as_deref());
+        let subject_id = select_subject_id(
+            self.mapper.as_ref(),
+            &internal_attrs,
+            &name_id,
+            subject_type,
+            &idp_entity_id,
+            self.is_dynamic_idp_selection(),
+        );
 
         ctx.state.clear_namespace(&self.name);
 
@@ -351,8 +460,8 @@ impl Saml2Backend {
             },
             requester: None,
             requester_name: Vec::new(),
-            subject_id: Some(name_id),
-            subject_type: SubjectType::Persistent,
+            subject_id: Some(subject_id),
+            subject_type,
             attributes: internal_attrs,
         };
         Ok(BackendAction::AuthResponse(response))
@@ -368,15 +477,37 @@ impl Backend for Saml2Backend {
     fn register_endpoints(&self) -> Vec<Route> {
         vec![
             Route::new(&regex::escape(&format!("{}/acs", self.name)), "acs"),
-            Route::new(&regex::escape(&format!("{}/metadata", self.name)), "metadata"),
+            Route::new(
+                &regex::escape(&format!("{}/metadata", self.name)),
+                "metadata",
+            ),
         ]
     }
 
     async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {
+        // SSO endpoint: static URL, or resolved from MDQ for the target IdP.
+        // In MDQ mode the target IdP can be chosen per request — e.g. an
+        // `entityID` handed back by a discovery service (SeamlessAccess/thiss.io)
+        // — falling back to the configured default. We persist the choice so the
+        // ACS verifies the Response against the same IdP's metadata.
+        let sso_url = match &self.idp_metadata {
+            IdpMetadata::Static { sso_url, .. } => sso_url.clone(),
+            IdpMetadata::Mdq(client) => {
+                let target = self.select_target_idp(ctx);
+                let entity = client
+                    .get(&target)
+                    .await
+                    .map_err(|e| Error::Authn(format!("MDQ lookup for {target} failed: {e}")))?;
+                let url = idp_sso_redirect_url(&entity)?;
+                ctx.state.set_str(&self.name, "idp_entity_id", &target);
+                url
+            }
+        };
+
         let options = AuthnRequestOptions {
             sp_entity_id: self.sp_entity_id.clone(),
             acs_url: Some(self.acs_url.clone()),
-            destination: Some(self.idp_sso_url.clone()),
+            destination: Some(sso_url.clone()),
             protocol_binding: Some(constants::BINDING_HTTP_POST.to_string()),
             name_id_format: self.name_id_format.clone(),
             allow_create: true,
@@ -398,7 +529,7 @@ impl Backend for Saml2Backend {
         let params = gamlastan::bindings::redirect::RedirectEncodeParams {
             saml_xml: xml.as_bytes(),
             is_request: true,
-            destination: &self.idp_sso_url,
+            destination: &sso_url,
             relay_state: None,
             signer,
         };
@@ -409,14 +540,223 @@ impl Backend for Saml2Backend {
 
     async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<BackendAction> {
         match route_id {
-            "acs" => self.handle_acs(ctx),
+            "acs" => self.handle_acs(ctx).await,
             "metadata" => Ok(BackendAction::Respond(
                 Response::new(200)
-                    .with_header("content-type", "application/samlmetadata+xml; charset=utf-8")
+                    .with_header(
+                        "content-type",
+                        "application/samlmetadata+xml; charset=utf-8",
+                    )
                     .with_body(self.build_metadata()?.into_bytes()),
             )),
             other => Err(Error::NoBoundEndpoint(other.to_string())),
         }
+    }
+}
+
+fn subject_type_from_name_id_format(name_id_format: Option<&str>) -> SubjectType {
+    match name_id_format {
+        Some(constants::NAMEID_TRANSIENT) => SubjectType::Transient,
+        _ => SubjectType::Persistent,
+    }
+}
+
+fn select_subject_id(
+    mapper: &AttributeMapper,
+    internal_attrs: &BTreeMap<String, Vec<String>>,
+    raw_name_id: &str,
+    subject_type: SubjectType,
+    issuer: &str,
+    dynamic_idp_selection: bool,
+) -> String {
+    if dynamic_idp_selection {
+        if let Some(subject_id) = mapper.compose_subject_id(internal_attrs) {
+            return subject_id;
+        }
+        if subject_type == SubjectType::Persistent {
+            return scope_subject_id(issuer, raw_name_id);
+        }
+    }
+    raw_name_id.to_string()
+}
+
+// In federation mode, a raw persistent NameID is only stable within the IdP
+// that issued it, so scope it by issuer before treating it as the downstream
+// subject identifier.
+fn scope_subject_id(issuer: &str, subject_id: &str) -> String {
+    format!("{}:{issuer}:{subject_id}", issuer.len())
+}
+
+/// Build an MDQ client from the `[mdq]` config block.
+fn build_mdq_client(cfg: &MdqConfig) -> Result<MdqClient> {
+    let transform = match cfg.transform.as_deref() {
+        None | Some("url_encoded") => MdqTransform::UrlEncoded,
+        Some("sha1") => MdqTransform::Sha1,
+        Some(other) => return Err(Error::Config(format!("unknown mdq.transform: {other}"))),
+    };
+    let role = match cfg.require_role.as_deref() {
+        None | Some("idp") => RequiredRole::Idp,
+        Some("sp") => RequiredRole::Sp,
+        Some("any") => RequiredRole::Any,
+        Some(other) => return Err(Error::Config(format!("unknown mdq.require_role: {other}"))),
+    };
+
+    let mut client = MdqClient::new(cfg.url.clone())
+        .with_transform(transform)
+        .require_role(role);
+    if let Some(ttl) = cfg.fallback_ttl_secs {
+        client = client.with_fallback_ttl(Duration::from_secs(ttl));
+    }
+
+    // A signing cert makes every fetched document signature-checked; without one
+    // the operator must explicitly opt into the insecure unverified mode.
+    if let Some(path) = &cfg.signing_cert_path {
+        let pem = std::fs::read(path)
+            .map_err(|e| Error::Config(format!("reading mdq.signing_cert_path: {e}")))?;
+        client = client
+            .add_signing_cert_pem(&pem)
+            .map_err(|e| Error::Crypto(format!("loading mdq signing cert: {e}")))?;
+    } else if cfg.allow_unverified {
+        client = client.allow_unverified();
+    } else {
+        return Err(Error::Config(
+            "mdq requires signing_cert_path (or allow_unverified=true for testing)".into(),
+        ));
+    }
+    Ok(client)
+}
+
+/// Build an SP-side verifier from a set of DER-encoded IdP signing certs: each
+/// cert is both a verification key and a trusted chain anchor (mirrors the
+/// static `idp_cert_path` path). Errors if no certs are supplied.
+fn verifier_from_cert_ders(ders: &[Vec<u8>]) -> Result<SamlVerifier> {
+    if ders.is_empty() {
+        return Err(Error::Authn(
+            "IdP metadata carries no signing certificate".into(),
+        ));
+    }
+    let mut km = KeysManager::new();
+    for der in ders {
+        let key = loader::load_x509_cert_der(der)
+            .map_err(|e| Error::Crypto(format!("parsing IdP signing cert: {e}")))?;
+        km.add_key(key);
+        km.add_trusted_cert(der.clone());
+    }
+    Ok(SamlVerifier::new(km))
+}
+
+/// The IdP's HTTP-Redirect `SingleSignOnService` location from its metadata.
+fn idp_sso_redirect_url(entity: &EntityDescriptor) -> Result<String> {
+    let idp = entity.idp_sso_descriptors().first().ok_or_else(|| {
+        Error::Authn(format!(
+            "metadata for {} has no IDPSSODescriptor",
+            entity.entity_id
+        ))
+    })?;
+    idp.single_sign_on_service(constants::BINDING_HTTP_REDIRECT)
+        .map(|e| e.location.clone())
+        .ok_or_else(|| {
+            Error::Authn(format!(
+                "IdP {} advertises no HTTP-Redirect SingleSignOnService",
+                entity.entity_id
+            ))
+        })
+}
+
+/// Build a verifier from the IdP's signing certs published in its metadata.
+fn idp_verifier_from_metadata(entity: &EntityDescriptor) -> Result<SamlVerifier> {
+    let idp = entity.idp_sso_descriptors().first().ok_or_else(|| {
+        Error::Authn(format!(
+            "metadata for {} has no IDPSSODescriptor",
+            entity.entity_id
+        ))
+    })?;
+    verifier_from_cert_ders(&idp.signing_certificates_der())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_mapper() -> AttributeMapper {
+        AttributeMapper::from_toml("").expect("empty mapper")
+    }
+
+    #[test]
+    fn subject_type_tracks_name_id_format() {
+        assert_eq!(
+            subject_type_from_name_id_format(Some(constants::NAMEID_TRANSIENT)),
+            SubjectType::Transient
+        );
+        assert_eq!(
+            subject_type_from_name_id_format(Some(constants::NAMEID_PERSISTENT)),
+            SubjectType::Persistent
+        );
+        assert_eq!(
+            subject_type_from_name_id_format(Some(constants::NAMEID_EMAIL)),
+            SubjectType::Persistent
+        );
+        assert_eq!(
+            subject_type_from_name_id_format(None),
+            SubjectType::Persistent
+        );
+    }
+
+    #[test]
+    fn dynamic_idp_subject_prefers_composed_identifier() {
+        let mapper = AttributeMapper::from_toml(
+            r#"
+            user_id_from_attrs = ["mail"]
+
+            [attributes.mail]
+            saml = ["mail"]
+        "#,
+        )
+        .expect("mapper with mail subject");
+        let mut attrs = BTreeMap::new();
+        attrs.insert("mail".to_string(), vec!["anna@example.com".to_string()]);
+
+        let subject_id = select_subject_id(
+            &mapper,
+            &attrs,
+            "opaque-name-id",
+            SubjectType::Persistent,
+            "https://idp.example.com",
+            true,
+        );
+
+        assert_eq!(subject_id, "anna@example.com");
+    }
+
+    #[test]
+    fn dynamic_idp_scopes_persistent_nameid_fallback() {
+        let subject_id = select_subject_id(
+            &empty_mapper(),
+            &BTreeMap::new(),
+            "opaque-name-id",
+            SubjectType::Persistent,
+            "https://idp.example.com",
+            true,
+        );
+
+        assert_eq!(
+            subject_id,
+            scope_subject_id("https://idp.example.com", "opaque-name-id")
+        );
+    }
+
+    #[test]
+    fn static_idp_keeps_raw_nameid() {
+        let subject_id = select_subject_id(
+            &empty_mapper(),
+            &BTreeMap::new(),
+            "opaque-name-id",
+            SubjectType::Persistent,
+            "https://idp.example.com",
+            false,
+        );
+
+        assert_eq!(subject_id, "opaque-name-id");
     }
 }
 

@@ -10,6 +10,7 @@ description = "Concrete frontends, backends and micro-services for the tunnelban
 tunnelbana-core = { path = "../tunnelbana-core" }
 tunnelbana-oidc = { path = "../tunnelbana-oidc" }
 gamlastan.workspace = true
+gamlastan-mdq.workspace = true
 jose-rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

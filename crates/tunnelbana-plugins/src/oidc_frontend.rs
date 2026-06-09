@@ -130,7 +130,10 @@ impl Frontend for OidcFrontend {
                 "discovery",
             ),
             Route::new(&regex::escape(&self.route("jwks")), "jwks"),
-            Route::new(&regex::escape(&self.route("authorization")), "authorization"),
+            Route::new(
+                &regex::escape(&self.route("authorization")),
+                "authorization",
+            ),
             Route::new(&regex::escape(&self.route("token")), "token"),
             Route::new(&regex::escape(&self.route("userinfo")), "userinfo"),
         ]
@@ -235,7 +238,12 @@ impl OidcFrontend {
 
         match self
             .provider
-            .handle_token_request(&form, auth_header.as_deref(), &token_url, dpop_proof.as_ref())
+            .handle_token_request(
+                &form,
+                auth_header.as_deref(),
+                &token_url,
+                dpop_proof.as_ref(),
+            )
             .await
         {
             Ok(resp) => match Response::json(&resp) {
@@ -257,9 +265,14 @@ impl OidcFrontend {
         let Some((rt, proof_jwt)) = self.dpop_request(ctx) else {
             return Ok(None);
         };
-        let outcome =
-            tunnelbana_oidc::dpop::validate_proof(rt.store.as_ref(), &rt.config, proof_jwt, htm, htu)
-                .await;
+        let outcome = tunnelbana_oidc::dpop::validate_proof(
+            rt.store.as_ref(),
+            &rt.config,
+            proof_jwt,
+            htm,
+            htu,
+        )
+        .await;
         self.map_dpop_result(rt, outcome)
     }
 

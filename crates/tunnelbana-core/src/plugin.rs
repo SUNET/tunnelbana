@@ -218,7 +218,9 @@ pub struct NullHttpClient;
 #[async_trait::async_trait]
 impl HttpClient for NullHttpClient {
     async fn get(&self, _url: &str) -> Result<crate::http::HttpFetchResponse> {
-        Err(crate::error::Error::Internal("no http client configured".into()))
+        Err(crate::error::Error::Internal(
+            "no http client configured".into(),
+        ))
     }
     async fn post_form(
         &self,
@@ -226,6 +228,8 @@ impl HttpClient for NullHttpClient {
         _form: &[(String, String)],
         _headers: &[(String, String)],
     ) -> Result<crate::http::HttpFetchResponse> {
-        Err(crate::error::Error::Internal("no http client configured".into()))
+        Err(crate::error::Error::Internal(
+            "no http client configured".into(),
+        ))
     }
 }

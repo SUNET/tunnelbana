@@ -204,12 +204,13 @@ async fn saml_backend_rejects_tampered_response() {
 
     // Tamper: decode, flip an attribute value, re-encode (breaks the signature).
     let xml = String::from_utf8(
-        base64::engine::general_purpose::STANDARD.decode(&b64).unwrap(),
+        base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap(),
     )
     .unwrap();
     let tampered_xml = xml.replace("anna@example.com", "attacker@evil.example");
-    let tampered_b64 =
-        base64::engine::general_purpose::STANDARD.encode(tampered_xml.as_bytes());
+    let tampered_b64 = base64::engine::general_purpose::STANDARD.encode(tampered_xml.as_bytes());
 
     let mut sp_ctx = Context::new(
         HttpRequestData {

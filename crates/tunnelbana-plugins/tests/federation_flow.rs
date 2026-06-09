@@ -11,10 +11,10 @@ use tunnelbana_core::context::Context;
 use tunnelbana_core::error::Result as CoreResult;
 use tunnelbana_core::http::{HttpClient, HttpFetchResponse, HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
+use tunnelbana_core::keys::{signing_key_from_jwk_json, SigningKey};
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
 use tunnelbana_core::proxy::Proxy;
 use tunnelbana_core::state::StateSealer;
-use tunnelbana_core::keys::{signing_key_from_jwk_json, SigningKey};
 
 const TA_ID: &str = "https://ta.example.com";
 const RP_ID: &str = "https://rp.fed.example.com";
@@ -191,7 +191,11 @@ fn qp(url: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-fn build_proxy(http: Arc<dyn HttpClient>, op_key_jwk: serde_json::Value, ta_pub: serde_json::Value) -> Proxy {
+fn build_proxy(
+    http: Arc<dyn HttpClient>,
+    op_key_jwk: serde_json::Value,
+    ta_pub: serde_json::Value,
+) -> Proxy {
     let config = serde_json::json!({
         "signing_jwk": op_key_jwk,
         "signing_algorithm": "ES256",
@@ -214,8 +218,7 @@ fn build_proxy(http: Arc<dyn HttpClient>, op_key_jwk: serde_json::Value, ta_pub:
         secret: "fed-secret".to_string(),
         previous_secrets: Vec::new(),
     };
-    let frontend =
-        tunnelbana_plugins::federation_frontend::FederationFrontend::build(&bx).unwrap();
+    let frontend = tunnelbana_plugins::federation_frontend::FederationFrontend::build(&bx).unwrap();
     let sealer = StateSealer::new("fed-secret", "TB_STATE").with_secure(false);
     Proxy::new(vec![frontend], vec![Box::new(MockBackend)], vec![], sealer)
 }
@@ -269,7 +272,12 @@ async fn auto_registration_and_private_key_jwt_flow() {
         enc(RP_REDIRECT)
     );
     let r1 = proxy.run(req(&authz, "GET", None)).await;
-    assert_eq!(r1.status, 302, "should redirect into backend after auto-register: {}", String::from_utf8_lossy(&r1.body));
+    assert_eq!(
+        r1.status,
+        302,
+        "should redirect into backend after auto-register: {}",
+        String::from_utf8_lossy(&r1.body)
+    );
     let cookie = set_cookie(&r1);
 
     // Backend callback → OP issues a code to the RP's redirect URI.
@@ -281,8 +289,7 @@ async fn auto_registration_and_private_key_jwt_flow() {
 
     // Token exchange with private_key_jwt (RP signs the client assertion).
     let token_url = "https://proxy.example.com/OIDFed/token";
-    let assertion =
-        tunnelbana_oidc::rp::build_client_assertion(&rp_key, RP_ID, token_url).unwrap();
+    let assertion = tunnelbana_oidc::rp::build_client_assertion(&rp_key, RP_ID, token_url).unwrap();
     let mut treq = req("OIDFed/token", "POST", None);
     treq.form = [
         ("grant_type", "authorization_code"),
@@ -297,8 +304,10 @@ async fn auto_registration_and_private_key_jwt_flow() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
-    treq.headers
-        .insert("content-type".into(), "application/x-www-form-urlencoded".into());
+    treq.headers.insert(
+        "content-type".into(),
+        "application/x-www-form-urlencoded".into(),
+    );
 
     let r3 = proxy.run(treq).await;
     assert_eq!(

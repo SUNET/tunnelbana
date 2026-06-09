@@ -73,7 +73,10 @@ impl Saml2Frontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
         let cfg: Saml2FrontendConfig = bx.parse_config()?;
         let module_base = bx.module_base();
-        let idp_entity_id = cfg.idp_entity_id.clone().unwrap_or_else(|| module_base.clone());
+        let idp_entity_id = cfg
+            .idp_entity_id
+            .clone()
+            .unwrap_or_else(|| module_base.clone());
         let sso_url = format!("{module_base}/sso");
 
         let key_pem = std::fs::read(&cfg.idp_key_path)
@@ -120,10 +123,7 @@ impl Saml2Frontend {
         } else {
             return Err(Error::BadRequest("missing SAMLRequest".into()));
         };
-        let relay_state = ctx
-            .request
-            .param("RelayState")
-            .map(|s| s.to_string());
+        let relay_state = ctx.request.param("RelayState").map(|s| s.to_string());
 
         let xml = decode_authn_request(&encoded, deflated)?;
         let doc = gamlastan::xml::uppsala::parse(&xml)
@@ -138,8 +138,10 @@ impl Saml2Frontend {
             .map_err(|e| Error::BadRequest(format!("AuthnRequest validation: {e}")))?;
 
         // Stash what we need to build the Response on the way back.
-        ctx.state.set_str(&self.name, "request_id", &processed.request_id);
-        ctx.state.set_str(&self.name, "sp_entity_id", &processed.sp_entity_id);
+        ctx.state
+            .set_str(&self.name, "request_id", &processed.request_id);
+        ctx.state
+            .set_str(&self.name, "sp_entity_id", &processed.sp_entity_id);
         ctx.state.set_str(&self.name, "acs_url", &processed.acs_url);
         if let Some(rs) = &relay_state {
             ctx.state.set_str(&self.name, "relay_state", rs);
@@ -161,7 +163,10 @@ impl Frontend for Saml2Frontend {
     fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
         vec![
             Route::new(&regex::escape(&format!("{}/sso", self.name)), "sso"),
-            Route::new(&regex::escape(&format!("{}/metadata", self.name)), "metadata"),
+            Route::new(
+                &regex::escape(&format!("{}/metadata", self.name)),
+                "metadata",
+            ),
         ]
     }
 
@@ -170,7 +175,10 @@ impl Frontend for Saml2Frontend {
             "sso" => self.handle_sso(ctx),
             "metadata" => Ok(FrontendAction::Respond(
                 Response::new(200)
-                    .with_header("content-type", "application/samlmetadata+xml; charset=utf-8")
+                    .with_header(
+                        "content-type",
+                        "application/samlmetadata+xml; charset=utf-8",
+                    )
                     .with_body(self.build_metadata()?.into_bytes()),
             )),
             other => Err(Error::NoBoundEndpoint(other.to_string())),
@@ -247,13 +255,12 @@ impl Frontend for Saml2Frontend {
             .map_err(|e| Error::Internal(format!("serializing Response: {e}")))?;
         let assertion_id = saml_response.assertions.first().map(|a| a.id.clone());
 
-        let signed = self.sign_response_xml(
-            &xml,
-            &saml_response.base.id,
-            assertion_id.as_deref(),
-        )?;
+        let signed =
+            self.sign_response_xml(&xml, &saml_response.base.id, assertion_id.as_deref())?;
 
-        let relay = relay_state.as_deref().map(gamlastan::bindings::relay_state::RelayState::echo);
+        let relay = relay_state
+            .as_deref()
+            .map(gamlastan::bindings::relay_state::RelayState::echo);
         let html = gamlastan::bindings::post::post_encode(
             signed.as_bytes(),
             false,
@@ -262,12 +269,14 @@ impl Frontend for Saml2Frontend {
         );
 
         ctx.state.clear_namespace(&self.name);
-        Ok(Response::html(html)
-            .with_header("cache-control", "no-cache, no-store"))
+        Ok(Response::html(html).with_header("cache-control", "no-cache, no-store"))
     }
 
     async fn handle_backend_error(&self, _ctx: &mut Context, error: &Error) -> Result<Response> {
-        Ok(Response::text(500, format!("authentication failed: {error}")))
+        Ok(Response::text(
+            500,
+            format!("authentication failed: {error}"),
+        ))
     }
 }
 

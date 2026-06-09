@@ -240,10 +240,7 @@ impl StateSealer {
             return State::new();
         }
 
-        let opts = JweDecryptOptions::new(
-            vec![JweAlgorithm::Dir],
-            vec![JweEncryption::A256GCM],
-        );
+        let opts = JweDecryptOptions::new(vec![JweAlgorithm::Dir], vec![JweEncryption::A256GCM]);
 
         let mut last_err = None;
         for key in &self.keys {
@@ -410,10 +407,7 @@ mod tests {
             iat: now_unix().saturating_sub(10),
             data: {
                 let mut m = Map::new();
-                m.insert(
-                    "ns".to_string(),
-                    serde_json::json!({ "k": "v" }),
-                );
+                m.insert("ns".to_string(), serde_json::json!({ "k": "v" }));
                 m
             },
         };
@@ -475,8 +469,8 @@ mod tests {
     #[test]
     fn key_rotation_decrypts_old_cookies() {
         // Seal under the old secret.
-        let old = StateSealer::new("the-old-rotation-secret-value-32b", "TB_STATE")
-            .with_secure(false);
+        let old =
+            StateSealer::new("the-old-rotation-secret-value-32b", "TB_STATE").with_secure(false);
         let mut state = State::new();
         state.set_str("ns", "k", "v");
         let cookie = old.seal(&state).unwrap();

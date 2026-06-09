@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::http::{HttpRequestData, Response};
-use tunnelbana_core::plugin::{BuildContext, Frontend, NullHttpClient};
-use tunnelbana_core::state::StateSealer;
-use tunnelbana_core::proxy::Proxy;
 use tunnelbana_core::plugin::Backend;
+use tunnelbana_core::plugin::{BuildContext, Frontend, NullHttpClient};
+use tunnelbana_core::proxy::Proxy;
+use tunnelbana_core::state::StateSealer;
 
 const ISSUER: &str = "https://proxy.example.com/OIDC";
 const TOKEN_URL: &str = "https://proxy.example.com/OIDC/token";
@@ -52,7 +52,12 @@ fn build_frontend(require_nonce: bool) -> Box<dyn Frontend> {
 
 fn proxy(require_nonce: bool) -> Proxy {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
-    Proxy::new(vec![build_frontend(require_nonce)], Vec::<Box<dyn Backend>>::new(), vec![], sealer)
+    Proxy::new(
+        vec![build_frontend(require_nonce)],
+        Vec::<Box<dyn Backend>>::new(),
+        vec![],
+        sealer,
+    )
 }
 
 /// A signed ES256 DPoP proof for (htm, htu), plus the key's thumbprint.
@@ -190,7 +195,9 @@ async fn nonce_challenge_then_accept() {
     assert_eq!(r1.status, 400);
     let err: serde_json::Value = serde_json::from_slice(&r1.body).unwrap();
     assert_eq!(err["error"], "use_dpop_nonce");
-    let nonce = header(&r1, "DPoP-Nonce").expect("DPoP-Nonce header").to_string();
+    let nonce = header(&r1, "DPoP-Nonce")
+        .expect("DPoP-Nonce header")
+        .to_string();
     assert!(!nonce.is_empty());
 
     // Retry with the issued nonce → 200 DPoP.

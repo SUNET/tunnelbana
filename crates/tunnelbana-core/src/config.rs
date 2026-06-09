@@ -261,7 +261,10 @@ mod tests {
             state_encryption_key = "${TB_TEST_KEY}"
         "#;
         let cfg = ProxyConfig::from_str(toml_str).unwrap();
-        assert_eq!(cfg.state_encryption_key, "injected-secret-that-is-32-bytes!");
+        assert_eq!(
+            cfg.state_encryption_key,
+            "injected-secret-that-is-32-bytes!"
+        );
     }
 
     #[test]

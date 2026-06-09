@@ -68,8 +68,7 @@ fn attribute_mapper() -> Arc<AttributeMapper> {
 fn build_frontend(mapper: Arc<AttributeMapper>) -> Box<dyn Frontend> {
     let mut jwk = jose_rs::jwk::generate_ec("P-256").unwrap();
     jwk.alg = Some("ES256".into());
-    let signing_jwk: serde_json::Value =
-        serde_json::from_str(&jwk.to_json().unwrap()).unwrap();
+    let signing_jwk: serde_json::Value = serde_json::from_str(&jwk.to_json().unwrap()).unwrap();
 
     let config = serde_json::json!({
         "signing_jwk": signing_jwk,
@@ -182,11 +181,17 @@ async fn oidc_op_full_flow_through_proxy() {
         urlenc("https://rp.example.com/cb"),
         verifier
     ));
-    token_req
-        .headers
-        .insert("content-type".into(), "application/x-www-form-urlencoded".into());
+    token_req.headers.insert(
+        "content-type".into(),
+        "application/x-www-form-urlencoded".into(),
+    );
     let r3 = proxy.run(token_req).await;
-    assert_eq!(r3.status, 200, "token endpoint should succeed: {}", String::from_utf8_lossy(&r3.body));
+    assert_eq!(
+        r3.status,
+        200,
+        "token endpoint should succeed: {}",
+        String::from_utf8_lossy(&r3.body)
+    );
     let token_json: serde_json::Value = serde_json::from_slice(&r3.body).unwrap();
     let id_token = token_json["id_token"].as_str().expect("id_token");
     let access_token = token_json["access_token"].as_str().expect("access_token");
@@ -200,9 +205,18 @@ async fn oidc_op_full_flow_through_proxy() {
         .with_audience("rp-1");
     let claims = jose_rs::jwt::decode_with_jwkset(&jwks, id_token, &validation).unwrap();
     assert_eq!(claims.sub.as_deref(), Some("user-anna"));
-    assert_eq!(claims.extra.get("nonce").and_then(|v| v.as_str()), Some("no-1"));
-    assert_eq!(claims.extra.get("email").and_then(|v| v.as_str()), Some("anna@example.com"));
-    assert_eq!(claims.extra.get("given_name").and_then(|v| v.as_str()), Some("Anna"));
+    assert_eq!(
+        claims.extra.get("nonce").and_then(|v| v.as_str()),
+        Some("no-1")
+    );
+    assert_eq!(
+        claims.extra.get("email").and_then(|v| v.as_str()),
+        Some("anna@example.com")
+    );
+    assert_eq!(
+        claims.extra.get("given_name").and_then(|v| v.as_str()),
+        Some("Anna")
+    );
 
     // 5) UserInfo with the access token.
     let mut ui_req = req("OIDC/userinfo", "GET", None);
@@ -216,11 +230,16 @@ async fn oidc_op_full_flow_through_proxy() {
     assert_eq!(userinfo["email"], "anna@example.com");
 
     // 6) Discovery document is served.
-    let r6 = proxy.run(req("OIDC/.well-known/openid-configuration", "GET", None)).await;
+    let r6 = proxy
+        .run(req("OIDC/.well-known/openid-configuration", "GET", None))
+        .await;
     assert_eq!(r6.status, 200);
     let disco: serde_json::Value = serde_json::from_slice(&r6.body).unwrap();
     assert_eq!(disco["issuer"], "https://proxy.example.com/OIDC");
-    assert_eq!(disco["token_endpoint"], "https://proxy.example.com/OIDC/token");
+    assert_eq!(
+        disco["token_endpoint"],
+        "https://proxy.example.com/OIDC/token"
+    );
 }
 
 fn urlenc(s: &str) -> String {

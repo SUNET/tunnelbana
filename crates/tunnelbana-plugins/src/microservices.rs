@@ -49,7 +49,9 @@ impl MicroService for StaticAttributes {
         mut data: InternalData,
     ) -> Result<InternalData> {
         for (k, v) in &self.attributes {
-            data.attributes.entry(k.clone()).or_insert_with(|| v.clone());
+            data.attributes
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
         Ok(data)
     }
@@ -141,11 +143,7 @@ impl MicroService for CustomRouting {
         &self.name
     }
 
-    async fn process_request(
-        &self,
-        ctx: &mut Context,
-        data: InternalData,
-    ) -> Result<InternalData> {
+    async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData> {
         if let Some(requester) = &data.requester {
             if let Some(backend) = self.rules.get(requester) {
                 ctx.target_backend = Some(backend.clone());
@@ -195,11 +193,9 @@ mod tests {
         let data = stat.process_response(&mut ctx(), data).await.unwrap();
         assert_eq!(data.attr_first("affiliation"), Some("member"));
 
-        let filter = FilterAttributes::build(&bx(
-            "filter",
-            serde_json::json!({ "allowed": ["mail"] }),
-        ))
-        .unwrap();
+        let filter =
+            FilterAttributes::build(&bx("filter", serde_json::json!({ "allowed": ["mail"] })))
+                .unwrap();
         let data = filter.process_response(&mut ctx(), data).await.unwrap();
         assert_eq!(data.attr_first("mail"), Some("a@x"));
         assert!(!data.attributes.contains_key("affiliation"));

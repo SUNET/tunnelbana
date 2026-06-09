@@ -155,16 +155,16 @@ where
             .read()
             .map_err(|_| std::io::Error::other("cache lock poisoned"))?;
         let snapshot: HashMap<&String, &Entry<V>> = guard.iter().collect();
-        let json = serde_json::to_vec(&snapshot)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let json =
+            serde_json::to_vec(&snapshot).map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)
     }
 
     /// Load entries from a JSON snapshot (ignores already-expired entries).
     pub fn load(&self, path: &str) -> std::io::Result<()> {
         let bytes = std::fs::read(path)?;
-        let snapshot: HashMap<String, Entry<V>> = serde_json::from_slice(&bytes)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let snapshot: HashMap<String, Entry<V>> =
+            serde_json::from_slice(&bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
         let now = now_secs();
         if let Ok(mut guard) = self.inner.write() {
             for (k, e) in snapshot {

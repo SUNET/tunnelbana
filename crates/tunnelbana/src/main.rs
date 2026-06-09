@@ -17,8 +17,9 @@ use reqwest_client::ReqwestClient;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let config_path =
-        std::env::args().nth(1).unwrap_or_else(|| "config/proxy.toml".to_string());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config/proxy.toml".to_string());
 
     let cfg = ProxyConfig::load(&config_path).unwrap_or_else(|e| {
         eprintln!("failed to load config {config_path}: {e}");
@@ -126,11 +127,7 @@ fn resolve(cfg: &ProxyConfig, path: &str) -> String {
 
 /// actix entry point: adapt the actix request into our framework type, run the
 /// proxy flow, and adapt the framework response back.
-async fn handle(
-    req: HttpRequest,
-    body: web::Bytes,
-    proxy: web::Data<Arc<Proxy>>,
-) -> HttpResponse {
+async fn handle(req: HttpRequest, body: web::Bytes, proxy: web::Data<Arc<Proxy>>) -> HttpResponse {
     let request = build_request_data(&req, &body);
     let response = proxy.run(request).await;
     to_actix(response)
@@ -140,8 +137,7 @@ fn build_request_data(req: &HttpRequest, body: &web::Bytes) -> HttpRequestData {
     let path = req.path().trim_start_matches('/').to_string();
     let method = req.method().as_str().to_uppercase();
 
-    let query: BTreeMap<String, String> =
-        form_urlencoded_parse(req.query_string());
+    let query: BTreeMap<String, String> = form_urlencoded_parse(req.query_string());
 
     let mut headers = BTreeMap::new();
     for (name, value) in req.headers() {

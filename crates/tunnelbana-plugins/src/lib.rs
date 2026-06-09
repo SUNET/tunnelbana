@@ -17,7 +17,10 @@ use tunnelbana_core::plugin::Registry;
 /// Register every built-in plugin's constructor under its config `type` name.
 pub fn register_all(registry: &mut Registry) {
     registry.register_frontend("oidc", oidc_frontend::OidcFrontend::build);
-    registry.register_frontend("oidc_federation", federation_frontend::FederationFrontend::build);
+    registry.register_frontend(
+        "oidc_federation",
+        federation_frontend::FederationFrontend::build,
+    );
     registry.register_frontend("saml2", saml2_frontend::Saml2Frontend::build);
     registry.register_backend("oidc", oidc_backend::OidcBackend::build);
     registry.register_backend("saml2", saml2_backend::Saml2Backend::build);

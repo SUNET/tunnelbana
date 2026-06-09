@@ -2,8 +2,8 @@
 
 use crate::http::HttpRequestData;
 use crate::state::State;
-use std::collections::BTreeMap;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// State namespace used by the proxy core itself.
 pub const STATE_KEY_BASE: &str = "TUNNELBANA_BASE";

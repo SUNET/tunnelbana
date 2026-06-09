@@ -1348,9 +1348,9 @@ dependencies = [
 
 [[package]]
 name = "gamlastan"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de1a8b718c1457fc2ab403c9e18d28fef6bfdd2f27a5166bd39c0aa2823b7618"
+checksum = "9a2802375e279f0defb68af6dd4e84ca77b1fabd9cec32eb97c06de6ea7881df"
 dependencies = [
  "base64",
  "bergshamra",
@@ -1366,6 +1366,21 @@ dependencies = [
  "rand 0.8.6",
  "thiserror",
  "uppsala",
+]
+
+[[package]]
+name = "gamlastan-mdq"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "500badf7474696a7d4cb23b9b45fedc896c1963179721e56008012e26951b1bb"
+dependencies = [
+ "base64",
+ "bytes",
+ "chrono",
+ "gamlastan",
+ "log",
+ "reqwest",
+ "thiserror",
 ]
 
 [[package]]
@@ -3760,6 +3775,7 @@ dependencies = [
  "flate2",
  "form_urlencoded",
  "gamlastan",
+ "gamlastan-mdq",
  "jose-rs",
  "regex",
  "serde",
