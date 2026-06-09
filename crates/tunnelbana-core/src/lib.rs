@@ -10,21 +10,22 @@ pub mod attributes;
 pub mod cache;
 pub mod config;
 pub mod context;
-pub mod error;
-pub mod http;
 pub mod internal;
-pub mod keys;
-pub mod mac;
 pub mod plugin;
 pub mod proxy;
 pub mod router;
 pub mod state;
-pub mod util;
+
+// The generic primitives (error, http, keys, mac, util) were extracted into the
+// standalone `grindvakt` crate so they can be reused outside this proxy. They
+// are re-exported here unchanged, so the rest of the framework and downstream
+// crates keep referring to `tunnelbana_core::{error, http, keys, mac, util}`.
+pub use grindvakt::{error, http, keys, mac, util};
 
 // Convenient re-exports.
 pub use context::Context;
-pub use error::{Error, Result};
-pub use http::{HttpClient, HttpFetchResponse, HttpRequestData, Response};
+pub use grindvakt::error::{Error, Result};
+pub use grindvakt::http::{HttpClient, HttpFetchResponse, HttpRequestData, Response};
 pub use internal::{AuthenticationInformation, InternalData, SubjectType};
 pub use plugin::{
     Backend, BackendAction, BuildContext, Frontend, FrontendAction, MicroService, Registry, Route,
