@@ -16,8 +16,10 @@ rust-version = "1.83"
 [workspace.dependencies]
 grindvakt = { version = "0.1.0" }
 jose-rs = { version = "0.3.1", default-features = false }
-gamlastan = { version = "0.2.0" }
-gamlastan-mdq = { version = "0.2.0" }
+# TEMPORARY dev override (per CLAUDE.md): restore to released 0.3.0 version
+# pins once gamlastan/gamlastan-mdq 0.3.0 are published.
+gamlastan = { version = "0.3.0" }
+gamlastan-mdq = { version = "0.3.0" }
 
 # Async / web
 actix-web = "4"

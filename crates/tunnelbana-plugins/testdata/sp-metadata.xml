@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" Name="test-federation">
+  <md:EntityDescriptor entityID="https://proxy.example.com/SP">
+    <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol" WantAssertionsSigned="true">
+      <md:KeyDescriptor use="signing">
+        <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+          <ds:X509Data>
+            <ds:X509Certificate>MIID1TCCAr2gAwIBAgIUE82uVwVQ03IgG6I5MFIB6/u5KJswDQYJKoZIhvcNAQELBQAwZjELMAkGA1UEBhMCSVQxDTALBgNVBAcMBFJvbWExFTATBgNVBAoMDFRlc3QgU1BJRCBTUDEVMBMGA1UEAwwMVGVzdCBTUElEIFNQMRowGAYDVQQFExFWQVRJVC0xMjM0NTY3ODkwMTAeFw0yNjAyMjMwNDM3MDBaFw0yNzAyMjMwNDM3MDBaMGYxCzAJBgNVBAYTAklUMQ0wCwYDVQQHDARSb21hMRUwEwYDVQQKDAxUZXN0IFNQSUQgU1AxFTATBgNVBAMMDFRlc3QgU1BJRCBTUDEaMBgGA1UEBRMRVkFUSVQtMTIzNDU2Nzg5MDEwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQClqdDtp+86Fuucn1qS1qNZx/LPFCRIesWUoMY/TS6GkTlxi4X5jG9ZYo+8A3NKF5VNcv7PMzuzWRiggxHbJpQhH8DbnN+ZncCuFebd5V6NcbB8pH4ANkjku2ttdsczsRDbtgPK+RVUf5O1NGyX9PbPRib0YG2VbwglTpgVTnCBqa4rELOENKqzDM0QQnlvC+TakQQF5eUAo3BiA5q6TCZdZfVYFntyH+/9pvlDjrPaPsct/Ck27cdIHbCAvu915rj3Wk7mUFLMNF5xfRzjQdWCY8ZA6XxOsB6M92bHWMi+aJMNBDDCyDQw4OCAY5psCK89RtVOjC7bR8Mi9wrz9I9ZAgMBAAGjezB5MB0GA1UdDgQWBBQOHuQKC+lLG0TAkPMn+dKZPK9JojAfBgNVHSMEGDAWgBQOHuQKC+lLG0TAkPMn+dKZPK9JojAPBgNVHRMBAf8EBTADAQH/MCYGA1UdEQQfMB2GG2h0dHBzOi8vc3AuZXhhbXBsZS5jb20vc2FtbDANBgkqhkiG9w0BAQsFAAOCAQEAjQy2RTCmNojyjRniJDUnWCTl+dujdXyLHy+Le1AJ7nwE9KtzZscGc8FCSyCHcWf9CiEcXK2trZGTzUg/NPxkmAgLus3hiy1ueB2kaLknKGQeQjKkhl6C7Vy3JE0ibWl1NuZPmS3xlnGoWnq5nMZcJAuAD5kxswv/d4VC+T+C7h+pZDk826apvvs/5Mvf2I7rYPuOGGJMBsVMN/W5Gl979BzIM/XtuR7DNXyBSNFkabKFDMkl7UF9SQRF4NXJb6WW4csFCB/7F6ZzI6982dkBORw6f7F7GwePi9Z4udE+VBAjVy/tEceAsju1Hg+EnuWzJ3kDGAnUPMJUi8ZldC782Q==</ds:X509Certificate>
+          </ds:X509Data>
+        </ds:KeyInfo>
+      </md:KeyDescriptor>
+      <md:NameIDFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:persistent</md:NameIDFormat>
+      <md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://proxy.example.com/SP/acs" index="0" isDefault="true"/>
+    </md:SPSSODescriptor>
+  </md:EntityDescriptor>
+</md:EntitiesDescriptor>

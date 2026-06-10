@@ -115,6 +115,34 @@ name = "Upstream"
 #   sign_authn_requests = false
 #   # ACS is served at <base_url>/Saml2/acs ; metadata at <base_url>/Saml2/metadata
 #
+#   # Clock-skew tolerance towards the IdP, overriding the `security` preset
+#   # (SATOSA: accepted_time_diff).
+#   # accepted_time_diff_secs = 300
+#
+#   # Keep inbound attributes the attribute map doesn't know, under a
+#   # lowercased FriendlyName-or-Name key (SATOSA: allow_unknown_attributes).
+#   # passthrough_unmapped_attributes = true
+#
+#   # Accept IdP-initiated Responses without InResponseTo *within an existing
+#   # flow*. Default false: the ACS requires the in-flight AuthnRequest id.
+#   # allow_unsolicited = true
+#
+#   # Decrypt <EncryptedAssertion>/<EncryptedID> (usually the signing pair).
+#   # List several to rotate: all are tried for decryption; entries with a
+#   # cert_path are published with use="encryption" in SP metadata.
+#   # [[backend.config.encryption_keypairs]]
+#   # key_path = "keys/sp.key"
+#   # cert_path = "keys/sp.crt"
+#
+#   # Published in SP metadata (required by e.g. SWAMID registration).
+#   # [backend.config.organization]
+#   # name = "SUNET"
+#   # display_name = "Sunet"
+#   # url = "https://sunet.se"
+#   # [[backend.config.contact_person]]
+#   # contact_type = "technical"        # technical|support|administrative|billing|other
+#   # email_address = "noc@sunet.se"
+#
 # (b) Dynamic IdP metadata via MDQ (SAML Metadata Query Protocol) ─────────────
 # For a federation (eduGAIN / SWAMID / pyFF / thiss.io) you don't pin one IdP.
 # Instead point the backend at an MDQ server and it resolves each IdP's metadata
@@ -124,15 +152,20 @@ name = "Upstream"
 #
 # The target IdP for a flow is chosen per request: an `entityID` parameter on the
 # authorization request (e.g. handed back by a discovery service such as
-# SeamlessAccess / thiss.io) selects it; otherwise idp_entity_id is the default.
-# The chosen IdP is persisted in flow state so the ACS verifies the Response
-# against that same IdP's metadata signing cert.
+# SeamlessAccess / thiss.io) selects it; otherwise idp_entity_id is the default;
+# with neither, the user is redirected to disco_srv and returns with their choice
+# at <base_url>/Saml2/disco. The chosen IdP is persisted in flow state so the ACS
+# verifies the Response against that same IdP's metadata signing cert.
+#
+# NOTE: the discovery hop is a top-level cross-site navigation — the state
+# cookie must survive it (cookie_same_site = "None", or "Lax" for GET returns).
 #
 # [[backend]]
 # type = "saml2"
 # name = "Saml2"
 #   [backend.config]
-#   idp_entity_id = "https://idp.example.org/idp" # default/fallback IdP when no entityID arrives on the auth request
+#   idp_entity_id = "https://idp.example.org/idp" # default/fallback IdP; optional when disco_srv is set
+#   disco_srv = "https://service.seamlessaccess.org/ds" # IdP discovery service (MDQ mode only)
 #   sp_key_path = "keys/sp.key"
 #   sp_cert_path = "keys/sp.crt"
 #   sign_authn_requests = false
@@ -143,6 +176,60 @@ name = "Upstream"
 #     require_role = "idp"                       # fetched metadata must carry an IDPSSODescriptor
 #     fallback_ttl_secs = 3600                   # cache TTL when metadata omits validUntil / cacheDuration
 #     # allow_unverified = true                  # DANGER: skip metadata signature checks — testing only
+#
+# ── Frontend: SAML2 IdP (the proxy faces downstream SAML SPs) ────────────────
+# Registered SP metadata is REQUIRED: the requester and its ACS URL are
+# validated against it (assertions are never sent to an ACS taken from the
+# request). Set allow_unknown_sps = true only for local testing.
+#
+# [[frontend]]
+# type = "saml2"
+# name = "Saml2IDP"
+#   [frontend.config]
+#   idp_key_path = "keys/idp.key"
+#   idp_cert_path = "keys/idp.crt"
+#   sign_assertions = true
+#   # Serve metadata at the entityid URL too (SATOSA: entityid_endpoint) by
+#   # making the entity id a URL under this module:
+#   # idp_entity_id = "https://proxy.example.com/Saml2IDP/proxy.xml"
+#
+#   # Supported NameID formats in preference order; the first is the default.
+#   # A requested format outside the list gets an InvalidNameIDPolicy SAML
+#   # error. "transient" mints a fresh opaque value per response.
+#   # name_id_formats = [
+#   #   "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+#   #   "urn:oasis:names:tc:SAML:2.0:nameid-format:transient",
+#   # ]
+#
+#   # "uri" emits OID-named attributes (Name="urn:oid:…", FriendlyName) as
+#   # SWAMID SPs expect; OIDs come from config/attributes.toml. Default "basic".
+#   # attribute_name_format = "uri"
+#
+#   # Require signed AuthnRequests even when SP metadata doesn't say so.
+#   # want_authn_requests_signed = true
+#
+#   [frontend.config.metadata]
+#   local = ["metadata/sp1.xml", "metadata/federation-sps.xml"]
+#   # Optional MDQ source for SPs not in the local files (role forced to "sp"):
+#   # [frontend.config.metadata.mdq]
+#   # url = "https://mdq.swamid.se/"
+#   # signing_cert_path = "keys/mdq-signer.crt"
+#
+#   # Per-SP attribute release policy (internal attribute names). The
+#   # SP-specific entry replaces "default" (no merge); no entry = release all.
+#   # [frontend.config.policy.default]
+#   # attribute_restrictions = ["mail", "edupersonprincipalname"]
+#   # [frontend.config.policy."https://sp.example.org"]
+#   # attribute_restrictions = ["mail"]
+#
+#   # Published in IdP metadata (required by e.g. SWAMID registration).
+#   # [frontend.config.organization]
+#   # name = "SUNET"
+#   # display_name = "Sunet"
+#   # url = "https://sunet.se"
+#   # [[frontend.config.contact_person]]
+#   # contact_type = "technical"
+#   # email_address = "noc@sunet.se"
 
 # ── Optional micro-services (run in listed order) ───────────────────────────
 # [[microservice]]
