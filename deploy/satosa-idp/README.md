@@ -60,6 +60,19 @@ ssh debian@realta.labb.sunet.se 'cd ~/tunnelbana-idp && docker compose restart'
 ssh debian@realta.labb.sunet.se 'cd ~/tunnelbana-idp && docker compose up -d --build'
 ```
 
+## Registering the SP with the IdP
+
+`register_sp.sh` (adapted from the SATOSA-era `~/satosa/register_sp.sh`)
+fetches the live SP metadata from `/Saml2/metadata` and PUTs it to the IdP's
+service registry (`/services/satosa.labb.sunet.se`). Re-run it whenever the
+published metadata changes (new ACS binding, encryption cert,
+organization/contact, ...):
+
+```bash
+ssh debian@realta.labb.sunet.se 'cd ~/tunnelbana-idp && ./register_sp.sh'
+# or with overrides: ./register_sp.sh <IDP_BASE_URL> <SP_METADATA_URL>
+```
+
 ## Verified (non-interactive)
 
 * Entity configuration served, ES256-signed, `iss`/`sub` = bare entity_id.
