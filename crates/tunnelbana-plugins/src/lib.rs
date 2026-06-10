@@ -11,6 +11,8 @@ pub mod oidc_backend;
 pub mod oidc_frontend;
 pub mod saml2_backend;
 pub mod saml2_frontend;
+pub(crate) mod saml_common;
+pub mod saml_metadata;
 
 use tunnelbana_core::plugin::Registry;
 

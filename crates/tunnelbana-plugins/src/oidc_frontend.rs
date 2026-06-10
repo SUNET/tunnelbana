@@ -399,10 +399,8 @@ fn presented_access_token(ctx: &Context) -> Option<String> {
 /// discovery `claims_supported` list).
 fn mapper_openid_claims(mapper: &AttributeMapper) -> Vec<String> {
     mapper
-        .raw()
-        .attributes
-        .iter()
-        .filter(|(_, profiles)| profiles.contains_key("openid"))
-        .flat_map(|(_, profiles)| profiles.get("openid").cloned().unwrap_or_default())
+        .attributes()
+        .filter_map(|(_, profiles)| profiles.get("openid"))
+        .flat_map(|mapping| mapping.names.clone())
         .collect()
 }

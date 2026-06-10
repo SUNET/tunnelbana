@@ -1,8 +1,10 @@
 //! SAML2 frontend — the proxy acts as a SAML Identity Provider (IdP) to
 //! downstream Service Providers. Wraps the `gamlastan` core: parse the inbound
-//! AuthnRequest, and (after the backend authenticates the user) build, sign and
+//! AuthnRequest, validate the requester and its ACS against registered SP
+//! metadata, and (after the backend authenticates the user) build, sign and
 //! POST back a SAML Response.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
 
@@ -16,16 +18,23 @@ use gamlastan::core::assertion::name_id::NameId;
 use gamlastan::core::constants;
 use gamlastan::core::identifiers::SamlId;
 use gamlastan::crypto::{KeyUsage, KeysManager, SamlSigner};
+use gamlastan::metadata::types::entity_descriptor::{
+    EntitiesDescriptorRef, EntityDescriptor, EntityDescriptorRef,
+};
+use gamlastan::metadata::types::sp::SpSsoDescriptor;
 use gamlastan::profiles::sso::idp as idp_profile;
 use gamlastan::profiles::sso::web_browser::ResponseOptions;
 use gamlastan::xml::serialize::SamlSerialize;
+use gamlastan_mdq::{MdqClient, MdqError};
 
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
 use tunnelbana_core::error::{Error, Result};
-use tunnelbana_core::http::Response;
+use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, Route};
+
+use crate::saml_common::{build_mdq_client, extract_cert_b64, verifier_from_cert_ders, MdqConfig};
 
 #[derive(Debug, Deserialize)]
 struct Saml2FrontendConfig {
@@ -42,10 +51,67 @@ struct Saml2FrontendConfig {
     /// (single) assertion signature is satisfied by it.
     #[serde(default)]
     sign_responses: bool,
+    /// Single NameID format (alias for a one-element `name_id_formats`).
     #[serde(default)]
     name_id_format: Option<String>,
+    /// Supported NameID formats, in preference order. The first is the
+    /// default when the SP states no NameIDPolicy; a requested format outside
+    /// this list is answered with an InvalidNameIDPolicy SAML error.
+    #[serde(default)]
+    name_id_formats: Option<Vec<String>>,
     #[serde(default)]
     authn_context_class_ref: Option<String>,
+    /// `"basic"` (default) emits attributes under their plain SAML names;
+    /// `"uri"` emits OID-named attributes (`Name="urn:oid:…"`,
+    /// `NameFormat=…:attrname-format:uri`, plus `FriendlyName`) as SWAMID SPs
+    /// expect. OIDs/friendly names come from the attribute map profile.
+    #[serde(default)]
+    attribute_name_format: Option<String>,
+    /// Registered SP metadata: local files and/or an MDQ source. Required —
+    /// without it the frontend would deliver assertions to whatever ACS URL an
+    /// unauthenticated AuthnRequest names (see `allow_unknown_sps`).
+    #[serde(default)]
+    metadata: Option<SpMetadataConfig>,
+    /// Require every AuthnRequest to carry a valid signature, even when the
+    /// SP's metadata does not state `AuthnRequestsSigned="true"`.
+    #[serde(default)]
+    want_authn_requests_signed: bool,
+    /// Dev-only escape hatch: accept AuthnRequests from unregistered SPs and
+    /// trust the ACS URL in the request. Insecure; testing only.
+    #[serde(default)]
+    allow_unknown_sps: bool,
+    /// `[frontend.config.organization]` — published in IdP metadata.
+    #[serde(default)]
+    organization: Option<crate::saml_metadata::OrganizationConfig>,
+    /// `[[frontend.config.contact_person]]` — published in IdP metadata.
+    #[serde(default)]
+    contact_person: Vec<crate::saml_metadata::ContactPersonConfig>,
+    /// Per-SP attribute release policy keyed by SP entity id, with a
+    /// `"default"` entry for everyone else (cf. pysaml2's
+    /// `policy.default.attribute_restrictions`). An SP-specific entry
+    /// replaces the default (no merge). Attribute names are *internal* names.
+    #[serde(default)]
+    policy: BTreeMap<String, SpPolicy>,
+}
+
+/// `[frontend.config.policy."<sp-entity-id-or-default>"]`.
+#[derive(Debug, Clone, Deserialize)]
+struct SpPolicy {
+    /// Internal attribute names this SP may receive; absent = release all.
+    #[serde(default)]
+    attribute_restrictions: Option<Vec<String>>,
+}
+
+/// `[frontend.config.metadata]` — where registered SP metadata comes from.
+#[derive(Debug, Deserialize)]
+struct SpMetadataConfig {
+    /// Metadata files, each an `EntityDescriptor` or `EntitiesDescriptor`.
+    #[serde(default)]
+    local: Vec<String>,
+    /// Optional MDQ source for per-request SP lookup. The role requirement is
+    /// forced to `"sp"`.
+    #[serde(default)]
+    mdq: Option<MdqConfig>,
 }
 
 fn default_assertion_lifetime() -> u64 {
@@ -53,6 +119,158 @@ fn default_assertion_lifetime() -> u64 {
 }
 fn default_true() -> bool {
     true
+}
+
+/// A registered SP: its parsed descriptor plus the certs pulled out of it.
+#[derive(Clone)]
+struct SpEntry {
+    sp_sso: SpSsoDescriptor,
+    signing_certs_der: Vec<Vec<u8>>,
+    /// Kept for the future IdP-side assertion-encryption feature (F6).
+    #[allow(dead_code)]
+    encryption_certs_der: Vec<Vec<u8>>,
+}
+
+/// Where registered SPs are looked up.
+#[allow(clippy::large_enum_variant)] // two-variant config enum, built once
+enum SpStore {
+    /// Legacy open mode (`allow_unknown_sps = true`): any issuer is accepted
+    /// and the ACS URL is taken from the request. Insecure; testing only.
+    AllowAll,
+    /// entityID → SP entry from local metadata files, with an optional MDQ
+    /// fallback for entities not present locally.
+    Store {
+        local: BTreeMap<String, SpEntry>,
+        mdq: Option<MdqClient>,
+    },
+}
+
+impl SpStore {
+    /// Resolve a registered SP. `Ok(None)` means "unknown SP" (reject);
+    /// only `AllowAll` short-circuits that policy, handled by the caller.
+    async fn resolve(&self, entity_id: &str) -> Result<Option<SpEntry>> {
+        match self {
+            SpStore::AllowAll => Ok(None),
+            SpStore::Store { local, mdq } => {
+                if let Some(entry) = local.get(entity_id) {
+                    return Ok(Some(entry.clone()));
+                }
+                let Some(client) = mdq else {
+                    return Ok(None);
+                };
+                match client.get(entity_id).await {
+                    Ok(entity) => Ok(sp_entry_from_entity(&entity)),
+                    Err(MdqError::EntityNotFound(_)) => Ok(None),
+                    Err(e) => Err(Error::Authn(format!(
+                        "MDQ lookup for {entity_id} failed: {e}"
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+/// Build an [`SpEntry`] from an entity's first SPSSODescriptor, if it has one.
+fn sp_entry_from_entity(entity: &EntityDescriptor) -> Option<SpEntry> {
+    let sp_sso = entity.sp_sso_descriptors().first()?;
+    Some(SpEntry {
+        sp_sso: sp_sso.clone(),
+        signing_certs_der: sp_sso.signing_certificates_der(),
+        encryption_certs_der: sp_sso.encryption_certificates_der(),
+    })
+}
+
+/// Load and index SP metadata files (`EntityDescriptor` or
+/// `EntitiesDescriptor` roots).
+fn load_local_metadata(paths: &[String]) -> Result<BTreeMap<String, SpEntry>> {
+    let mut store = BTreeMap::new();
+    for path in paths {
+        let xml = std::fs::read_to_string(path)
+            .map_err(|e| Error::Config(format!("reading metadata file {path}: {e}")))?;
+        let doc = gamlastan::xml::uppsala::parse(&xml)
+            .map_err(|e| Error::Config(format!("metadata file {path}: invalid XML: {e}")))?;
+
+        // Root dispatch: a federation aggregate (EntitiesDescriptor) or a
+        // single EntityDescriptor.
+        let entities: Vec<EntityDescriptor> = if let Ok(parsed) =
+            gamlastan::xml::deserialize::parse_saml::<EntitiesDescriptorRef<'_>>(&doc)
+        {
+            parsed
+                .to_owned()
+                .entity_descriptors()
+                .into_iter()
+                .cloned()
+                .collect()
+        } else {
+            let entity =
+                gamlastan::xml::deserialize::parse_saml::<EntityDescriptorRef<'_>>(&doc)
+                    .map_err(|e| {
+                        Error::Config(format!(
+                            "metadata file {path}: neither EntitiesDescriptor nor \
+                             EntityDescriptor: {e}"
+                        ))
+                    })?;
+            vec![entity.to_owned()]
+        };
+
+        for entity in entities {
+            match sp_entry_from_entity(&entity) {
+                Some(entry) => {
+                    store.insert(entity.entity_id.clone(), entry);
+                }
+                None => tracing::warn!(
+                    "metadata file {path}: entity {} has no SPSSODescriptor; skipped",
+                    entity.entity_id
+                ),
+            }
+        }
+    }
+    Ok(store)
+}
+
+/// `gamlastan::bindings::traits::HttpRequest` adapter exposing the **raw**
+/// (still percent-encoded) query values from `HttpRequestData.uri`.
+/// `HttpRequestData.query` is already decoded, which would corrupt the
+/// redirect-binding signature input.
+struct RawQueryRequest<'a> {
+    request: &'a HttpRequestData,
+    raw_query: Option<&'a str>,
+}
+
+impl<'a> RawQueryRequest<'a> {
+    fn new(request: &'a HttpRequestData) -> Self {
+        let raw_query = request.uri.split_once('?').map(|(_, q)| q);
+        Self { request, raw_query }
+    }
+}
+
+impl gamlastan::bindings::traits::HttpRequest for RawQueryRequest<'_> {
+    fn method(&self) -> &str {
+        &self.request.method
+    }
+    fn url(&self) -> &str {
+        &self.request.uri
+    }
+    fn query_param(&self, name: &str) -> Option<&str> {
+        let qs = self.raw_query?;
+        qs.split('&')
+            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+    }
+    fn form_param(&self, name: &str) -> Option<&str> {
+        self.request.form.get(name).map(|s| s.as_str())
+    }
+    fn header(&self, name: &str) -> Option<&str> {
+        self.request
+            .headers
+            .get(&name.to_lowercase())
+            .map(|s| s.as_str())
+    }
+    fn body(&self) -> &[u8] {
+        &self.request.body
+    }
+    fn remote_addr(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub struct Saml2Frontend {
@@ -64,8 +282,14 @@ pub struct Saml2Frontend {
     assertion_lifetime_seconds: u64,
     sign_assertions: bool,
     sign_responses: bool,
-    name_id_format: String,
+    name_id_formats: Vec<String>,
+    attribute_name_format_uri: bool,
     default_acr: Option<String>,
+    sp_store: SpStore,
+    want_authn_requests_signed: bool,
+    organization: Option<gamlastan::metadata::types::organization::Organization>,
+    contact_persons: Vec<gamlastan::metadata::types::contact::ContactPerson>,
+    policy: BTreeMap<String, SpPolicy>,
     mapper: Arc<AttributeMapper>,
 }
 
@@ -97,6 +321,83 @@ impl Saml2Frontend {
         km.add_key(signing_key);
         let signer = SamlSigner::new(km);
 
+        let name_id_formats = match (&cfg.name_id_format, &cfg.name_id_formats) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Config(
+                    "set either name_id_format or name_id_formats, not both".into(),
+                ))
+            }
+            (Some(single), None) => vec![single.clone()],
+            (None, Some(list)) if !list.is_empty() => list.clone(),
+            (None, Some(_)) => {
+                return Err(Error::Config("name_id_formats must not be empty".into()))
+            }
+            (None, None) => vec![constants::NAMEID_PERSISTENT.to_string()],
+        };
+
+        let attribute_name_format_uri = match cfg.attribute_name_format.as_deref() {
+            None | Some("basic") => false,
+            Some("uri") => true,
+            Some(other) => {
+                return Err(Error::Config(format!(
+                    "unknown attribute_name_format: {other} (expected \"basic\" or \"uri\")"
+                )))
+            }
+        };
+
+        let sp_store = match (&cfg.metadata, cfg.allow_unknown_sps) {
+            (Some(md), _) => {
+                let local = load_local_metadata(&md.local)?;
+                let mdq = match &md.mdq {
+                    Some(mdq_cfg) => {
+                        // SP lookups must resolve SP metadata; reject configs
+                        // that ask for another role.
+                        if !matches!(mdq_cfg.require_role.as_deref(), None | Some("sp")) {
+                            return Err(Error::Config(
+                                "saml2 frontend [metadata.mdq] require_role must be \"sp\""
+                                    .into(),
+                            ));
+                        }
+                        let mdq_cfg_sp = MdqConfig {
+                            url: mdq_cfg.url.clone(),
+                            signing_cert_path: mdq_cfg.signing_cert_path.clone(),
+                            transform: mdq_cfg.transform.clone(),
+                            require_role: Some("sp".to_string()),
+                            fallback_ttl_secs: mdq_cfg.fallback_ttl_secs,
+                            allow_unverified: mdq_cfg.allow_unverified,
+                        };
+                        Some(build_mdq_client(&mdq_cfg_sp)?)
+                    }
+                    None => None,
+                };
+                if local.is_empty() && mdq.is_none() {
+                    return Err(Error::Config(
+                        "saml2 frontend [metadata] must list local files and/or an \
+                         [metadata.mdq] source"
+                            .into(),
+                    ));
+                }
+                SpStore::Store { local, mdq }
+            }
+            (None, true) => {
+                tracing::warn!(
+                    "saml2 frontend {}: allow_unknown_sps=true — accepting AuthnRequests \
+                     from unregistered SPs and trusting the ACS URL in the request. \
+                     Do not run this in production.",
+                    bx.name
+                );
+                SpStore::AllowAll
+            }
+            (None, false) => {
+                return Err(Error::Config(
+                    "saml2 frontend requires [frontend.config.metadata] (registered SP \
+                     metadata); set allow_unknown_sps=true to explicitly run open \
+                     (insecure, testing only)"
+                        .into(),
+                ));
+            }
+        };
+
         Ok(Box::new(Saml2Frontend {
             name: bx.name.clone(),
             idp_entity_id,
@@ -106,26 +407,37 @@ impl Saml2Frontend {
             assertion_lifetime_seconds: cfg.assertion_lifetime_seconds,
             sign_assertions: cfg.sign_assertions,
             sign_responses: cfg.sign_responses,
-            name_id_format: cfg
-                .name_id_format
-                .unwrap_or_else(|| constants::NAMEID_PERSISTENT.to_string()),
+            name_id_formats,
+            attribute_name_format_uri,
             default_acr: cfg.authn_context_class_ref,
+            sp_store,
+            want_authn_requests_signed: cfg.want_authn_requests_signed,
+            organization: cfg.organization.as_ref().map(|o| o.to_organization()),
+            contact_persons: crate::saml_metadata::contact_persons(&cfg.contact_person)?,
+            policy: cfg.policy,
             mapper: bx.attribute_mapper.clone(),
         }))
     }
 
-    fn handle_sso(&self, ctx: &mut Context) -> Result<FrontendAction> {
-        // AuthnRequest via HTTP-Redirect (GET, deflated) or HTTP-POST (form).
-        let (encoded, deflated) = if let Some(v) = ctx.request.query.get("SAMLRequest") {
-            (v.clone(), true)
-        } else if let Some(v) = ctx.request.form.get("SAMLRequest") {
-            (v.clone(), false)
-        } else {
-            return Err(Error::BadRequest("missing SAMLRequest".into()));
-        };
-        let relay_state = ctx.request.param("RelayState").map(|s| s.to_string());
+    async fn handle_sso(&self, ctx: &mut Context) -> Result<FrontendAction> {
+        // AuthnRequest via HTTP-Redirect (GET, deflated, optionally
+        // query-signed) or HTTP-POST (form, optionally enveloped-signed).
+        let (xml, relay_state, redirect_decoded) =
+            if ctx.request.query.contains_key("SAMLRequest") {
+                let raw = RawQueryRequest::new(&ctx.request);
+                let decoded = gamlastan::bindings::redirect::redirect_decode(&raw)
+                    .map_err(|e| Error::BadRequest(format!("redirect decode: {e}")))?;
+                let xml = String::from_utf8(decoded.saml_xml.clone())
+                    .map_err(|e| Error::BadRequest(format!("SAMLRequest not UTF-8: {e}")))?;
+                let relay = decoded.relay_state.clone();
+                (xml, relay, Some(decoded))
+            } else if let Some(v) = ctx.request.form.get("SAMLRequest") {
+                let xml = decode_authn_request(v, false)?;
+                (xml, ctx.request.form.get("RelayState").cloned(), None)
+            } else {
+                return Err(Error::BadRequest("missing SAMLRequest".into()));
+            };
 
-        let xml = decode_authn_request(&encoded, deflated)?;
         let doc = gamlastan::xml::uppsala::parse(&xml)
             .map_err(|e| Error::BadRequest(format!("invalid AuthnRequest XML: {e}")))?;
         let authn_request = gamlastan::xml::deserialize::parse_saml::<
@@ -134,8 +446,79 @@ impl Saml2Frontend {
         .map_err(|e| Error::BadRequest(format!("parsing AuthnRequest: {e}")))?
         .to_owned();
 
-        let processed = idp_profile::process_authn_request(&authn_request, None)
-            .map_err(|e| Error::BadRequest(format!("AuthnRequest validation: {e}")))?;
+        let sp_entity_id = authn_request
+            .base
+            .issuer
+            .as_ref()
+            .map(|i| i.value.clone())
+            .ok_or_else(|| Error::BadRequest("AuthnRequest carries no Issuer".into()))?;
+
+        // Resolve the requester against registered SP metadata. Unknown SP ⇒
+        // 403 — without metadata we must not trust the request's ACS URL.
+        let entry = match &self.sp_store {
+            SpStore::AllowAll => None,
+            store => match store.resolve(&sp_entity_id).await? {
+                Some(entry) => Some(entry),
+                None => {
+                    tracing::warn!("saml2 frontend {}: unknown SP {sp_entity_id}", self.name);
+                    return Ok(FrontendAction::Respond(Response::text(
+                        403,
+                        format!("unknown SP: {sp_entity_id}"),
+                    )));
+                }
+            },
+        };
+
+        // Signature policy: required when the SP's metadata says
+        // AuthnRequestsSigned="true" or the frontend is configured to insist.
+        if let Some(entry) = &entry {
+            let must_sign = entry.sp_sso.authn_requests_signed == Some(true)
+                || self.want_authn_requests_signed;
+            if must_sign {
+                if let Err(reason) =
+                    verify_authn_request_signature(entry, &redirect_decoded, &authn_request, &xml)
+                {
+                    tracing::warn!(
+                        "saml2 frontend {}: rejecting AuthnRequest from {sp_entity_id}: {reason}",
+                        self.name
+                    );
+                    return Ok(FrontendAction::Respond(Response::text(403, reason)));
+                }
+            }
+        }
+
+        // With SP metadata present this validates/resolves the ACS endpoint
+        // against the registered AssertionConsumerServices.
+        let processed =
+            idp_profile::process_authn_request(&authn_request, entry.as_ref().map(|e| &e.sp_sso))
+                .map_err(|e| Error::BadRequest(format!("AuthnRequest validation: {e}")))?;
+
+        // Honor the NameIDPolicy: no (or unspecified) requested format gets
+        // the first configured one; a format outside the configured list is
+        // answered with an InvalidNameIDPolicy SAML error at the (validated)
+        // ACS rather than an HTTP error, per Profiles 4.1.4.2.
+        let name_id_format = match processed.requested_name_id_format.as_deref() {
+            None | Some(constants::NAMEID_UNSPECIFIED) => self.name_id_formats[0].clone(),
+            Some(format) if self.name_id_formats.iter().any(|f| f == format) => {
+                format.to_string()
+            }
+            Some(format) => {
+                tracing::warn!(
+                    "saml2 frontend {}: SP {} requested unsupported NameID format {format}",
+                    self.name,
+                    processed.sp_entity_id
+                );
+                return self.saml_error_response(
+                    &processed,
+                    relay_state.as_deref(),
+                    gamlastan::core::protocol::status::Status::with_sub_status(
+                        constants::STATUS_REQUESTER,
+                        constants::STATUS_INVALID_NAMEID_POLICY,
+                        Some(format!("unsupported NameID format: {format}")),
+                    ),
+                );
+            }
+        };
 
         // Stash what we need to build the Response on the way back.
         ctx.state
@@ -143,6 +526,8 @@ impl Saml2Frontend {
         ctx.state
             .set_str(&self.name, "sp_entity_id", &processed.sp_entity_id);
         ctx.state.set_str(&self.name, "acs_url", &processed.acs_url);
+        ctx.state
+            .set_str(&self.name, "name_id_format", &name_id_format);
         if let Some(rs) = &relay_state {
             ctx.state.set_str(&self.name, "relay_state", rs);
         }
@@ -151,6 +536,74 @@ impl Saml2Frontend {
             request: InternalData::request(processed.sp_entity_id),
             target_backend: None,
         })
+    }
+
+    /// POST an assertion-less SAML error Response to the request's
+    /// (metadata-validated) ACS.
+    fn saml_error_response(
+        &self,
+        processed: &idp_profile::ProcessedAuthnRequest,
+        relay_state: Option<&str>,
+        status: gamlastan::core::protocol::status::Status,
+    ) -> Result<FrontendAction> {
+        let response = idp_profile::create_error_response(
+            &self.idp_entity_id,
+            Some(&processed.request_id),
+            &processed.acs_url,
+            status,
+            Utc::now(),
+        );
+        let xml = response
+            .to_xml_string()
+            .map_err(|e| Error::Internal(format!("serializing error Response: {e}")))?;
+        let relay = relay_state.map(gamlastan::bindings::relay_state::RelayState::echo);
+        let html = gamlastan::bindings::post::post_encode(
+            xml.as_bytes(),
+            false,
+            &processed.acs_url,
+            relay.as_ref(),
+        );
+        Ok(FrontendAction::Respond(
+            Response::html(html).with_header("cache-control", "no-cache, no-store"),
+        ))
+    }
+}
+
+/// Check a required AuthnRequest signature for either binding. Returns the
+/// rejection reason on failure.
+fn verify_authn_request_signature(
+    entry: &SpEntry,
+    redirect_decoded: &Option<gamlastan::bindings::redirect::RedirectDecoded>,
+    authn_request: &gamlastan::core::protocol::request::AuthnRequest,
+    xml: &str,
+) -> std::result::Result<(), String> {
+    let verifier = verifier_from_cert_ders(&entry.signing_certs_der)
+        .map_err(|e| format!("SP metadata carries no usable signing certificate: {e}"))?;
+    match redirect_decoded {
+        // HTTP-Redirect: the signature covers the raw query string.
+        Some(decoded) => {
+            if decoded.signature.is_none() {
+                return Err("AuthnRequest must be signed (redirect binding)".into());
+            }
+            match gamlastan::bindings::redirect::redirect_verify_signature(decoded, &verifier) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("AuthnRequest redirect signature is not valid".into()),
+                Err(e) => Err(format!("AuthnRequest redirect signature verification: {e}")),
+            }
+        }
+        // HTTP-POST: enveloped XML signature on the AuthnRequest element.
+        None => {
+            if !authn_request.base.has_signature {
+                return Err("AuthnRequest must be signed (POST binding)".into());
+            }
+            match verifier.verify_enveloped(xml) {
+                Ok(gamlastan::crypto::VerifyResult::Valid { .. }) => Ok(()),
+                Ok(gamlastan::crypto::VerifyResult::Invalid { reason }) => {
+                    Err(format!("AuthnRequest signature is not valid: {reason}"))
+                }
+                Err(e) => Err(format!("AuthnRequest signature verification: {e}")),
+            }
+        }
     }
 }
 
@@ -161,18 +614,31 @@ impl Frontend for Saml2Frontend {
     }
 
     fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
-        vec![
+        let mut routes = vec![
             Route::new(&regex::escape(&format!("{}/sso", self.name)), "sso"),
             Route::new(
                 &regex::escape(&format!("{}/metadata", self.name)),
                 "metadata",
             ),
-        ]
+        ];
+        // SATOSA's `entityid_endpoint`: when the entity id is itself a URL
+        // under this module, serve the metadata document there too (the
+        // common `<base>/<name>/proxy.xml` convention).
+        let module_base = self.sso_url.trim_end_matches("/sso");
+        if let Some(rest) = self.idp_entity_id.strip_prefix(&format!("{module_base}/")) {
+            if !rest.is_empty() && rest != "sso" && rest != "metadata" {
+                routes.push(Route::new(
+                    &regex::escape(&format!("{}/{rest}", self.name)),
+                    "metadata",
+                ));
+            }
+        }
+        routes
     }
 
     async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<FrontendAction> {
         match route_id {
-            "sso" => self.handle_sso(ctx),
+            "sso" => self.handle_sso(ctx).await,
             "metadata" => Ok(FrontendAction::Respond(
                 Response::new(200)
                     .with_header(
@@ -188,7 +654,7 @@ impl Frontend for Saml2Frontend {
     async fn handle_authn_response(
         &self,
         ctx: &mut Context,
-        response: InternalData,
+        mut response: InternalData,
     ) -> Result<Response> {
         let request_id = ctx
             .state
@@ -204,27 +670,86 @@ impl Frontend for Saml2Frontend {
             .ok_or_else(|| Error::State("no acs_url in state".into()))?;
         let relay_state = ctx.state.get_str(&self.name, "relay_state");
 
-        // Map internal attributes to SAML attributes.
-        let external = self.mapper.from_internal("saml", &response.attributes);
-        let attributes: Vec<Attribute> = external
-            .into_iter()
-            .map(|(name, values)| Attribute {
-                name,
-                name_format: Some(constants::ATTRNAME_FORMAT_BASIC.to_string()),
-                friendly_name: None,
-                values: values.into_iter().map(AttributeValue::String).collect(),
+        // Per-SP attribute release policy (internal names): the SP-specific
+        // entry wins over "default"; no entry (or no restrictions) releases
+        // all. The global `filter_attributes` micro-service still applies on
+        // top — this is the SAML-frontend-local, per-requester layer.
+        let sp_policy = self
+            .policy
+            .get(&sp_entity_id)
+            .or_else(|| self.policy.get("default"));
+        if let Some(allowed) = sp_policy.and_then(|p| p.attribute_restrictions.as_ref()) {
+            response
+                .attributes
+                .retain(|name, _| allowed.iter().any(|a| a == name));
+        }
+
+        // Map internal attributes to SAML attributes. In `uri` mode emit the
+        // OID name + FriendlyName from the attribute map; in `basic` mode the
+        // first plain SAML name (legacy behavior).
+        let attributes: Vec<Attribute> = response
+            .attributes
+            .iter()
+            .filter_map(|(internal_name, values)| {
+                let mapping = self.mapper.profile_attribute("saml", internal_name)?;
+                let basic_name = mapping.names.first()?;
+                let (name, name_format, friendly_name) = if self.attribute_name_format_uri {
+                    match &mapping.oid {
+                        Some(oid) => (
+                            oid.clone(),
+                            constants::ATTRNAME_FORMAT_URI,
+                            mapping
+                                .friendly_name
+                                .clone()
+                                .or_else(|| Some(basic_name.clone())),
+                        ),
+                        None => {
+                            tracing::warn!(
+                                "saml2 frontend {}: attribute {internal_name} has no OID in \
+                                 the attribute map; emitting basic name {basic_name}",
+                                self.name
+                            );
+                            (basic_name.clone(), constants::ATTRNAME_FORMAT_BASIC, None)
+                        }
+                    }
+                } else {
+                    (basic_name.clone(), constants::ATTRNAME_FORMAT_BASIC, None)
+                };
+                Some(Attribute {
+                    name,
+                    name_format: Some(name_format.to_string()),
+                    friendly_name,
+                    values: values
+                        .iter()
+                        .cloned()
+                        .map(AttributeValue::String)
+                        .collect(),
+                })
             })
             .collect();
 
-        let subject = response
-            .subject_id
-            .clone()
-            .or_else(|| self.mapper.compose_subject_id(&response.attributes))
-            .ok_or_else(|| Error::Authn("no subject identifier for SAML assertion".into()))?;
+        // The format chosen while honoring the request's NameIDPolicy; the
+        // fallback covers flows started before this state key existed.
+        let name_id_format = ctx
+            .state
+            .get_str(&self.name, "name_id_format")
+            .unwrap_or_else(|| self.name_id_formats[0].clone());
+
+        // A transient NameID must be a fresh opaque value per response —
+        // never the stable subject id.
+        let name_id_value = if name_id_format == constants::NAMEID_TRANSIENT {
+            SamlId::generate().to_string()
+        } else {
+            response
+                .subject_id
+                .clone()
+                .or_else(|| self.mapper.compose_subject_id(&response.attributes))
+                .ok_or_else(|| Error::Authn("no subject identifier for SAML assertion".into()))?
+        };
 
         let name_id = NameId {
-            value: subject,
-            format: Some(self.name_id_format.clone()),
+            value: name_id_value,
+            format: Some(name_id_format),
             name_qualifier: None,
             sp_name_qualifier: Some(sp_entity_id.clone()),
             sp_provided_id: None,
@@ -329,13 +854,9 @@ impl Saml2Frontend {
                 artifact_resolution_services: vec![],
                 single_logout_services: vec![],
                 manage_name_id_services: vec![],
-                name_id_formats: vec![
-                    constants::NAMEID_PERSISTENT.to_string(),
-                    constants::NAMEID_TRANSIENT.to_string(),
-                    constants::NAMEID_EMAIL.to_string(),
-                ],
+                name_id_formats: self.name_id_formats.clone(),
             },
-            want_authn_requests_signed: Some(false),
+            want_authn_requests_signed: Some(self.want_authn_requests_signed),
             single_sign_on_services: vec![
                 Endpoint::new(constants::BINDING_HTTP_REDIRECT, &self.sso_url),
                 Endpoint::new(constants::BINDING_HTTP_POST, &self.sso_url),
@@ -360,8 +881,8 @@ impl Saml2Frontend {
                 attr_authority: vec![],
                 pdp: vec![],
             },
-            organization: None,
-            contact_persons: vec![],
+            organization: self.organization.clone(),
+            contact_persons: self.contact_persons.clone(),
             additional_metadata_locations: vec![],
         };
         entity
@@ -410,23 +931,4 @@ fn insert_signature_after_element(xml: &str, element_name: &str, sig: &str) -> R
         .ok_or_else(|| Error::Internal(format!("malformed <{element_name}> tag")))?;
     let pos = tag_start + rel;
     Ok(format!("{}{}{}", &xml[..=pos], sig, &xml[pos + 1..]))
-}
-
-fn extract_cert_b64(pem: &[u8]) -> String {
-    let pem_str = String::from_utf8_lossy(pem);
-    let mut in_cert = false;
-    let mut b64 = String::new();
-    for line in pem_str.lines() {
-        if line.contains("BEGIN CERTIFICATE") {
-            in_cert = true;
-            continue;
-        }
-        if line.contains("END CERTIFICATE") {
-            break;
-        }
-        if in_cert {
-            b64.push_str(line.trim());
-        }
-    }
-    b64
 }

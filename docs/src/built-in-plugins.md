@@ -114,15 +114,73 @@ name = "Saml2IDP"
   assertion_lifetime_seconds = 300                 # default 300
   sign_assertions          = true                  # default true
   sign_responses           = false                 # default false (see note)
-  name_id_format           = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+  # Supported NameID formats in preference order; the first is the default
+  # when the SP states no NameIDPolicy. A requested format outside the list
+  # is answered with an InvalidNameIDPolicy SAML error at the SP's ACS.
+  # "transient" mints a fresh random opaque value per response.
+  name_id_formats          = ["urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"]
+  # name_id_format = "…"   # single-value alias; do not set both forms
   authn_context_class_ref  = "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport"
+  # "basic" (default) emits plain attribute names; "uri" emits OID names +
+  # FriendlyName from the attribute map (SWAMID-style).
+  attribute_name_format    = "basic"
+  # Require signed AuthnRequests even when the SP's metadata does not say
+  # AuthnRequestsSigned="true". Also advertised in IdP metadata.
+  want_authn_requests_signed = false
+
+  # REQUIRED: registered SP metadata (see the security note below).
+  [frontend.config.metadata]
+  local = ["metadata/sp1.xml", "metadata/federation-sps.xml"]
+  # Optional MDQ source for SPs not found in the local files; the role
+  # requirement is forced to "sp". Same keys as the backend's [mdq] table.
+  # [frontend.config.metadata.mdq]
+  # url               = "https://mdq.swamid.se/"
+  # signing_cert_path = "keys/mdq-signer.crt"
+
+  # Optional per-SP attribute release policy (internal attribute names).
+  # The SP-specific entry replaces "default" (no merge); no matching entry
+  # (or no attribute_restrictions) releases everything.
+  # [frontend.config.policy.default]
+  # attribute_restrictions = ["mail", "edupersonprincipalname"]
+  # [frontend.config.policy."https://sp.example.org"]
+  # attribute_restrictions = ["mail"]
+
+  # Optional: published in IdP metadata (needed for e.g. SWAMID registration).
+  # [frontend.config.organization]
+  # name = "SUNET"
+  # display_name = "Sunet"
+  # url = "https://sunet.se"
+  # lang = "en"                       # default "en"
+  # [[frontend.config.contact_person]]
+  # contact_type  = "technical"       # technical|support|administrative|billing|other
+  # email_address = "noc@sunet.se"
+  # given_name    = "Ops"
 ```
+
+> **Security: registered SPs are mandatory.** Every AuthnRequest's issuer is
+> resolved against the `[frontend.config.metadata]` store (local files are
+> `EntityDescriptor` or `EntitiesDescriptor` documents; MDQ fills the gaps).
+> Unknown SPs get a **403**, and the ACS URL is validated against the SP's
+> registered `AssertionConsumerService`s — assertions are never delivered to a
+> URL taken from the request. Without this an attacker who knows the SSO URL
+> could exfiltrate signed assertions to an arbitrary ACS. The frontend
+> therefore **refuses to start** without a metadata source; the dev-only
+> escape hatch is `allow_unknown_sps = true` (logged loudly, never use it in
+> production). When a signature is required (SP metadata or
+> `want_authn_requests_signed`), redirect-binding signatures are verified over
+> the raw query string and POST-binding requests via their enveloped XML
+> signature, against the SP's metadata-registered signing certs. See ADR 0006.
 
 > **Signing.** By default tunnelbana signs the **assertion** only, which is the
 > common interoperable pattern: an SP that verifies the single assertion
 > signature is satisfied. Set `sign_responses = true` to also sign the Response
 > envelope. (Conversely, the [SAML SP backend](#saml2-backend--service-provider)
 > accepts either a signed assertion **or** a signed Response.)
+
+The IdP serves `…/Saml2IDP/sso` (Redirect + POST) and `…/Saml2IDP/metadata`.
+When `idp_entity_id` is itself a URL under the module base (the common
+`…/Saml2IDP/proxy.xml` convention), the metadata document is additionally
+served at that path (SATOSA's `entityid_endpoint`).
 
 ## `oidc` backend — Relying Party
 
@@ -170,9 +228,36 @@ name = "Saml2"
   sign_authn_requests = true               # default false
   name_id_format      = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
   security            = "permissive"       # "permissive" (default) or "strict"
+  # Clock-skew tolerance towards the IdP in seconds, overriding the preset
+  # (SATOSA: accepted_time_diff). Permissive defaults to 600, strict to 180.
+  # accepted_time_diff_secs = 300
+  # Keep inbound attributes the attribute map does not know, under a
+  # lowercased FriendlyName-or-Name key (SATOSA: allow_unknown_attributes).
+  # Frontends still drop them unless the map learns the name.
+  # passthrough_unmapped_attributes = true
+  # Accept IdP-initiated Responses (no InResponseTo) within an existing
+  # proxy flow. Default false: the ACS requires the in-flight AuthnRequest id.
+  # allow_unsolicited = true
+
+  # Decrypt <EncryptedAssertion> / <EncryptedID> (usually the signing pair).
+  # List several entries to rotate keys: all are tried for decryption, and
+  # every entry with a cert_path is published with use="encryption" in SP
+  # metadata (omit cert_path for retired decrypt-only keys).
+  # [[backend.config.encryption_keypairs]]
+  # key_path  = "keys/sp.key"
+  # cert_path = "keys/sp.crt"
+
+  # Optional: published in SP metadata (same shape as the frontend's).
+  # [backend.config.organization]
+  # name = "SUNET"
+  # display_name = "Sunet"
+  # url = "https://sunet.se"
+  # [[backend.config.contact_person]]
+  # contact_type  = "technical"
+  # email_address = "noc@sunet.se"
 ```
 
-  Dynamic federation mode via MDQ:
+  Dynamic federation mode via MDQ, with IdP discovery:
 
   ```toml
   [[backend]]
@@ -182,7 +267,13 @@ name = "Saml2"
     sp_entity_id        = "https://sp.example.com/Saml2"   # default <base_url>/<name>
     sp_key_path         = "keys/sp.key"
     sp_cert_path        = "keys/sp.crt"
-    idp_entity_id       = "https://idp.example.org/idp"    # default/fallback when no entityID arrives
+    # Default/fallback IdP when no entityID arrives. Optional when disco_srv
+    # is set; MDQ mode needs at least one of the two.
+    idp_entity_id       = "https://idp.example.org/idp"
+    # Identity-provider discovery service (SeamlessAccess / thiss.io). When a
+    # flow has no target IdP, the user is redirected here and returns with
+    # their choice at …/Saml2/disco. MDQ mode only.
+    disco_srv           = "https://service.seamlessaccess.org/ds"
     sign_authn_requests = false
     name_id_format      = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
     security            = "permissive"
@@ -196,26 +287,49 @@ name = "Saml2"
      # allow_unverified = true             # testing only; disables metadata signature verification
   ```
 
-  The ACS is served at `…/Saml2/acs` (HTTP-POST) and SP metadata at
-  `…/Saml2/metadata` in both modes.
+  The ACS is served at `…/Saml2/acs` (HTTP-POST and HTTP-Redirect, both
+  advertised in metadata), the discovery return at `…/Saml2/disco` (when
+  `disco_srv` is set, also published as an `<idpdisc:DiscoveryResponse>`
+  metadata extension), and SP metadata at `…/Saml2/metadata`.
 
   In **static mode**, AuthnRequests always go to `idp_sso_url`, and the backend
-  verifies the response against `idp_cert_path`.
+  verifies the response against `idp_cert_path`. `disco_srv` is rejected in
+  static mode — a pinned cert cannot verify arbitrary discovery choices.
 
   In **MDQ mode**, the backend resolves the upstream IdP per request:
 
   1. Read `entityID` from the inbound auth request's query or form parameters.
-  2. If `entityID` is missing, fall back to the configured `idp_entity_id`.
+  2. If `entityID` is missing, fall back to the configured `idp_entity_id`;
+     with neither, redirect the user to `disco_srv`
+     (`?entityID=<sp>&return=…/Saml2/disco`) and pick up their choice from the
+     `entityID` parameter on the return.
   3. Fetch that entity's metadata from the MDQ server and send the AuthnRequest
     to its HTTP-Redirect SSO endpoint.
-  4. Persist the selected `entityID` in the encrypted state cookie.
+  4. Persist the selected `entityID` in the encrypted state cookie (the
+     discovery round-trip needs no other state).
   5. On the ACS, fetch metadata for that same persisted entity again, build the
     verifier from its signing certificates, and validate the Response against
     that IdP.
 
-  This is the discovery boundary: tunnelbana consumes an incoming `entityID`
-  handed back by a discovery service such as SeamlessAccess, but it does not yet
-  implement the full SP-initiated Discovery Service Protocol itself.
+  > The discovery hop is a top-level cross-site navigation: the state cookie
+  > must survive it (`cookie_same_site = "None"`, or `"Lax"` for GET returns).
+  > See ADR 0007.
+
+  ### Encrypted assertions
+
+  With `[[backend.config.encryption_keypairs]]` configured, the ACS decrypts
+  `<EncryptedAssertion>` elements (RSA-OAEP / RSA-1.5 key transport,
+  AES-CBC/GCM data encryption) and `<EncryptedID>` subjects. Each keypair gets
+  its own decryptor and all are tried in turn, so rotation is: add the new
+  pair, keep the old key (without `cert_path`) until drained, then drop it.
+
+  The signature acceptance rule spans the encryption boundary: a Response is
+  accepted when **either** its envelope signature verifies on the received
+  document (the signature covers the ciphertext), **or** every assertion —
+  cleartext and decrypted alike — carries a signature that verifies on the XML
+  it travelled in (the decrypted plaintext for encrypted assertions). A
+  Response carrying encrypted assertions with no `encryption_keypairs`
+  configured is rejected. See ADR 0009.
 
   ### MDQ options
 
@@ -228,11 +342,38 @@ name = "Saml2"
   | `mdq.fallback_ttl_secs` | | metadata-driven | Cache TTL used when the metadata omits `validUntil` and `cacheDuration`. |
   | `mdq.allow_unverified` | | `false` | Accept unsigned/unverified metadata. For testing only. |
 
+  ### The MDQ signer certificate
+
+  `mdq.signing_cert_path` points at the **federation's metadata-signing
+  certificate** — a PEM-encoded X.509 certificate, published by the federation
+  operator (e.g. SWAMID, eduGAIN, or your pyFF instance). At startup the
+  backend reads the file and hands it to the `gamlastan-mdq` client, after
+  which **every** EntityDescriptor fetched from the MDQ server is
+  signature-verified against it before being trusted or cached.
+
+  The setting is effectively required: with neither `signing_cert_path` nor
+  `allow_unverified = true`, the backend refuses to start with
+
+  ```text
+  mdq requires signing_cert_path (or allow_unverified=true for testing)
+  ```
+
+  A relative path is resolved against the proxy's working directory, the same
+  convention as `sp_key_path` and `sp_cert_path`.
+
+  > **Key rollover:** the config currently accepts a single certificate, even
+  > though the underlying `gamlastan-mdq` client can hold several trusted
+  > signer certs at once. During a federation signing-key rollover, switch the
+  > file contents at the announced cutover rather than expecting both keys to
+  > be accepted simultaneously.
+
   ### Subject identifier selection
 
   A non-success SAML status (for example a cancelled login) is surfaced as an
-  authentication error to the frontend. The Response is accepted when **either**
-  the assertion or the Response envelope is signed and verifies.
+  authentication error to the frontend. The ACS also **fails closed** on
+  request correlation: without the AuthnRequest id persisted at flow start the
+  Response is rejected, unless it is truly unsolicited (no `InResponseTo`) and
+  `allow_unsolicited = true` (see ADR 0010).
 
   In MDQ mode, downstream subject selection follows the SATOSA-style
   primary-identifier pattern:

@@ -68,11 +68,23 @@ changes.
 - OIDC **RP** (backend): discovery, auth request (state + nonce + PKCE), code
   exchange (incl. `private_key_jwt`), id_token verification, userinfo, claims →
   attribute mapping.
-- **SAML2 SP** (backend): create + send AuthnRequest (HTTP-Redirect), ACS
-  signature verification, gamlastan's 32-check `process_response` validation,
-  attribute mapping, SP metadata.
-- **SAML2 IdP** (frontend): parse AuthnRequest (Redirect/POST), build a signed
-  Assertion + Response, POST it back to the SP's ACS, IdP metadata.
+- **SAML2 SP** (backend): create + send AuthnRequest (HTTP-Redirect), static or
+  MDQ-resolved IdP metadata, identity-provider **discovery service** flow
+  (SeamlessAccess-style, `disco_srv`), ACS signature verification,
+  **encrypted assertions / EncryptedID** (RSA-OAEP + AES-GCM/CBC, key
+  rotation), gamlastan's 32-check `process_response` validation with
+  configurable clock skew, fail-closed `InResponseTo` handling
+  (`allow_unsolicited` opt-in), attribute mapping with optional
+  unknown-attribute passthrough, SP metadata (organization/contact,
+  encryption certs, DiscoveryResponse).
+- **SAML2 IdP** (frontend): parse AuthnRequest (Redirect/POST), validate the
+  requester + ACS against **registered SP metadata** (local files and/or MDQ;
+  refuses to run open), redirect/POST **AuthnRequest signature verification**,
+  NameIDPolicy honoring with per-response transient NameIDs and
+  InvalidNameIDPolicy SAML errors, per-SP **attribute release policy**,
+  OID/`uri` attribute name format, build a signed Assertion + Response, POST
+  it back to the SP's ACS, IdP metadata (organization/contact, configured
+  NameID formats, entity-id metadata endpoint).
 - **OpenID Federation** frontend: serves its signed entity configuration,
   **auto-registers** unknown RPs by resolving them through a trust anchor's
   `federation_resolve_endpoint`, unpacks request objects (RFC 9101), accepts
@@ -90,9 +102,13 @@ Highlights: `tunnelbana-oidc/tests/op_flow.rs` (code+PKCE flow, id_token verify,
 userinfo, `private_key_jwt` with audience checks);
 `tunnelbana-plugins/tests/proxy_oidc_op.rs` (whole-proxy OIDC flow);
 `federation_flow.rs` (entity config + auto-registration via a mocked trust
-anchor + `private_key_jwt`); and `saml_roundtrip.rs` (our IdP signs an assertion
-with real RSA keys, our SP verifies + validates it, and a tampered Response is
-rejected).
+anchor + `private_key_jwt`); `saml_roundtrip.rs` (our IdP signs an assertion
+with real RSA keys, our SP verifies + validates it, tampered Responses and
+forged/unsigned AuthnRequests are rejected, NameID policies, release policies,
+passthrough and clock skew); `saml_disco.rs` (whole-proxy SeamlessAccess-style
+discovery flow with an in-test MDQ server); and `saml_encrypted.rs`
+(encrypted assertions/EncryptedID, signature rules across the encryption
+boundary, key rotation).
 
 
 ### Test coverage

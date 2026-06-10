@@ -114,28 +114,46 @@ The `saml2` backend has two upstream-metadata modes:
   and add `[backend.config.mdq]` so the backend resolves the selected IdP's
   metadata on demand from an MDQ server.
 
-In MDQ mode, the backend expects the chosen IdP to arrive on the auth request
-as an `entityID` parameter. That parameter can come from a discovery service
-return, a frontend-specific handoff, or a reverse-proxy rewrite. The backend
-then runs this flow:
+In MDQ mode, the chosen IdP can arrive on the auth request as an `entityID`
+parameter (a discovery-service return, a frontend-specific handoff, or a
+reverse-proxy rewrite) — or the backend runs the discovery itself when
+`disco_srv` is configured. The flow:
 
 1. Read `entityID` from the inbound query or form parameters. If it is absent,
-  fall back to the configured `idp_entity_id`.
+  fall back to the configured `idp_entity_id`. With neither, redirect the user
+  to `disco_srv` (`?entityID=<sp_entity_id>&return=…/<name>/disco`, the
+  SP-initiated Identity Provider Discovery Service Protocol); the discovery
+  service sends them back to `…/<name>/disco` with the chosen `entityID`.
 2. Resolve that entity from the MDQ server, require the configured role, and
   send the AuthnRequest to the entity's HTTP-Redirect `SingleSignOnService`.
-3. Persist the chosen `entityID` in the encrypted state cookie.
+3. Persist the chosen `entityID` in the encrypted state cookie (the discovery
+  round-trip needs no other state; the in-flight frontend request already
+  rides the cookie).
 4. On the ACS, re-resolve metadata for that same persisted `entityID`, build a
   verifier from its signing certificates, and validate the SAML Response
   against that IdP rather than trusting the unverified `Issuer` alone.
 
 This gives tunnelbana the same practical split SATOSA uses: discovery chooses
 the target IdP before the backend sends the AuthnRequest, and the ACS verifies
-the response against the IdP that was actually selected for the flow.
+the response against the IdP that was actually selected for the flow. With
+`disco_srv` set, SP metadata also publishes the
+`<idpdisc:DiscoveryResponse>` extension so the federation knows the return
+endpoint. `disco_srv` requires MDQ mode; the state cookie must survive the
+top-level cross-site discovery hop (`cookie_same_site = "None"`, or `"Lax"`
+for GET returns). See ADR 0007.
 
-> **Current boundary:** tunnelbana does **not** yet implement the full
-> SP-initiated Discovery Service Protocol on its own. Today the backend only
-> consumes an incoming `entityID`; if no discovery step injects one, the
-> configured `idp_entity_id` default is used.
+The trust anchor for all of this is `mdq.signing_cert_path`: the federation's
+metadata-signing certificate (PEM). Every entity statement fetched from the
+MDQ server is signature-verified against it, so the MDQ server itself never
+has to be trusted. Without it the backend refuses to start unless
+`allow_unverified = true` is set explicitly (testing only). See
+[MDQ options](built-in-plugins.md#mdq-options) for the full key reference.
+
+The `saml2` **frontend** has its own metadata requirement in the other
+direction: downstream SPs must be registered via
+`[frontend.config.metadata]` (local files and/or MDQ with the role forced to
+`"sp"`) before their AuthnRequests are accepted — see the
+[plugin reference](built-in-plugins.md#saml2-frontend--identity-provider).
 
 ## `${ENV}` interpolation
 
@@ -160,21 +178,26 @@ user_id_from_attrs = ["edupersonprincipalname"]
 
 [attributes.mail]
 openid = ["email"]
-saml   = ["email", "emailAddress", "mail"]
+saml   = { names = ["mail", "email", "emailAddress"], oid = "urn:oid:0.9.2342.19200300.100.1.3", friendly_name = "mail" }
 
 [attributes.givenname]
 openid = ["given_name"]
-saml   = ["givenName"]
+saml   = ["givenName"]              # plain-list form, still valid
 
 [attributes.edupersonprincipalname]
 openid = ["sub"]
-saml   = ["eduPersonPrincipalName"]
+saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
 ```
 
 - Each `[attributes.<internal>]` table lists the external names per profile. On
   the way **in** from a protocol, any matching external name is collected under
-  `<internal>`; on the way **out**, the internal value is emitted under each
-  external name for the target profile.
+  `<internal>`; on the way **out**, the internal value is emitted under the
+  first external name for the target profile.
+- A profile entry is either a **plain list** of names (the legacy form) or a
+  **detailed table** with `names`, an `oid` urn and a `friendly_name`. The OID
+  and FriendlyName are also matched on the way in, and they feed the SAML
+  frontend's `attribute_name_format = "uri"` mode (OID-named attributes, as
+  SWAMID SPs expect).
 - `user_id_from_attrs` lists the internal attributes used to compose the
   subject identifier when a backend does not supply one directly.
 
