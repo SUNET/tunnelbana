@@ -91,7 +91,7 @@ Key facts that follow from this:
   response transform chain is not involved). This is how a consent service would
   serve and handle its own approval page.
 
-## The three built-ins
+## The built-ins
 
 The bundled micro-services (`tunnelbana-plugins/src/microservices.rs`) are small
 and worth reading as templates. Their config is in the
@@ -102,6 +102,8 @@ and worth reading as templates. Their config is in the
 | `static_attributes` | response | Adds fixed attributes (does not overwrite existing ones). |
 | `filter_attributes` | response | Keeps only allow-listed internal attributes; drops the rest. |
 | `custom_routing` | request | Pins `ctx.target_backend` from the `requester`, with an optional default. |
+| `attribute_processor` | response | Rewrites attribute values through per-attribute processor chains (regex substitution). See [below](#attribute_processor-value-transforms). |
+| `attribute_authorization` | response | Rejects the authentication unless response attributes satisfy regex allow/deny rules. See [below](#attribute_authorization-regex-allowdeny-rules). |
 
 For instance, `filter_attributes` is the whole pattern in a few lines:
 
@@ -118,6 +120,113 @@ impl MicroService for FilterAttributes {
     }
 }
 ```
+
+## `attribute_processor`: value transforms
+
+The SATOSA-parity attribute transformer (ADR 0011, SATOSA: `AttributeProcessor`
++ `RegexSubProcessor`). It runs on the **response path** and rewrites the
+values of named internal attributes through a chain of processors, in place —
+it never adds or removes attributes, only changes values.
+
+Config is a `process` list; each entry names one internal attribute and its
+processor chain. The only processor kind today is `regex_sub`:
+
+```toml
+[[microservice]]
+type = "attribute_processor"
+name = "rewrite"
+  [[microservice.config.process]]
+  attribute = "mail"                          # internal attribute name
+    [[microservice.config.process.processors]]
+    name = "regex_sub"
+    match_pattern = '@legacy\.example\.org$'  # regex, applied unanchored
+    replace_pattern = '@example.org'          # every match replaced
+```
+
+This example rewrites a retired mail domain on the fly:
+`anna@legacy.example.org` → `anna@example.org`.
+
+How it behaves, precisely:
+
+- **Internal names.** `attribute` is the *internal* attribute name from your
+  attribute map — `mail`, not the wire name
+  `urn:oid:0.9.2342.19200300.100.1.3`. The backend has already mapped inbound
+  protocol attributes by the time this runs.
+- **All values, all matches.** Every value of the attribute is rewritten, and
+  replacement applies to every match within a value (like Python's `re.sub`).
+- **Group references.** Use the regex crate's `$1`/`${1}` syntax. Python-style
+  `\1` (as found in SATOSA configs) is accepted and converted automatically,
+  so a SATOSA `regex_sub_replace_pattern: _\1` ports verbatim as
+  `replace_pattern = '_\1'`. Prefer TOML *literal* strings (single quotes) so
+  backslashes need no escaping.
+- **Chaining.** A rule may list several processors; they run in order, each
+  seeing the previous one's output. Several `[[microservice.config.process]]`
+  rules can target different attributes.
+- **Fail-fast config.** Patterns compile at startup; a bad regex or an unknown
+  processor `name` aborts boot rather than surfacing mid-flow.
+- **Ordering.** Place it **before** services that *match on* the transformed
+  value (such as `attribute_authorization` below), and note that the subject
+  id composed via `user_id_from_attrs` is taken **before** micro-services run
+  — the transform affects the released attribute, not NameID minting (same as
+  SATOSA).
+
+## `attribute_authorization`: regex allow/deny rules
+
+The SATOSA-parity authorization gate (ADR 0012, SATOSA:
+`AttributeAuthorization`). It runs on the **response path** and *rejects the
+authentication* — not merely filters — when response attributes don't satisfy
+the configured rules. The originating frontend renders the rejection as a
+protocol error (SAML error response / OIDC `access_denied`).
+
+Rules nest **requester → provider → attribute → list of regexes**, where
+*requester* is the downstream SP/RP and *provider* is the upstream IdP/OP
+issuer. At the requester and provider levels the lookup is: exact key, else
+`""`, else `"default"` (`""` and `"default"` are synonymous wildcards):
+
+```toml
+[[microservice]]
+type = "attribute_authorization"
+name = "authz"
+  [microservice.config]
+  force_attributes_presence_on_allow = true
+
+  # Any requester, any provider: mail must be present and non-empty.
+  [microservice.config.attribute_allow.default.default]
+  mail = ["."]
+
+  # One locked-down SP additionally requires a staff affiliation.
+  [microservice.config.attribute_allow."https://locked.example".default]
+  mail = ["."]
+  affiliation = ["^staff$"]
+
+  # Deny example (SATOSA's doc case): reject eppn values without an '@'.
+  # [microservice.config.attribute_deny.default.default]
+  # edupersonprincipalname = ["^[^@]+$"]
+```
+
+Semantics (identical to SATOSA's, ported from
+`satosa/micro_services/attribute_authorization.py`):
+
+- **Allow rules.** For each attribute in the selected allow set: if the
+  attribute is present, at least one of its values must match at least one
+  regex (unanchored search, like `re.search`) — otherwise the flow is
+  rejected. If the attribute is **absent**, it is rejected only when
+  `force_attributes_presence_on_allow = true`; the
+  `mail = ["."]` + force-presence pair above is the idiom for "must be
+  present and non-empty".
+- **Deny rules.** The mirror image: if any value of a listed attribute matches
+  any regex, the flow is rejected. `force_attributes_presence_on_deny = true`
+  rejects when the attribute is absent.
+- **Selected, not merged.** A requester-specific block *replaces* the
+  `default` block entirely — rules are never inherited or combined. In the
+  example above, `https://locked.example` must therefore repeat the
+  `mail` rule alongside its `affiliation` rule.
+- **Internal names**, as everywhere: `mail`, `edupersonprincipalname` —
+  not the wire names (`urn:oid:…`, `eduPersonPrincipalName`).
+- **Fail-fast config.** All regexes compile at startup.
+- **Ordering.** List it **after** `attribute_processor` so the rules see the
+  transformed values, and make sure nothing earlier in the chain (e.g. a
+  `filter_attributes`) strips an attribute you gate on.
 
 ## Writing your own
 

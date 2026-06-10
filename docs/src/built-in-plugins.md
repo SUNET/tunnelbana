@@ -417,4 +417,35 @@ name = "routing"
   [[microservice.config.rule]]
   requester = "https://sp-b.example.com"
   backend   = "Upstream"
+
+# Rewrite attribute values on the response path (SATOSA: AttributeProcessor).
+# Processors run in order; regex_sub replaces every match in every value.
+# Replacement accepts $1/${1} and Python-style \1 (SATOSA configs port as-is).
+[[microservice]]
+type = "attribute_processor"
+name = "rewrite"
+  [[microservice.config.process]]
+  attribute = "mail"                     # internal attribute name
+    [[microservice.config.process.processors]]
+    name = "regex_sub"
+    match_pattern = '@legacy\.example\.org$'
+    replace_pattern = '@example.org'
+
+# Reject the authentication unless response attributes satisfy regex rules
+# (SATOSA: AttributeAuthorization). Rules nest requester -> provider ->
+# attribute; "default" (or "") is the wildcard at the first two levels, and a
+# specific entry replaces — never merges with — the default. Allow: some value
+# must match some regex (absent attribute rejects only with the force flag).
+# Deny: any match rejects.
+[[microservice]]
+type = "attribute_authorization"
+name = "authz"
+  [microservice.config]
+  force_attributes_presence_on_allow = true
+  [microservice.config.attribute_allow.default.default]
+  mail = ["."]                           # must be present and non-empty
 ```
+
+See the [micro-services chapter](micro-services.md) for the
+`attribute_processor` and `attribute_authorization` semantics in detail
+(ADRs 0011/0012).

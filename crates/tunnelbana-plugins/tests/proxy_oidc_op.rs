@@ -3,7 +3,7 @@
 //! routing, the state cookie, request/response dispatch, and OP token issuance.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tunnelbana_core::attributes::AttributeMapper;
@@ -12,7 +12,7 @@ use tunnelbana_core::error::Result;
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{
-    Backend, BackendAction, BuildContext, Frontend, NullHttpClient, Route,
+    Backend, BackendAction, BuildContext, Frontend, MicroService, NullHttpClient, Route,
 };
 use tunnelbana_core::proxy::Proxy;
 use tunnelbana_core::state::StateSealer;
@@ -52,6 +52,26 @@ impl Backend for MockBackend {
             attributes,
         };
         Ok(BackendAction::AuthResponse(response))
+    }
+}
+
+struct RequesterProbe {
+    seen: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl MicroService for RequesterProbe {
+    fn name(&self) -> &str {
+        "requester_probe"
+    }
+
+    async fn process_response(
+        &self,
+        _ctx: &mut Context,
+        data: InternalData,
+    ) -> Result<InternalData> {
+        *self.seen.lock().unwrap() = data.requester.clone();
+        Ok(data)
     }
 }
 
@@ -240,6 +260,35 @@ async fn oidc_op_full_flow_through_proxy() {
         disco["token_endpoint"],
         "https://proxy.example.com/OIDC/token"
     );
+}
+
+#[tokio::test]
+async fn response_microservice_sees_restored_requester() {
+    let mapper = attribute_mapper();
+    let frontend = build_frontend(mapper.clone());
+    let backend: Box<dyn Backend> = Box::new(MockBackend {
+        name: "Mock".to_string(),
+    });
+    let seen = Arc::new(Mutex::new(None));
+    let probe: Box<dyn MicroService> = Box::new(RequesterProbe { seen: seen.clone() });
+    let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
+    let proxy = Proxy::new(vec![frontend], vec![backend], vec![probe], sealer);
+
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let challenge = pkce::s256_challenge(verifier);
+    let authz_url = format!(
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        urlenc("https://rp.example.com/cb"),
+        challenge
+    );
+
+    let r1 = proxy.run(req(&authz_url, "GET", None)).await;
+    assert_eq!(r1.status, 302, "authorization should redirect");
+    let cookie1 = set_cookie(&r1);
+
+    let r2 = proxy.run(req("Mock/callback", "GET", Some(&cookie1))).await;
+    assert_eq!(r2.status, 302, "callback should redirect to RP with code");
+    assert_eq!(seen.lock().unwrap().as_deref(), Some("rp-1"));
 }
 
 fn urlenc(s: &str) -> String {

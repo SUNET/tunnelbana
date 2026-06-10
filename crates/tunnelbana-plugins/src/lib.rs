@@ -29,4 +29,12 @@ pub fn register_all(registry: &mut Registry) {
     registry.register_microservice("static_attributes", microservices::StaticAttributes::build);
     registry.register_microservice("filter_attributes", microservices::FilterAttributes::build);
     registry.register_microservice("custom_routing", microservices::CustomRouting::build);
+    registry.register_microservice(
+        "attribute_processor",
+        microservices::AttributeProcessor::build,
+    );
+    registry.register_microservice(
+        "attribute_authorization",
+        microservices::AttributeAuthorization::build,
+    );
 }
