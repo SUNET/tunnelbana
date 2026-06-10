@@ -26,3 +26,8 @@ saml = { names = ["displayName", "cn"], oid = "urn:oid:2.16.840.1.113730.3.1.241
 [attributes.edupersonprincipalname]
 openid = ["sub"]
 saml = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
+
+# SAML subject-id (released by IdPs under the REFEDS Personalized Access
+# entity category instead of eduPersonPrincipalName).
+[attributes.subjectid]
+saml = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }

@@ -16,3 +16,5 @@ accepted — supersede with a new record rather than editing history.
 | [0008](0008-attribute-map-oids-and-passthrough.md) | OID-aware attribute map and unknown-attribute passthrough | Accepted |
 | [0009](0009-saml-encrypted-assertions.md) | Encrypted assertions at the SAML2 backend (XML Encryption) | Accepted |
 | [0010](0010-saml-unsolicited-fail-closed.md) | Fail-closed InResponseTo handling and `allow_unsolicited` | Accepted |
+| [0011](0011-attribute-processor-microservice.md) | `attribute_processor` micro-service (regex value transforms) | Accepted |
+| [0012](0012-attribute-authorization-microservice.md) | `attribute_authorization` micro-service (regex allow/deny) | Accepted |

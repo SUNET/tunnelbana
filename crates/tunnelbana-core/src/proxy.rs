@@ -178,12 +178,9 @@ impl Proxy {
         match backend.handle_endpoint(ctx, route_id).await? {
             BackendAction::Respond(r) => Ok(r),
             BackendAction::AuthResponse(mut response) => {
-                // Response-path micro-services.
-                for ms in &self.microservices {
-                    response = ms.process_response(ctx, response).await?;
-                }
-
-                // Recover originating frontend and requester.
+                // Recover originating frontend and requester before response-path
+                // micro-services so requester-scoped policy sees the same data
+                // the frontend will render.
                 let frontend_name = ctx
                     .state
                     .get_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND)
@@ -193,6 +190,11 @@ impl Proxy {
 
                 if response.requester.is_none() {
                     response.requester = ctx.requester();
+                }
+
+                // Response-path micro-services.
+                for ms in &self.microservices {
+                    response = ms.process_response(ctx, response).await?;
                 }
 
                 let frontend = self

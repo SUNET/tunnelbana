@@ -237,3 +237,28 @@ name = "Upstream"
 # name = "filter"
 #   [microservice.config]
 #   allowed = ["mail", "givenname", "surname", "edupersonprincipalname"]
+#
+# Per-attribute value transforms on the response path (SATOSA:
+# AttributeProcessor). Processors run in order; `regex_sub` mirrors SATOSA's
+# RegexSubProcessor (replacement accepts both `$1` and Python-style `\1`).
+# [[microservice]]
+# type = "attribute_processor"
+# name = "rewrite"
+#   [[microservice.config.process]]
+#   attribute = "mail"
+#     [[microservice.config.process.processors]]
+#     name = "regex_sub"
+#     match_pattern = '@legacy\.example\.org$'
+#     replace_pattern = '@example.org'
+#
+# Regex allow/deny authorization on response attributes (SATOSA:
+# AttributeAuthorization). Rules nest requester -> provider -> attribute;
+# "default" (or "") is the wildcard, and a specific entry replaces — never
+# merges with — the default. A failing rule rejects the authentication.
+# [[microservice]]
+# type = "attribute_authorization"
+# name = "authz"
+#   [microservice.config]
+#   force_attributes_presence_on_allow = true
+#   [microservice.config.attribute_allow.default.default]
+#   mail = ["."]   # must be present and non-empty
