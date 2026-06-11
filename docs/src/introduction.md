@@ -7,7 +7,7 @@ relying parties / service providers, a **backend** speaks to upstream identity
 / OpenID providers, and the two are decoupled by a protocol-agnostic
 `InternalData` model.
 
-> tunnelbana = like the Stockholm metro — it carries identities between providers, connecting them with performance and ease of use.
+> tunnelbana = like the Stockholm metro - it carries identities between providers, connecting them with performance and ease of use.
 
 It is built on [`actix-web`](https://actix.rs), the
 [`jose-rs`](https://github.com/kushaldas/jose-rs) JOSE library, and (for SAML)

@@ -202,14 +202,13 @@ fn load_local_metadata(paths: &[String]) -> Result<BTreeMap<String, SpEntry>> {
                 .cloned()
                 .collect()
         } else {
-            let entity =
-                gamlastan::xml::deserialize::parse_saml::<EntityDescriptorRef<'_>>(&doc)
-                    .map_err(|e| {
-                        Error::Config(format!(
-                            "metadata file {path}: neither EntitiesDescriptor nor \
+            let entity = gamlastan::xml::deserialize::parse_saml::<EntityDescriptorRef<'_>>(&doc)
+                .map_err(|e| {
+                Error::Config(format!(
+                    "metadata file {path}: neither EntitiesDescriptor nor \
                              EntityDescriptor: {e}"
-                        ))
-                    })?;
+                ))
+            })?;
             vec![entity.to_owned()]
         };
 
@@ -354,8 +353,7 @@ impl Saml2Frontend {
                         // that ask for another role.
                         if !matches!(mdq_cfg.require_role.as_deref(), None | Some("sp")) {
                             return Err(Error::Config(
-                                "saml2 frontend [metadata.mdq] require_role must be \"sp\""
-                                    .into(),
+                                "saml2 frontend [metadata.mdq] require_role must be \"sp\"".into(),
                             ));
                         }
                         let mdq_cfg_sp = MdqConfig {
@@ -422,21 +420,21 @@ impl Saml2Frontend {
     async fn handle_sso(&self, ctx: &mut Context) -> Result<FrontendAction> {
         // AuthnRequest via HTTP-Redirect (GET, deflated, optionally
         // query-signed) or HTTP-POST (form, optionally enveloped-signed).
-        let (xml, relay_state, redirect_decoded) =
-            if ctx.request.query.contains_key("SAMLRequest") {
-                let raw = RawQueryRequest::new(&ctx.request);
-                let decoded = gamlastan::bindings::redirect::redirect_decode(&raw)
-                    .map_err(|e| Error::BadRequest(format!("redirect decode: {e}")))?;
-                let xml = String::from_utf8(decoded.saml_xml.clone())
-                    .map_err(|e| Error::BadRequest(format!("SAMLRequest not UTF-8: {e}")))?;
-                let relay = decoded.relay_state.clone();
-                (xml, relay, Some(decoded))
-            } else if let Some(v) = ctx.request.form.get("SAMLRequest") {
-                let xml = decode_authn_request(v, false)?;
-                (xml, ctx.request.form.get("RelayState").cloned(), None)
-            } else {
-                return Err(Error::BadRequest("missing SAMLRequest".into()));
-            };
+        let (xml, relay_state, redirect_decoded) = if ctx.request.query.contains_key("SAMLRequest")
+        {
+            let raw = RawQueryRequest::new(&ctx.request);
+            let decoded = gamlastan::bindings::redirect::redirect_decode(&raw)
+                .map_err(|e| Error::BadRequest(format!("redirect decode: {e}")))?;
+            let xml = String::from_utf8(decoded.saml_xml.clone())
+                .map_err(|e| Error::BadRequest(format!("SAMLRequest not UTF-8: {e}")))?;
+            let relay = decoded.relay_state.clone();
+            (xml, relay, Some(decoded))
+        } else if let Some(v) = ctx.request.form.get("SAMLRequest") {
+            let xml = decode_authn_request(v, false)?;
+            (xml, ctx.request.form.get("RelayState").cloned(), None)
+        } else {
+            return Err(Error::BadRequest("missing SAMLRequest".into()));
+        };
 
         let doc = gamlastan::xml::uppsala::parse(&xml)
             .map_err(|e| Error::BadRequest(format!("invalid AuthnRequest XML: {e}")))?;
@@ -472,8 +470,8 @@ impl Saml2Frontend {
         // Signature policy: required when the SP's metadata says
         // AuthnRequestsSigned="true" or the frontend is configured to insist.
         if let Some(entry) = &entry {
-            let must_sign = entry.sp_sso.authn_requests_signed == Some(true)
-                || self.want_authn_requests_signed;
+            let must_sign =
+                entry.sp_sso.authn_requests_signed == Some(true) || self.want_authn_requests_signed;
             if must_sign {
                 if let Err(reason) =
                     verify_authn_request_signature(entry, &redirect_decoded, &authn_request, &xml)
@@ -499,9 +497,7 @@ impl Saml2Frontend {
         // ACS rather than an HTTP error, per Profiles 4.1.4.2.
         let name_id_format = match processed.requested_name_id_format.as_deref() {
             None | Some(constants::NAMEID_UNSPECIFIED) => self.name_id_formats[0].clone(),
-            Some(format) if self.name_id_formats.iter().any(|f| f == format) => {
-                format.to_string()
-            }
+            Some(format) if self.name_id_formats.iter().any(|f| f == format) => format.to_string(),
             Some(format) => {
                 tracing::warn!(
                     "saml2 frontend {}: SP {} requested unsupported NameID format {format}",
@@ -719,11 +715,7 @@ impl Frontend for Saml2Frontend {
                     name,
                     name_format: Some(name_format.to_string()),
                     friendly_name,
-                    values: values
-                        .iter()
-                        .cloned()
-                        .map(AttributeValue::String)
-                        .collect(),
+                    values: values.iter().cloned().map(AttributeValue::String).collect(),
                 })
             })
             .collect();

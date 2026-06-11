@@ -170,11 +170,7 @@ fn make_response(name_id: Option<NameIdOrEncryptedId>) -> SamlResponse {
     };
     let mut response = idp_profile::create_response(&options, &plain_name_id, chrono::Utc::now());
     if let Some(replacement) = name_id {
-        response.assertions[0]
-            .subject
-            .as_mut()
-            .unwrap()
-            .name_id = Some(replacement);
+        response.assertions[0].subject.as_mut().unwrap().name_id = Some(replacement);
     }
     response
 }
@@ -212,7 +208,10 @@ fn encrypted_response_b64_with(
     base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
 }
 
-async fn run_acs(backend: &dyn Backend, b64: String) -> tunnelbana_core::error::Result<BackendAction> {
+async fn run_acs(
+    backend: &dyn Backend,
+    b64: String,
+) -> tunnelbana_core::error::Result<BackendAction> {
     let mut ctx = Context::new(
         HttpRequestData {
             path: "SP/acs".into(),

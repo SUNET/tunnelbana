@@ -79,16 +79,11 @@ impl MicroService for CustomRouting {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         let by_issuer = issuer.as_deref().and_then(|i| self.issuer_rules.get(i));
-        let by_requester = data
-            .requester
-            .as_deref()
-            .and_then(|r| self.rules.get(r));
+        let by_requester = data.requester.as_deref().and_then(|r| self.rules.get(r));
 
         if let Some(backend) = by_issuer.or(by_requester) {
             ctx.target_backend = Some(backend.clone());
-        } else if (data.requester.is_some() || issuer.is_some())
-            && self.default_backend.is_some()
-        {
+        } else if (data.requester.is_some() || issuer.is_some()) && self.default_backend.is_some() {
             ctx.target_backend = self.default_backend.clone();
         }
         Ok(data)
@@ -253,6 +248,8 @@ mod tests {
 
     #[test]
     fn idp_hinting_requires_params() {
-        assert!(IdpHinting::build(&bx("hint", serde_json::json!({ "allowed_params": [] }))).is_err());
+        assert!(
+            IdpHinting::build(&bx("hint", serde_json::json!({ "allowed_params": [] }))).is_err()
+        );
     }
 }

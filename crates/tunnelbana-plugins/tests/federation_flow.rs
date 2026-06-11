@@ -30,7 +30,7 @@ fn ec_key(kid: &str) -> SigningKey {
 /// endpoint, both signed by the TA key.
 struct MockFederation {
     ta_key: SigningKey,
-    rp_pub_jwks: jose_rs::jwk::JwkSet,
+    rp_key: SigningKey,
 }
 
 #[async_trait]
@@ -55,7 +55,16 @@ impl HttpClient for MockFederation {
             .unwrap()
         } else if url.starts_with(&format!("{TA_ID}/resolve")) {
             // Resolve response for the RP, signed by the TA, carrying the RP's
-            // relying-party metadata (redirect_uris + public jwks).
+            // relying-party metadata (redirect_uris + public jwks) and a trust
+            // chain rooted at the TA (required since grindvakt 0.2.0).
+            let rp_metadata = serde_json::json!({
+                "openid_relying_party": {
+                    "redirect_uris": [RP_REDIRECT],
+                    "client_name": "Federation RP",
+                    "jwks": self.rp_key.to_public_jwks(),
+                    "subject_type": "pairwise"
+                }
+            });
             let mut claims = jose_rs::jwt::Claims {
                 iss: Some(TA_ID.to_string()),
                 sub: Some(RP_ID.to_string()),
@@ -63,16 +72,37 @@ impl HttpClient for MockFederation {
                 exp: Some(tunnelbana_core::util::now_secs() + 3600),
                 ..Default::default()
             };
+            claims.extra.insert("metadata".into(), rp_metadata.clone());
             claims.extra.insert(
-                "metadata".into(),
-                serde_json::json!({
-                    "openid_relying_party": {
-                        "redirect_uris": [RP_REDIRECT],
-                        "client_name": "Federation RP",
-                        "jwks": self.rp_pub_jwks,
-                        "subject_type": "pairwise"
-                    }
-                }),
+                "trust_chain".into(),
+                serde_json::json!([
+                    // Chain head: the RP's self-signed entity configuration.
+                    tunnelbana_oidc::federation::build_entity_configuration(
+                        &self.rp_key,
+                        RP_ID,
+                        &self.rp_key.to_public_jwks(),
+                        &[TA_ID.to_string()],
+                        rp_metadata,
+                        &[],
+                        3600,
+                    )
+                    .unwrap(),
+                    // Chain tail: the trust anchor's entity configuration.
+                    tunnelbana_oidc::federation::build_entity_configuration(
+                        &self.ta_key,
+                        TA_ID,
+                        &self.ta_key.to_public_jwks(),
+                        &[],
+                        serde_json::json!({
+                            "federation_entity": {
+                                "federation_resolve_endpoint": format!("{TA_ID}/resolve")
+                            }
+                        }),
+                        &[],
+                        3600,
+                    )
+                    .unwrap(),
+                ]),
             );
             tunnelbana_oidc::jwt::sign(
                 &self.ta_key,
@@ -229,7 +259,7 @@ async fn entity_configuration_is_served_and_self_signed() {
     let rp_key = ec_key("rp-1");
     let http: Arc<dyn HttpClient> = Arc::new(MockFederation {
         ta_key: ta_key.clone(),
-        rp_pub_jwks: rp_key.to_public_jwks(),
+        rp_key: rp_key.clone(),
     });
     let op_jwk: serde_json::Value =
         serde_json::from_str(&ec_key("op-1").jwk.to_json().unwrap()).unwrap();
@@ -257,7 +287,7 @@ async fn auto_registration_and_private_key_jwt_flow() {
     let rp_key = ec_key("rp-1");
     let http: Arc<dyn HttpClient> = Arc::new(MockFederation {
         ta_key: ta_key.clone(),
-        rp_pub_jwks: rp_key.to_public_jwks(),
+        rp_key: rp_key.clone(),
     });
     let op_jwk: serde_json::Value =
         serde_json::from_str(&ec_key("op-1").jwk.to_json().unwrap()).unwrap();

@@ -102,7 +102,12 @@ impl HttpClient for MockNetwork {
                         3600,
                     )
                     .unwrap(),
-                    subordinate_statement(&self.ta_key, TA_ID, OP_ID, &self.op_key.to_public_jwks()),
+                    subordinate_statement(
+                        &self.ta_key,
+                        TA_ID,
+                        OP_ID,
+                        &self.op_key.to_public_jwks()
+                    ),
                     entity_configuration(
                         &self.ta_key,
                         TA_ID,
@@ -271,7 +276,10 @@ fn provider_metadata(op_key: &SigningKey, key_distribution: KeyDistribution) -> 
     let object = metadata.as_object_mut().unwrap();
     match key_distribution {
         KeyDistribution::Inline => {
-            object.insert("jwks".into(), serde_json::to_value(op_key.to_public_jwks()).unwrap());
+            object.insert(
+                "jwks".into(),
+                serde_json::to_value(op_key.to_public_jwks()).unwrap(),
+            );
         }
         KeyDistribution::SignedJwksUri => {
             object.insert(
@@ -280,7 +288,10 @@ fn provider_metadata(op_key: &SigningKey, key_distribution: KeyDistribution) -> 
             );
         }
         KeyDistribution::BadInlineWithJwksUri => {
-            object.insert("jwks".into(), serde_json::Value::String("not-a-jwks".into()));
+            object.insert(
+                "jwks".into(),
+                serde_json::Value::String("not-a-jwks".into()),
+            );
             object.insert(
                 "jwks_uri".into(),
                 serde_json::Value::String(format!("{OP_ID}/jwks")),
@@ -318,7 +329,9 @@ fn entity_configuration(
         exp: Some(tunnelbana_core::util::now_secs() + 3600),
         ..Default::default()
     };
-    claims.extra.insert("jwks".into(), serde_json::to_value(jwks).unwrap());
+    claims
+        .extra
+        .insert("jwks".into(), serde_json::to_value(jwks).unwrap());
     if !authority_hints.is_empty() {
         claims.extra.insert(
             "authority_hints".into(),
@@ -347,10 +360,9 @@ fn subordinate_statement(
         exp: Some(tunnelbana_core::util::now_secs() + 3600),
         ..Default::default()
     };
-    claims.extra.insert(
-        "jwks".into(),
-        serde_json::to_value(subject_jwks).unwrap(),
-    );
+    claims
+        .extra
+        .insert("jwks".into(), serde_json::to_value(subject_jwks).unwrap());
     tunnelbana_oidc::jwt::sign(
         key,
         &claims,
@@ -371,15 +383,15 @@ fn signed_jwks(key: &SigningKey, subject: &str) -> String {
         "keys".into(),
         serde_json::to_value(key.to_public_jwks().keys).unwrap(),
     );
-    tunnelbana_oidc::jwt::sign(
-        key,
-        &claims,
-        Some(tunnelbana_oidc::federation::JWK_SET_TYP),
-    )
-    .unwrap()
+    tunnelbana_oidc::jwt::sign(key, &claims, Some(tunnelbana_oidc::federation::JWK_SET_TYP))
+        .unwrap()
 }
 
-fn build_backend(http: Arc<dyn HttpClient>, fed_jwk: serde_json::Value, ta_pub: serde_json::Value) -> Box<dyn Backend> {
+fn build_backend(
+    http: Arc<dyn HttpClient>,
+    fed_jwk: serde_json::Value,
+    ta_pub: serde_json::Value,
+) -> Box<dyn Backend> {
     let config = serde_json::json!({
         "op_entity_id": OP_ID,
         "scope": "openid email",
@@ -404,7 +416,11 @@ fn build_backend(http: Arc<dyn HttpClient>, fed_jwk: serde_json::Value, ta_pub: 
     tunnelbana_plugins::federation_backend::FederationBackend::build(&bx).unwrap()
 }
 
-fn build_discovery_backend(http: Arc<dyn HttpClient>, fed_jwk: serde_json::Value, ta_pub: serde_json::Value) -> Box<dyn Backend> {
+fn build_discovery_backend(
+    http: Arc<dyn HttpClient>,
+    fed_jwk: serde_json::Value,
+    ta_pub: serde_json::Value,
+) -> Box<dyn Backend> {
     let config = serde_json::json!({
         "scope": "openid email",
         "discovery": {
@@ -508,7 +524,10 @@ async fn rp_entity_configuration_is_served_and_self_signed() {
         serde_json::json!(["automatic"])
     );
     assert_eq!(rp_meta["token_endpoint_auth_method"], "private_key_jwt");
-    assert!(rp_meta.get("jwks").is_some(), "client keys must be published");
+    assert!(
+        rp_meta.get("jwks").is_some(),
+        "client keys must be published"
+    );
 }
 
 #[tokio::test]
@@ -585,7 +604,10 @@ async fn callback_rejects_state_mismatch_and_wrong_nonce() {
     *net.nonce.lock().unwrap() = Some("not-the-real-nonce".into());
     c.request.query.insert("state".into(), state);
     let err = backend.handle_endpoint(&mut c, "callback").await;
-    assert!(err.is_err(), "nonce mismatch must fail id_token verification");
+    assert!(
+        err.is_err(),
+        "nonce mismatch must fail id_token verification"
+    );
 }
 
 #[tokio::test]
@@ -630,7 +652,10 @@ async fn discovery_renders_selection_page_then_starts_auth_with_choice() {
     assert_eq!(page.status, 200);
     let html = String::from_utf8(page.body.clone()).unwrap();
     assert!(html.contains("Pick your IdP"), "custom page title");
-    assert!(html.contains("The Test OP"), "OP display name from collection");
+    assert!(
+        html.contains("The Test OP"),
+        "OP display name from collection"
+    );
     assert!(html.contains(OP_ID), "OP entity id present");
     assert!(
         html.contains(r#"action="/OIDFedRP/disco""#),
@@ -654,7 +679,9 @@ async fn discovery_renders_selection_page_then_starts_auth_with_choice() {
     // The chosen OP and PKCE/state were persisted for the callback.
     let nonce = qp(&url, "nonce").unwrap();
     *net.nonce.lock().unwrap() = Some(nonce);
-    c.request.query.insert("state".into(), qp(&url, "state").unwrap());
+    c.request
+        .query
+        .insert("state".into(), qp(&url, "state").unwrap());
     c.request.query.insert("code".into(), "authcode-1".into());
     let action = backend.handle_endpoint(&mut c, "callback").await.unwrap();
     let BackendAction::AuthResponse(data) = action else {
@@ -674,9 +701,13 @@ async fn discovery_rejects_unlisted_op_and_empty_selection() {
     // Empty selection re-renders the page with a prompt.
     let mut c = ctx();
     let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
-    let BackendAction::Respond(resp) = action else { panic!() };
+    let BackendAction::Respond(resp) = action else {
+        panic!()
+    };
     assert_eq!(resp.status, 200);
-    assert!(String::from_utf8(resp.body).unwrap().contains("Please select"));
+    assert!(String::from_utf8(resp.body)
+        .unwrap()
+        .contains("Please select"));
 
     // An entity id not in the collection is refused (no resolution attempted).
     let mut c = ctx();
@@ -684,9 +715,13 @@ async fn discovery_rejects_unlisted_op_and_empty_selection() {
         .form
         .insert("entity_id".into(), "https://evil.example/op".into());
     let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
-    let BackendAction::Respond(resp) = action else { panic!() };
+    let BackendAction::Respond(resp) = action else {
+        panic!()
+    };
     assert_eq!(resp.status, 200);
-    assert!(String::from_utf8(resp.body).unwrap().contains("Unknown identity provider"));
+    assert!(String::from_utf8(resp.body)
+        .unwrap()
+        .contains("Unknown identity provider"));
 }
 
 #[tokio::test]
@@ -720,14 +755,19 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
 
     // Neither set -> error.
     let neither = serde_json::json!({ "federation": fed.clone() });
-    assert!(tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(neither)).is_err());
+    assert!(
+        tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(neither)).is_err()
+    );
 
     // Discovery enabled without a collection endpoint -> error.
     let no_collection = serde_json::json!({
         "discovery": { "enable": true },
         "federation": fed
     });
-    assert!(tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(no_collection)).is_err());
+    assert!(
+        tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(no_collection))
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -765,7 +805,10 @@ async fn start_auth_rejects_non_self_issued_trust_anchor_configuration() {
     let err = backend
         .start_auth(&mut ctx(), InternalData::request("https://sp.example"))
         .await;
-    assert!(err.is_err(), "trust anchor entity configuration must be self-issued");
+    assert!(
+        err.is_err(),
+        "trust anchor entity configuration must be self-issued"
+    );
 }
 
 #[tokio::test]
@@ -788,11 +831,15 @@ async fn full_code_flow_via_signed_jwks_uri() {
         .unwrap();
     let url = location(&resp);
     *net.nonce.lock().unwrap() = qp(&url, "nonce");
-    c.request.query.insert("state".into(), qp(&url, "state").unwrap());
+    c.request
+        .query
+        .insert("state".into(), qp(&url, "state").unwrap());
     c.request.query.insert("code".into(), "authcode-1".into());
 
     let action = backend.handle_endpoint(&mut c, "callback").await.unwrap();
-    let BackendAction::AuthResponse(data) = action else { panic!() };
+    let BackendAction::AuthResponse(data) = action else {
+        panic!()
+    };
     assert_eq!(data.subject_id.as_deref(), Some("fed-user-1"));
 }
 
@@ -816,11 +863,16 @@ async fn malformed_inline_jwks_does_not_fall_back_to_jwks_uri() {
         .unwrap();
     let url = location(&resp);
     *net.nonce.lock().unwrap() = qp(&url, "nonce");
-    c.request.query.insert("state".into(), qp(&url, "state").unwrap());
+    c.request
+        .query
+        .insert("state".into(), qp(&url, "state").unwrap());
     c.request.query.insert("code".into(), "authcode-1".into());
 
     let err = backend.handle_endpoint(&mut c, "callback").await;
-    assert!(err.is_err(), "invalid inline jwks must fail instead of downgrading");
+    assert!(
+        err.is_err(),
+        "invalid inline jwks must fail instead of downgrading"
+    );
 }
 
 #[tokio::test]
@@ -835,7 +887,11 @@ async fn discovery_ignores_entities_without_entity_types() {
         .form
         .insert("entity_id".into(), "https://untyped-op.example.org".into());
     let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
-    let BackendAction::Respond(resp) = action else { panic!() };
+    let BackendAction::Respond(resp) = action else {
+        panic!()
+    };
     assert_eq!(resp.status, 200);
-    assert!(String::from_utf8(resp.body).unwrap().contains("Unknown identity provider"));
+    assert!(String::from_utf8(resp.body)
+        .unwrap()
+        .contains("Unknown identity provider"));
 }

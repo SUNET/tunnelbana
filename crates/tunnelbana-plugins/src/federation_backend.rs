@@ -341,7 +341,13 @@ impl FederationBackend {
     /// Resolve a given OP's metadata through the trust anchors, with a
     /// per-OP TTL cache so steady-state flows do not hit the resolve endpoint.
     async fn resolve_op(&self, op_entity_id: &str) -> Result<ResolvedOp> {
-        if let Some((expires, op)) = self.resolved.read().expect("lock").get(op_entity_id).cloned() {
+        if let Some((expires, op)) = self
+            .resolved
+            .read()
+            .expect("lock")
+            .get(op_entity_id)
+            .cloned()
+        {
             if expires > now_secs() {
                 return Ok(op);
             }
@@ -350,9 +356,10 @@ impl FederationBackend {
         let resolved =
             federation::resolve_via_trust_anchors(&self.http, op_entity_id, &self.trust_anchors)
                 .await?;
-        let op_meta = resolved.metadata.get("openid_provider").ok_or_else(|| {
-            Error::Authn("resolved metadata has no openid_provider".into())
-        })?;
+        let op_meta = resolved
+            .metadata
+            .get("openid_provider")
+            .ok_or_else(|| Error::Authn("resolved metadata has no openid_provider".into()))?;
 
         let get = |key: &str| -> Option<String> {
             op_meta.get(key).and_then(|v| v.as_str()).map(String::from)
@@ -375,10 +382,10 @@ impl FederationBackend {
             federation_jwks: resolved.subject_jwks,
         };
 
-        self.resolved
-            .write()
-            .expect("lock")
-            .insert(op_entity_id.to_string(), (now_secs() + self.op_cache_ttl, op.clone()));
+        self.resolved.write().expect("lock").insert(
+            op_entity_id.to_string(),
+            (now_secs() + self.op_cache_ttl, op.clone()),
+        );
         tracing::info!(op = %op_entity_id, "resolved upstream OP via trust anchor");
         Ok(op)
     }
@@ -440,12 +447,7 @@ impl FederationBackend {
         ops: &[federation::CollectionEntity],
         error: Option<&str>,
     ) -> Response {
-        Response::html(render_discovery_html(
-            &self.name,
-            &d.page_title,
-            ops,
-            error,
-        ))
+        Response::html(render_discovery_html(&self.name, &d.page_title, ops, error))
     }
 
     /// The OP's id_token verification keys via the OpenID Federation JWK set
@@ -696,7 +698,12 @@ fn render_discovery_html(
     let action = format!("/{}/disco", html_escape(name));
 
     let error_html = error
-        .map(|e| format!(r#"<div class="error" role="alert">{}</div>"#, html_escape(e)))
+        .map(|e| {
+            format!(
+                r#"<div class="error" role="alert">{}</div>"#,
+                html_escape(e)
+            )
+        })
         .unwrap_or_default();
 
     let items = if ops.is_empty() {

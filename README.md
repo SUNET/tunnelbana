@@ -9,7 +9,7 @@ relying parties / service providers, a **backend** speaks to upstream identity
 [`jose-rs`](https://github.com/kushaldas/jose-rs) JOSE library, and (for SAML) the local
 [`gamlastan`](https://github.com/kushaldas/gamlastan) library.
 
-> tunnelbana = the Stockholm metro — it moves identities between lines.
+> tunnelbana = like the Stockholm metro - it carries identities between providers, connecting them with performance and ease of use.
 
 ## Why
 

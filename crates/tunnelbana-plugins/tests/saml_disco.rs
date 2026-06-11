@@ -280,8 +280,14 @@ async fn discovery_flow_through_proxy() {
     let r1 = proxy.run(req(&authz_url, "GET", None)).await;
     assert_eq!(r1.status, 302, "{}", String::from_utf8_lossy(&r1.body));
     let disco_url = location(&r1);
-    assert!(disco_url.starts_with(DISCO_SRV), "redirects to disco: {disco_url}");
-    assert_eq!(query_param(&disco_url, "entityID").as_deref(), Some(SP_ENTITY));
+    assert!(
+        disco_url.starts_with(DISCO_SRV),
+        "redirects to disco: {disco_url}"
+    );
+    assert_eq!(
+        query_param(&disco_url, "entityID").as_deref(),
+        Some(SP_ENTITY)
+    );
     assert_eq!(
         query_param(&disco_url, "return").as_deref(),
         Some("https://proxy.example.com/SP/disco")

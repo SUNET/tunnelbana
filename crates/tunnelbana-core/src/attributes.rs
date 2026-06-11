@@ -117,7 +117,11 @@ impl AttributeMapper {
     }
 
     /// The normalized mapping of one internal attribute for `profile`.
-    pub fn profile_attribute(&self, profile: &str, internal_name: &str) -> Option<&ProfileAttribute> {
+    pub fn profile_attribute(
+        &self,
+        profile: &str,
+        internal_name: &str,
+    ) -> Option<&ProfileAttribute> {
         self.attributes.get(internal_name)?.get(profile)
     }
 
@@ -302,10 +306,7 @@ mod tests {
         let m = mapper();
         let pa = m.profile_attribute("saml", "mail").unwrap();
         assert_eq!(pa.names.first().map(String::as_str), Some("email"));
-        assert_eq!(
-            pa.oid.as_deref(),
-            Some("urn:oid:0.9.2342.19200300.100.1.3")
-        );
+        assert_eq!(pa.oid.as_deref(), Some("urn:oid:0.9.2342.19200300.100.1.3"));
         assert_eq!(pa.friendly_name.as_deref(), Some("mail"));
     }
 

@@ -115,10 +115,7 @@ impl MicroService for AttributeAuthorization {
             for (attr, regexes) in allow {
                 match data.attributes.get(attr) {
                     Some(values) => {
-                        if !values
-                            .iter()
-                            .any(|v| regexes.iter().any(|r| r.is_match(v)))
-                        {
+                        if !values.iter().any(|v| regexes.iter().any(|r| r.is_match(v))) {
                             return Err(denied());
                         }
                     }
@@ -131,10 +128,7 @@ impl MicroService for AttributeAuthorization {
             for (attr, regexes) in deny {
                 match data.attributes.get(attr) {
                     Some(values) => {
-                        if values
-                            .iter()
-                            .any(|v| regexes.iter().any(|r| r.is_match(v)))
-                        {
+                        if values.iter().any(|v| regexes.iter().any(|r| r.is_match(v))) {
                             return Err(denied());
                         }
                     }
@@ -176,10 +170,7 @@ mod tests {
 
         let mut data = response_from("https://sp.example.org");
         data.set_attr("subjectid", "kushal_sunet");
-        assert!(authz
-            .process_response(&mut ctx(), data)
-            .await
-            .is_ok());
+        assert!(authz.process_response(&mut ctx(), data).await.is_ok());
 
         // force_attributes_presence_on_allow: missing subjectid -> denied.
         let mut data = response_from("https://sp.example.org");

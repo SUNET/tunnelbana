@@ -12,8 +12,8 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use gamlastan::core::assertion::attribute::AttributeValue;
-use gamlastan::core::constants;
 use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
+use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
 use gamlastan::crypto::{KeyUsage, KeysManager, SamlDecryptor, SamlSigner, SamlVerifier};
 use gamlastan::metadata::EntityDescriptor;
@@ -239,8 +239,7 @@ impl Saml2Backend {
             Some(mdq_cfg) => {
                 if cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
                     return Err(Error::Config(
-                        "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv"
-                            .into(),
+                        "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv".into(),
                     ));
                 }
                 IdpMetadata::Mdq(build_mdq_client(mdq_cfg)?)
@@ -289,9 +288,8 @@ impl Saml2Backend {
         let mut decryptors = Vec::new();
         let mut encryption_certs_b64 = Vec::new();
         for keypair in &cfg.encryption_keypairs {
-            let key_pem = std::fs::read(&keypair.key_path).map_err(|e| {
-                Error::Config(format!("reading encryption_keypairs.key_path: {e}"))
-            })?;
+            let key_pem = std::fs::read(&keypair.key_path)
+                .map_err(|e| Error::Config(format!("reading encryption_keypairs.key_path: {e}")))?;
             let mut key = loader::load_pem_auto(&key_pem, None)
                 .map_err(|e| Error::Crypto(format!("loading encryption key: {e}")))?;
             key.usage = KeyUsage::Decrypt;
@@ -384,7 +382,8 @@ impl Saml2Backend {
         }
         for cert_b64 in &self.encryption_certs_b64 {
             let key_info = gamlastan::crypto::build_x509_key_info(&[cert_b64.as_str()]);
-            base.key_descriptors.push(KeyDescriptor::encryption(key_info));
+            base.key_descriptors
+                .push(KeyDescriptor::encryption(key_info));
         }
         // Discovery deployments publish where the discovery service may send
         // the user back (idp-discovery-protocol <idpdisc:DiscoveryResponse>).
@@ -469,9 +468,10 @@ impl Saml2Backend {
     async fn handle_acs(&self, ctx: &mut Context) -> Result<BackendAction> {
         match &self.idp_metadata {
             IdpMetadata::Static { verifier, .. } => {
-                let expected = self.idp_entity_id.as_deref().ok_or_else(|| {
-                    Error::Internal("static mode without idp_entity_id".into())
-                })?;
+                let expected = self
+                    .idp_entity_id
+                    .as_deref()
+                    .ok_or_else(|| Error::Internal("static mode without idp_entity_id".into()))?;
                 self.process_acs(ctx, verifier, expected)
             }
             IdpMetadata::Mdq(client) => {
@@ -482,9 +482,7 @@ impl Saml2Backend {
                     .state
                     .get_str(&self.name, "idp_entity_id")
                     .or_else(|| self.idp_entity_id.clone())
-                    .ok_or_else(|| {
-                        Error::Authn("no IdP selected for this flow".into())
-                    })?;
+                    .ok_or_else(|| Error::Authn("no IdP selected for this flow".into()))?;
                 let entity = client
                     .get(&selected)
                     .await
@@ -519,7 +517,8 @@ impl Saml2Backend {
         >(&doc)
         .map_err(|e| Error::BadRequest(format!("parsing Response: {e}")))?
         .to_owned();
-        let cleartext_assertions_xml = cleartext_assertion_sources(&doc, response.assertions.len())?;
+        let cleartext_assertions_xml =
+            cleartext_assertion_sources(&doc, response.assertions.len())?;
 
         // 2) Signature acceptance rule, spanning the encryption boundary
         //    (supersedes plain want_assertions_or_response_signed): either the
@@ -596,8 +595,7 @@ impl Saml2Backend {
             if !envelope_verified {
                 if !assertion.has_signature {
                     return Err(Error::Authn(
-                        "SAML Response is unsigned and a decrypted assertion is unsigned"
-                            .into(),
+                        "SAML Response is unsigned and a decrypted assertion is unsigned".into(),
                     ));
                 }
                 if let gamlastan::crypto::VerifyResult::Invalid { reason } = verifier
@@ -645,8 +643,7 @@ impl Saml2Backend {
             None if self.allow_unsolicited && response.base.in_response_to.is_none() => None,
             None if self.allow_unsolicited => {
                 return Err(Error::Authn(
-                    "SAML Response carries InResponseTo but no AuthnRequest is in flight"
-                        .into(),
+                    "SAML Response carries InResponseTo but no AuthnRequest is in flight".into(),
                 ));
             }
             None => {
@@ -701,13 +698,10 @@ impl Saml2Backend {
             .ok_or_else(|| Error::Authn("no assertion with an AuthnStatement".into()))?;
         let (name_id, name_id_format) =
             match assertion.subject.as_ref().and_then(|s| s.name_id.as_ref()) {
-                Some(NameIdOrEncryptedId::NameId(nid)) => {
-                    (nid.value.clone(), nid.format.clone())
-                }
+                Some(NameIdOrEncryptedId::NameId(nid)) => (nid.value.clone(), nid.format.clone()),
                 Some(NameIdOrEncryptedId::EncryptedId(eid)) => {
-                    let enc_xml = std::str::from_utf8(&eid.raw).map_err(|e| {
-                        Error::BadRequest(format!("non-UTF8 EncryptedID: {e}"))
-                    })?;
+                    let enc_xml = std::str::from_utf8(&eid.raw)
+                        .map_err(|e| Error::BadRequest(format!("non-UTF8 EncryptedID: {e}")))?;
                     let plaintext = self.decrypt_with_any(enc_xml)?;
                     let nid_doc = gamlastan::xml::uppsala::parse(&plaintext)
                         .map_err(|e| Error::Authn(format!("decrypted NameID is not XML: {e}")))?;
@@ -836,11 +830,15 @@ impl Backend for Saml2Backend {
         match &self.idp_metadata {
             IdpMetadata::Static { .. } => self.build_authn_redirect(ctx, None).await,
             IdpMetadata::Mdq(_) => {
-                let target = ctx.request.param("entityID").map(str::to_string).or_else(|| {
-                    ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                });
+                let target = ctx
+                    .request
+                    .param("entityID")
+                    .map(str::to_string)
+                    .or_else(|| {
+                        ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    });
                 match target.or_else(|| self.idp_entity_id.clone()) {
                     Some(target) => self.build_authn_redirect(ctx, Some(&target)).await,
                     None => {
@@ -955,20 +953,23 @@ fn subject_type_from_name_id_format(name_id_format: Option<&str>) -> SubjectType
     }
 }
 
-fn decode_acs_response(request: &HttpRequestData, verifier: &SamlVerifier) -> Result<DecodedAcsResponse> {
+fn decode_acs_response(
+    request: &HttpRequestData,
+    verifier: &SamlVerifier,
+) -> Result<DecodedAcsResponse> {
     if request.query.contains_key("SAMLResponse") {
         let raw = RawQueryRequest::new(request);
         let decoded = gamlastan::bindings::redirect::redirect_decode(&raw)
             .map_err(|e| Error::BadRequest(format!("redirect decode: {e}")))?;
 
-        let binding_signature_verified = if decoded.signature.is_some() || decoded.sig_alg.is_some() {
+        let binding_signature_verified = if decoded.signature.is_some() || decoded.sig_alg.is_some()
+        {
             match gamlastan::bindings::redirect::redirect_verify_signature(&decoded, verifier)
                 .map_err(|e| {
                     Error::Authn(format!(
                         "SAML Response redirect signature verification: {e}"
                     ))
-                })?
-            {
+                })? {
                 true => true,
                 false => {
                     return Err(Error::Authn(

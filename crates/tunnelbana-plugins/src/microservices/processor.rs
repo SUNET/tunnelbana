@@ -358,10 +358,7 @@ mod tests {
         let mut data = InternalData::default();
         data.set_attr("affiliation", "staff");
         let data = proc.process_response(&mut ctx(), data).await.unwrap();
-        assert_eq!(
-            data.attr_first("affiliation"),
-            Some("employee@example.org")
-        );
+        assert_eq!(data.attr_first("affiliation"), Some("employee@example.org"));
     }
 
     #[tokio::test]
@@ -379,7 +376,10 @@ mod tests {
         // sha256("anna" || "pepper")
         let mut h = Sha256::new();
         h.update(b"annapepper");
-        assert_eq!(data.attr_first("uid"), Some(format!("{:x}", h.finalize()).as_str()));
+        assert_eq!(
+            data.attr_first("uid"),
+            Some(format!("{:x}", h.finalize()).as_str())
+        );
     }
 
     #[tokio::test]

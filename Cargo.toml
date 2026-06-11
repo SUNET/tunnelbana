@@ -14,7 +14,7 @@ license = "BSD-2-Clause"
 rust-version = "1.83"
 
 [workspace.dependencies]
-grindvakt = { version = "0.1.0" }
+grindvakt = { version = "0.2.0" }
 jose-rs = { version = "0.3.1", default-features = false }
 gamlastan = { version = "0.4.0" }
 gamlastan-mdq = { version = "0.4.0" }
@@ -59,10 +59,4 @@ percent-encoding = "2"
 form_urlencoded = "1"
 regex = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
-
-# Local-dev override: the id_token duplicate-`sub` fix (a released claim named
-# `sub` no longer shadows the canonical subject) is unreleased. Drop this once
-# the next grindvakt is published to crates.io and bump the version above.
-[patch.crates-io]
-grindvakt = { path = "../grindvakt" }
 

@@ -139,7 +139,8 @@ mod tests {
         svc.process_response(&mut c, data).await.unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        let record: serde_json::Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(record["sp"], "https://sp.example");
         assert_eq!(record["idp"], "https://idp.example");
         assert_eq!(record["timestamp"], "2026-06-10T12:00:00Z");

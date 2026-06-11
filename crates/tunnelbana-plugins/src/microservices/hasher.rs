@@ -80,7 +80,10 @@ impl Hasher {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn MicroService>> {
         let raw: BTreeMap<String, RawEntry> = bx.parse_config()?;
         let defaults = raw.get("").ok_or_else(|| {
-            Error::Config(format!("hasher {}: missing default (\"\") section", bx.name))
+            Error::Config(format!(
+                "hasher {}: missing default (\"\") section",
+                bx.name
+            ))
         })?;
         let default_salt = defaults
             .salt
@@ -186,7 +189,10 @@ mod tests {
         data.set_attr("mail", "anna@example.org");
         let data = hasher.process_response(&mut ctx(), data).await.unwrap();
         // Default alg is sha512; hash(value || salt).
-        assert_eq!(data.subject_id.as_deref(), Some(sha512_hex("annaabcdef").as_str()));
+        assert_eq!(
+            data.subject_id.as_deref(),
+            Some(sha512_hex("annaabcdef").as_str())
+        );
         assert_eq!(
             data.attr_first("edupersontargetedid"),
             Some(sha512_hex("tidabcdef").as_str())
@@ -210,7 +216,10 @@ mod tests {
         let mut data = response_from("https://sp.example");
         data.subject_id = Some("anna".into());
         let data = hasher.process_response(&mut ctx(), data).await.unwrap();
-        assert_eq!(data.subject_id.as_deref(), Some(sha256_hex("annaabcdef").as_str()));
+        assert_eq!(
+            data.subject_id.as_deref(),
+            Some(sha256_hex("annaabcdef").as_str())
+        );
 
         let mut data = response_from("https://other.example");
         data.subject_id = Some("anna".into());

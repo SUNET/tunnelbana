@@ -140,11 +140,10 @@ async fn redirect_acs_result(
     url: &str,
     req_id: Option<&str>,
 ) -> tunnelbana_core::error::Result<BackendAction> {
-    let query: BTreeMap<String, String> = form_urlencoded::parse(
-        url.split_once('?').map(|(_, q)| q).unwrap_or("").as_bytes(),
-    )
-    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-    .collect();
+    let query: BTreeMap<String, String> =
+        form_urlencoded::parse(url.split_once('?').map(|(_, q)| q).unwrap_or("").as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
     let mut sp_ctx = Context::new(
         HttpRequestData {
             path: "SP/acs".into(),
@@ -298,9 +297,11 @@ async fn saml_backend_accepts_signed_redirect_response() {
             name: "mail".to_string(),
             name_format: None,
             friendly_name: None,
-            values: vec![gamlastan::core::assertion::attribute::AttributeValue::String(
-                "anna@example.com".to_string(),
-            )],
+            values: vec![
+                gamlastan::core::assertion::attribute::AttributeValue::String(
+                    "anna@example.com".to_string(),
+                ),
+            ],
         }],
     );
     let xml = String::from_utf8(
@@ -481,11 +482,10 @@ fn signed_redirect_url() -> String {
 }
 
 fn redirect_sso_ctx(url: &str) -> Context {
-    let query: BTreeMap<String, String> = form_urlencoded::parse(
-        url.split_once('?').map(|(_, q)| q).unwrap_or("").as_bytes(),
-    )
-    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-    .collect();
+    let query: BTreeMap<String, String> =
+        form_urlencoded::parse(url.split_once('?').map(|(_, q)| q).unwrap_or("").as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
     Context::new(
         HttpRequestData {
             path: "IdP/sso".into(),
@@ -703,7 +703,10 @@ async fn saml_frontend_unsupported_name_id_policy_yields_saml_error() {
     .unwrap();
     assert!(xml.contains("InvalidNameIDPolicy"));
     assert!(xml.contains("InResponseTo"));
-    assert!(!xml.contains("<saml:Assertion"), "error carries no assertion");
+    assert!(
+        !xml.contains("<saml:Assertion"),
+        "error carries no assertion"
+    );
 }
 
 /// Run a full frontend flow with a transient NameIDPolicy and return the
@@ -1063,7 +1066,12 @@ fn sign_assertion_in_document(
     let open_tag_end = document_xml.find("<saml:Assertion").unwrap();
     let rel = document_xml[open_tag_end..].find('>').unwrap();
     let pos = open_tag_end + rel;
-    let with_template = format!("{}{}{}", &document_xml[..=pos], sig, &document_xml[pos + 1..]);
+    let with_template = format!(
+        "{}{}{}",
+        &document_xml[..=pos],
+        sig,
+        &document_xml[pos + 1..]
+    );
     signer.sign_enveloped(&with_template).unwrap()
 }
 
@@ -1093,10 +1101,10 @@ fn response_assertion_sources(xml: &str) -> Vec<String> {
     doc.children_iter(root)
         .filter_map(|child| {
             let element = doc.element(child)?;
-            if element.name.matches(
-                Some("urn:oasis:names:tc:SAML:2.0:assertion"),
-                "Assertion",
-            ) {
+            if element
+                .name
+                .matches(Some("urn:oasis:names:tc:SAML:2.0:assertion"), "Assertion")
+            {
                 Some(doc.node_source(child).unwrap().to_string())
             } else {
                 None
@@ -1135,9 +1143,8 @@ fn multi_assertion_response_with_tampered_second(req_id: &str) -> String {
     );
     let mut second = response.assertions[0].clone();
     second.id = "_multi_assertion_2".to_string();
-    second.attribute_statements[0].attributes[0].values = vec![AttributeValue::String(
-        "guest@example.com".to_string(),
-    )];
+    second.attribute_statements[0].attributes[0].values =
+        vec![AttributeValue::String("guest@example.com".to_string())];
     response.assertions.push(second);
 
     let xml = response.to_xml_string().unwrap();
@@ -1265,9 +1272,7 @@ fn passthrough_test_attributes() -> Vec<gamlastan::core::assertion::attribute::A
     ]
 }
 
-async fn passthrough_internal(
-    sp: &dyn Backend,
-) -> tunnelbana_core::internal::InternalData {
+async fn passthrough_internal(sp: &dyn Backend) -> tunnelbana_core::internal::InternalData {
     let req_id = "_pass1";
     let b64 = signed_response_with(Some(req_id), 0, passthrough_test_attributes());
     match acs_result(sp, b64, Some(req_id)).await.unwrap() {
@@ -1416,15 +1421,19 @@ fn saml_frontend_requires_metadata_or_explicit_open_mode() {
     // No [metadata] and no allow_unknown_sps ⇒ refuse to build.
     let result =
         tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", base.clone()));
-    assert!(result.is_err(), "frontend without SP metadata must not build");
+    assert!(
+        result.is_err(),
+        "frontend without SP metadata must not build"
+    );
 
     // Explicit open mode builds (legacy/dev behavior).
     let mut open = base.clone();
     open.as_object_mut()
         .unwrap()
         .insert("allow_unknown_sps".into(), serde_json::json!(true));
-    assert!(tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", open))
-        .is_ok());
+    assert!(
+        tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", open)).is_ok()
+    );
 
     // An empty [metadata] block is a config error, not silently open.
     let mut empty_md = base;
