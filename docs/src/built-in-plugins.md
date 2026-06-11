@@ -8,14 +8,24 @@ Every built-in plugin and its config `type`:
 | `oidc_federation` | frontend | OpenID Federation 1.0 OP |
 | `saml2` | frontend | SAML2 Identity Provider (IdP) |
 | `oidc` | backend | OpenID Connect Relying Party (RP) |
+| `oidc_federation` | backend | OpenID Federation 1.0 RP (automatic registration) |
 | `saml2` | backend | SAML2 Service Provider (SP) |
 | `static_attributes` | micro-service | inject fixed attributes (response path) |
-| `filter_attributes` | micro-service | allow-list attributes (response path) |
-| `custom_routing` | micro-service | pick a backend by requester (request path) |
+| `filter_attributes` | micro-service | allow-list attributes, globally or per requester (response path) |
+| `filter_attribute_values` | micro-service | drop attribute *values* not matching a regex (response path) |
+| `rename_attributes` | micro-service | rename internal attributes (response path) |
+| `attribute_processor` | micro-service | per-attribute transform chains: regex, hash, scope, gender (response path) |
+| `attribute_generation` | micro-service | synthesize attributes from Tera templates (response path) |
+| `attribute_authorization` | micro-service | reject flows failing regex allow/deny rules (response path) |
+| `hasher` | micro-service | salted-hash subject id / attributes per requester (response path) |
+| `primary_identifier` | micro-service | construct a primary id from ordered candidates (response path) |
+| `custom_logging` | micro-service | per-flow JSON audit records to a file (response path) |
+| `custom_routing` | micro-service | pick a backend by requester or target issuer (request path) |
+| `idp_hinting` | micro-service | lift an IdP-hint query parameter into the flow (request path) |
 
 All `signing_*` keys follow the [key-loading rules](configuration.md#keys-pem-or-jwk).
 
-## `oidc` frontend — OpenID Provider
+## `oidc` frontend - OpenID Provider
 
 ```toml
 [[frontend]]
@@ -57,7 +67,7 @@ frontend advertises `dpop_signing_alg_values_supported = ["ES256"]`, accepts
 DPoP proofs on the token and userinfo endpoints, and issues sender-constrained
 access tokens (`token_type = "DPoP"`).
 
-## `oidc_federation` frontend — Federation OP
+## `oidc_federation` frontend - Federation OP
 
 A federation-aware OP: it serves a signed entity configuration, auto-registers
 unknown RPs by resolving them through a trust anchor, unpacks request objects
@@ -77,7 +87,7 @@ name = "OIDFed"
   signing_key_id    = "oidc-key-1"
 
   [frontend.config.federation]
-  # Federation signing key — signs the entity configuration.
+  # Federation signing key - signs the entity configuration.
   signing_key_path              = "keys/federation_ec.key"
   signing_algorithm             = "ES256"
   signing_key_id                = "federation-key-1"
@@ -101,7 +111,7 @@ The entity configuration is served at `…/OIDFed/.well-known/openid-federation`
 the bare host). The OIDC endpoints mirror the plain `oidc` frontend, under
 `…/OIDFed/`.
 
-## `saml2` frontend — Identity Provider
+## `saml2` frontend - Identity Provider
 
 ```toml
 [[frontend]]
@@ -161,7 +171,7 @@ name = "Saml2IDP"
 > resolved against the `[frontend.config.metadata]` store (local files are
 > `EntityDescriptor` or `EntitiesDescriptor` documents; MDQ fills the gaps).
 > Unknown SPs get a **403**, and the ACS URL is validated against the SP's
-> registered `AssertionConsumerService`s — assertions are never delivered to a
+> registered `AssertionConsumerService`s - assertions are never delivered to a
 > URL taken from the request. Without this an attacker who knows the SSO URL
 > could exfiltrate signed assertions to an arbitrary ACS. The frontend
 > therefore **refuses to start** without a metadata source; the dev-only
@@ -182,7 +192,7 @@ When `idp_entity_id` is itself a URL under the module base (the common
 `…/Saml2IDP/proxy.xml` convention), the metadata document is additionally
 served at that path (SATOSA's `entityid_endpoint`).
 
-## `oidc` backend — Relying Party
+## `oidc` backend - Relying Party
 
 ```toml
 [[backend]]
@@ -210,7 +220,116 @@ name = "Upstream"
 
 Always uses PKCE (S256). The callback is served at `…/Upstream/`.
 
-## `saml2` backend — Service Provider
+## `oidc_federation` backend - Federation Relying Party
+
+The federation-aware RP (ADR 0024): no pre-registered client, no
+`.well-known` discovery. The proxy publishes its own signed RP entity
+configuration, resolves the upstream OP through the configured trust
+anchors, and authenticates with `private_key_jwt` using its **entity id as
+the client id** (automatic registration, OpenID Federation 1.0 section 12.1).
+
+```toml
+[[backend]]
+type = "oidc_federation"
+name = "OIDFedRP"
+  [backend.config]
+  # Federation entity id of this RP and the client_id sent upstream.
+  # Defaults to <base_url>/<name>. The entity configuration must be
+  # reachable at <entity_id>/.well-known/openid-federation (reverse-proxy
+  # rewrite when you publish a bare-host entity id).
+  # entity_id = "https://rp.example.com"
+
+  # The upstream OP to authenticate against (its federation entity id).
+  # Mutually exclusive with [backend.config.discovery]; set exactly one.
+  op_entity_id = "https://op.example.org"
+  scope        = "openid profile email"
+
+  # Instead of a fixed op_entity_id, enable OP discovery: present a selection
+  # page built from a trust anchor's collection endpoint.
+  # [backend.config.discovery]
+  # enable              = true
+  # collection_endpoint = "https://ta.example.com/collection"
+  # page_title          = "Select your identity provider"   # default
+  # cache_ttl           = 3600    # OP-list cache TTL, seconds (default 3600)
+
+  # Optional dedicated private_key_jwt key; defaults to the federation key.
+  # signing_key_path  = "keys/rp_oidc.key"
+  # signing_algorithm = "ES256"
+  # signing_key_id    = "rp-oidc-1"
+
+  [backend.config.federation]
+  # Federation signing key: signs the RP entity configuration.
+  signing_key_path              = "keys/rp_federation.key"
+  signing_algorithm             = "ES256"
+  signing_key_id                = "rp-fed-1"
+  authority_hints               = ["https://ta.example.com"]
+  organization_name             = "Example RP"
+  entity_configuration_lifetime = 86400   # seconds (default 86400)
+  op_cache_ttl                  = 3600    # resolved OP metadata TTL (default 3600)
+
+  # One table per trust anchor; `keys` are the anchor's pinned JWKS.
+  [[backend.config.federation.trust_anchor]]
+  entity_id = "https://ta.example.com"
+  keys = [
+    { kty = "EC", crv = "P-256", x = "…", y = "…", kid = "ta-1", use = "sig", alg = "ES256" },
+  ]
+```
+
+How a flow works:
+
+1. `start_auth` picks the OP. With a fixed `op_entity_id` it resolves that OP
+   through a trust anchor's `federation_resolve_endpoint` (the response is a
+   `resolve-response+jwt` verified against the pinned anchor keys) and caches
+   the result for `op_cache_ttl` seconds. With **discovery** enabled it
+   instead fetches the federation's OP list from the `collection_endpoint`
+   and renders an OP-selection page (see below).
+2. The user is redirected to the resolved `authorization_endpoint` with
+   `client_id = <entity_id>`, PKCE (S256), and `state`/`nonce` (plus the
+   chosen OP) sealed in the encrypted state cookie.
+3. The callback (`…/OIDFedRP/callback`) checks the state, exchanges the code
+   at the resolved `token_endpoint` with a `private_key_jwt` assertion, and
+   verifies the id_token (issuer, audience, nonce) against the OP keys that
+   arrived **inline in the resolved metadata**; `jwks_uri` is only fetched
+   when no inline keys exist.
+4. id_token claims (merged with userinfo when advertised) map through the
+   `openid` attribute profile; the subject is reported as `pairwise`.
+
+The RP entity configuration is served at
+`…/OIDFedRP/.well-known/openid-federation` and publishes exactly what a
+federation OP's automatic registration needs: `redirect_uris`,
+`client_registration_types = ["automatic"]`,
+`token_endpoint_auth_method = "private_key_jwt"`, and the client-auth public
+`jwks` (the entity configuration's own top-level `jwks` carries the
+federation keys; the two key sets are deliberately separate). At least one
+`trust_anchor` is required at startup.
+
+> **Pairing note:** the publishing shape matches what the `oidc_federation`
+> **frontend** consumes when auto-registering RPs, so two tunnelbana
+> instances can attach to each other across a federation with no manual
+> registration on either side.
+
+### OP discovery
+
+With `[backend.config.discovery]` instead of a fixed `op_entity_id`, the
+backend lets the user choose the OP per flow (SATOSA's `discovery` mode):
+
+1. `start_auth` GETs `collection_endpoint?entity_type=openid_provider` (a
+   trust anchor's listing endpoint, e.g. an inmor `…/collection`), flattening
+   each entity's `ui_infos` into a name + logo, and caches the list for
+   `cache_ttl` seconds.
+2. It renders a self-contained OP-selection page (all values HTML-escaped)
+   whose buttons POST the chosen `entity_id` to `…/OIDFedRP/disco`.
+3. `disco` validates the choice against the fetched list (so it can only
+   resolve OPs the trust anchor actually lists), then continues exactly as
+   the fixed-OP path. The chosen OP is sealed in the state cookie, so the
+   callback resolves the same OP.
+
+`op_entity_id` and `discovery.enable` are mutually exclusive and validated at
+startup; `discovery.enable` requires a `collection_endpoint`. If the listing
+endpoint is unreachable the page still renders (empty list, logged). The
+`disco` route is only registered in discovery mode.
+
+## `saml2` backend - Service Provider
 
 Static single-IdP mode:
 
@@ -224,7 +343,7 @@ name = "Saml2"
   sp_cert_path        = "keys/sp.crt"      # published in SP metadata
   idp_entity_id       = "https://idp.example.com/metadata"   # expected issuer
   idp_sso_url         = "https://idp.example.com/sso"        # where AuthnRequests go
-  idp_cert_path       = "keys/idp.crt"     # IdP signing cert — verifies the Response
+  idp_cert_path       = "keys/idp.crt"     # IdP signing cert - verifies the Response
   sign_authn_requests = true               # default false
   name_id_format      = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
   security            = "permissive"       # "permissive" (default) or "strict"
@@ -294,7 +413,7 @@ name = "Saml2"
 
   In **static mode**, AuthnRequests always go to `idp_sso_url`, and the backend
   verifies the response against `idp_cert_path`. `disco_srv` is rejected in
-  static mode — a pinned cert cannot verify arbitrary discovery choices.
+  static mode - a pinned cert cannot verify arbitrary discovery choices.
 
   In **MDQ mode**, the backend resolves the upstream IdP per request:
 
@@ -325,8 +444,8 @@ name = "Saml2"
 
   The signature acceptance rule spans the encryption boundary: a Response is
   accepted when **either** its envelope signature verifies on the received
-  document (the signature covers the ciphertext), **or** every assertion —
-  cleartext and decrypted alike — carries a signature that verifies on the XML
+  document (the signature covers the ciphertext), **or** every assertion -
+  cleartext and decrypted alike - carries a signature that verifies on the XML
   it travelled in (the decrypted plaintext for encrypted assertions). A
   Response carrying encrypted assertions with no `encryption_keypairs`
   configured is rejected. See ADR 0009.
@@ -335,8 +454,8 @@ name = "Saml2"
 
   | Key | Required | Default | Meaning |
   | --- | --- | --- | --- |
-  | `mdq.url` | ✅ | — | MDQ server base URL. |
-  | `mdq.signing_cert_path` | | — | PEM certificate used to verify signed MDQ entity statements. Required unless `allow_unverified = true`. |
+  | `mdq.url` | ✅ | - | MDQ server base URL. |
+  | `mdq.signing_cert_path` | | - | PEM certificate used to verify signed MDQ entity statements. Required unless `allow_unverified = true`. |
   | `mdq.transform` | | `url_encoded` | EntityID-to-path transform: `url_encoded` or `sha1`. |
   | `mdq.require_role` | | `idp` | Require the fetched metadata to contain an `IDPSSODescriptor`, `SPSSODescriptor`, or either. |
   | `mdq.fallback_ttl_secs` | | metadata-driven | Cache TTL used when the metadata omits `validUntil` and `cacheDuration`. |
@@ -345,7 +464,7 @@ name = "Saml2"
   ### The MDQ signer certificate
 
   `mdq.signing_cert_path` points at the **federation's metadata-signing
-  certificate** — a PEM-encoded X.509 certificate, published by the federation
+  certificate** - a PEM-encoded X.509 certificate, published by the federation
   operator (e.g. SWAMID, eduGAIN, or your pyFF instance). At startup the
   backend reads the file and hands it to the `gamlastan-mdq` client, after
   which **every** EntityDescriptor fetched from the MDQ server is
@@ -392,51 +511,140 @@ name = "Saml2"
 
 ## Micro-services
 
+Remember: the order of `[[microservice]]` blocks **is** the execution order on
+both the request and the response path. The [micro-services
+chapter](micro-services.md) covers semantics and ordering advice in detail;
+this section is the config reference. Attribute names are always *internal*
+names (post-attribute-map).
+
+### `static_attributes` - inject fixed attributes
+
 ```toml
-# Inject fixed attributes onto every response (does not overwrite existing ones).
+# Does not overwrite attributes that already exist.
 [[microservice]]
 type = "static_attributes"
 name = "static"
   [microservice.config.attributes]
   affiliation = ["member", "staff"]
+```
 
-# Keep only allow-listed internal attributes on the response path.
+### `filter_attributes` - attribute allow-list (ADR 0014)
+
+```toml
 [[microservice]]
 type = "filter_attributes"
 name = "filter"
   [microservice.config]
+  # Global allowlist. OMITTED entirely => attributes pass through untouched
+  # (unless a policy entry below matches). An explicit empty list drops all.
   allowed = ["mail", "givenname", "surname", "edupersonprincipalname"]
 
-# Pick the backend on the request path by the requester (RP/SP id).
-[[microservice]]
-type = "custom_routing"
-name = "routing"
-  [[microservice.config.rule]]
-  requester = "https://sp-a.example.com"
-  backend   = "Saml2"
-  [[microservice.config.rule]]
-  requester = "https://sp-b.example.com"
-  backend   = "Upstream"
+  # Optional per-requester overrides (SATOSA: AttributePolicy). A matching
+  # entry REPLACES the global list (no merge). Lookup: exact requester,
+  # else "", else "default". Each policy entry must set allowed;
+  # use allowed = [] to release nothing.
+  [microservice.config.policy."https://strict.example.org"]
+  allowed = ["mail"]
+```
 
-# Rewrite attribute values on the response path (SATOSA: AttributeProcessor).
-# Processors run in order; regex_sub replaces every match in every value.
-# Replacement accepts $1/${1} and Python-style \1 (SATOSA configs port as-is).
+### `filter_attribute_values` - value-level regex filter (ADR 0017)
+
+```toml
+# Drops VALUES (not attributes) that fail the regex (unanchored search).
+# Nesting: provider (issuer) -> requester -> attribute -> filter, where ""
+# is the default at each level and defaults apply IN ADDITION TO specific
+# entries (cumulative - unlike attribute_authorization). An attribute key of
+# "" applies to every attribute.
+[[microservice]]
+type = "filter_attribute_values"
+name = "scope-guard"
+  # Any provider (""), any requester (""): keep only example.org eppn values.
+  [microservice.config.attribute_filters."".""]
+  edupersonprincipalname = '@example\.org$'
+  # The SATOSA typed form works too:
+  mail = { regexp = '@example\.org$' }
+  # An attribute key of "" applies the filter to EVERY attribute:
+  # "" = '^[^<>]*$'
+
+  # Provider-specific filters stack ON TOP of the defaults above:
+  [microservice.config.attribute_filters."https://idp.example.org".""]
+  edupersonaffiliation = '^(staff|member)$'
+```
+
+> SATOSA's `shibmdscope_match_scope`/`shibmdscope_match_value` filter types
+> are rejected at startup - rewrite them as explicit regexes.
+
+### `rename_attributes` - internal renames (ADR 0018)
+
+```toml
+# old internal name -> new internal name; values MERGE if the target exists.
+[[microservice]]
+type = "rename_attributes"
+name = "rename"
+  [microservice.config.rename]
+  surname = "sn"
+```
+
+### `attribute_processor` - value transform chains (ADRs 0011, 0020)
+
+```toml
+# Per-attribute processor chains, run in order. Processors:
+#   regex_sub       match_pattern + replace_pattern ($1/${1} or SATOSA \1)
+#   hash            salt (recommended) + hash_algo ("sha256" default, "sha512")
+#   scope           scope - appends "@scope" to every value
+#   scope_extractor mapped_attribute - copies the @domain into that attribute
+#   scope_remover   strips "@domain" from every value
+#   gender          text -> ISO 5218 / schacGender code (male=1, female=2…)
 [[microservice]]
 type = "attribute_processor"
 name = "rewrite"
   [[microservice.config.process]]
-  attribute = "mail"                     # internal attribute name
+  attribute = "mail"
     [[microservice.config.process.processors]]
     name = "regex_sub"
     match_pattern = '@legacy\.example\.org$'
     replace_pattern = '@example.org'
 
-# Reject the authentication unless response attributes satisfy regex rules
-# (SATOSA: AttributeAuthorization). Rules nest requester -> provider ->
-# attribute; "default" (or "") is the wildcard at the first two levels, and a
-# specific entry replaces — never merges with — the default. Allow: some value
-# must match some regex (absent attribute rejects only with the force flag).
-# Deny: any match rejects.
+  [[microservice.config.process]]
+  attribute = "edupersonprincipalname"
+    [[microservice.config.process.processors]]
+    name = "scope_extractor"
+    mapped_attribute = "schachomeorganization"
+
+  [[microservice.config.process]]
+  attribute = "edupersontargetedid"
+    [[microservice.config.process.processors]]
+    name = "hash"
+    salt = "${TUNNELBANA_HASH_SALT}"
+    hash_algo = "sha256"
+```
+
+### `attribute_generation` - synthesized attributes (ADR 0019)
+
+```toml
+# Tera templates over the current attribute set (SATOSA uses Mustache - the
+# recipe nesting ports 1:1, templates need syntax translation). Nesting:
+# requester -> provider -> attribute -> template, ""/"default" wildcards,
+# entries selected (not merged). Each existing attribute is exposed as an
+# object: {{ attr.value }} (";"-joined), {{ attr.first }}, {{ attr.scope }}
+# (after "@"), and attr.values for {% for %} loops. Rendered output is split
+# on ";"/newlines into values; synthesized attributes OVERRIDE existing ones.
+[[microservice]]
+type = "attribute_generation"
+name = "synthesize"
+  [microservice.config.synthetic_attributes.default.default]
+  schachomeorganization = "{{ edupersonprincipalname.scope }}"
+  edupersonaffiliation  = "member;affiliate"
+```
+
+### `attribute_authorization` - regex allow/deny gate (ADR 0012)
+
+```toml
+# Rejects the authentication (not merely filters) when rules fail. Nesting:
+# requester -> provider -> attribute -> [regexes]; ""/"default" wildcards;
+# a specific entry replaces - never merges with - the default. Allow: some
+# value must match some regex (absent attribute rejects only with the force
+# flag). Deny: any match rejects.
 [[microservice]]
 type = "attribute_authorization"
 name = "authz"
@@ -446,6 +654,106 @@ name = "authz"
   mail = ["."]                           # must be present and non-empty
 ```
 
-See the [micro-services chapter](micro-services.md) for the
-`attribute_processor` and `attribute_authorization` semantics in detail
-(ADRs 0011/0012).
+### `hasher` - subject id / attribute pseudonymization (ADR 0021)
+
+```toml
+# Map keyed by requester; the "" entry is REQUIRED and must carry a salt.
+# Defaults: alg = "sha512" (or "sha256"), subject_id = true, attributes = [].
+# Requester entries override individual fields. Output is
+# hex(hash(value || salt)) - identical to SATOSA's util.hash_data, so a
+# SATOSA deployment migrates without changing released pseudonyms.
+[[microservice]]
+type = "hasher"
+name = "pseudonymize"
+  [microservice.config.""]
+  salt       = "${TUNNELBANA_HASHER_SALT}"
+  attributes = ["edupersontargetedid"]
+
+  [microservice.config."https://legacy-sp.example.org"]
+  alg = "sha256"          # this SP keeps its historical sha256 pseudonyms
+```
+
+### `primary_identifier` - ordered identifier candidates (ADR 0022)
+
+```toml
+# First candidate whose attributes are all present wins; first values are
+# concatenated. "name_id" pulls in the subject id when name_id_format matches
+# the response's subject type (URN or short name). add_scope appends a
+# literal, or the asserting IdP's entity id with "issuer_entityid".
+[[microservice]]
+type = "primary_identifier"
+name = "primary-id"
+  [microservice.config]
+  primary_identifier     = "uid"      # receiving attribute (default "uid")
+  clear_input_attributes = false
+  replace_subject_id     = true
+  # Optional: 302 the browser here (with ?sp=…&idp=… appended) when no
+  # candidate works. Without it the response passes through unchanged.
+  on_error = "https://errors.example.org/no-identifier"
+
+  [[microservice.config.ordered_identifier_candidates]]
+  attribute_names = ["edupersonuniqueid"]
+  [[microservice.config.ordered_identifier_candidates]]
+  attribute_names = ["edupersonprincipalname"]
+  [[microservice.config.ordered_identifier_candidates]]
+  attribute_names = ["name_id"]
+  name_id_format  = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+  add_scope       = "issuer_entityid"
+
+  # Per-entity overrides, keyed by SP (requester) or IdP (issuer) entity id;
+  # an SP override wins over an IdP override. "ignore" skips the service.
+  [microservice.config.override."https://special.example.org"]
+  primary_identifier = "employeeid"
+  [microservice.config.override."https://skip-me.example.org"]
+  ignore = true
+```
+
+### `custom_logging` - JSON audit records (ADR 0023)
+
+```toml
+# One JSON object per completed authentication, appended as a line:
+# {timestamp, sp, idp, frontend, backend, attr:{only the listed ones}}.
+# An unwritable log_target fails at startup; runtime write errors are logged
+# and never fail the flow.
+[[microservice]]
+type = "custom_logging"
+name = "audit"
+  [microservice.config]
+  log_target = "/var/log/tunnelbana/audit.jsonl"
+  attrs      = ["edupersonprincipalname", "mail"]
+```
+
+### `custom_routing` - backend selection (request path, ADR 0015)
+
+```toml
+# Precedence inside the service: issuer rule -> requester rule ->
+# default_backend. (A backend pinned by the frontend always wins overall.)
+[[microservice]]
+type = "custom_routing"
+name = "routing"
+  [[microservice.config.rule]]
+  requester = "https://sp-a.example.com"
+  backend   = "Saml2"
+
+  # Matched against the target-entity decoration set by idp_hinting or a
+  # discovery flow (SATOSA: DecideBackendByTargetIssuer).
+  [[microservice.config.issuer_rule]]
+  issuer  = "https://legacy-idp.example.org"
+  backend = "LegacySaml"
+
+  [microservice.config]
+  default_backend = "Upstream"
+```
+
+### `idp_hinting` - IdP hint parameter (request path, ADR 0016)
+
+```toml
+# Lifts the first matching query parameter into the target-entity decoration
+# (never overwriting an earlier choice). The SAML2 backend's MDQ mode and
+# custom_routing's issuer rules act on it. List BEFORE custom_routing.
+[[microservice]]
+type = "idp_hinting"
+name = "hint"
+  [microservice.config]
+  allowed_params = ["idphint", "idp_hinting", "idp_hint"]
+```

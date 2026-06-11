@@ -1,5 +1,8 @@
 target/
 docs/book
 .build-cache
+deploy/tunnelbana/bin/
+deploy/tunnelbana/keys/
+deploy/tunnelbana/.env
 teaching/
 .serena/

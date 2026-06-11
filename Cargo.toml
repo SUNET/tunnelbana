@@ -60,3 +60,9 @@ form_urlencoded = "1"
 regex = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
+# Local-dev override: the id_token duplicate-`sub` fix (a released claim named
+# `sub` no longer shadows the canonical subject) is unreleased. Drop this once
+# the next grindvakt is published to crates.io and bump the version above.
+[patch.crates-io]
+grindvakt = { path = "../grindvakt" }
+

@@ -1474,8 +1474,6 @@ dependencies = [
 [[package]]
 name = "grindvakt"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "907bfb840433b32829459a93206934810b971858adafba5b5834a5dc00fcb029"
 dependencies = [
  "async-trait",
  "base64",
@@ -3782,6 +3780,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tera",
  "tokio",
  "tracing",

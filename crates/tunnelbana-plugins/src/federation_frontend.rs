@@ -244,10 +244,11 @@ impl FederationFrontend {
 
     /// Resolve and register an unknown RP via the trust anchors.
     async fn auto_register(&self, client_id: &str) -> Result<Client> {
-        let metadata =
+        let resolved =
             federation::resolve_via_trust_anchors(&self.http, client_id, &self.trust_anchors)
                 .await?;
-        let rp_meta = metadata
+        let rp_meta = resolved
+            .metadata
             .get("openid_relying_party")
             .ok_or_else(|| Error::Authn("resolved metadata has no openid_relying_party".into()))?;
 

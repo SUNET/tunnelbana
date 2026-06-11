@@ -209,9 +209,16 @@ impl Proxy {
         }
     }
 
-    /// Render an error, preferring the originating frontend's protocol error
-    /// rendering when one is known.
+    /// Render an error, preferring an error-redirect decoration, then the
+    /// originating frontend's protocol error rendering when one is known.
     async fn render_error(&self, ctx: &mut Context, error: Error) -> Response {
+        if let Some(url) = ctx
+            .decoration(crate::context::KEY_ERROR_REDIRECT)
+            .and_then(|v| v.as_str())
+        {
+            tracing::warn!(error = %error, redirect = url, "request failed; redirecting");
+            return Response::redirect(url);
+        }
         let status = error.status_hint();
         if let Some(fe_name) = ctx
             .target_frontend

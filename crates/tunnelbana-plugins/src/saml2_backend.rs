@@ -830,12 +830,17 @@ impl Backend for Saml2Backend {
     async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {
         // Pick the target IdP. In MDQ mode the target can be chosen per
         // request — an `entityID` handed back by a discovery service
-        // (SeamlessAccess/thiss.io) — falling back to the configured default;
+        // (SeamlessAccess/thiss.io) or a target-entity decoration left by a
+        // hinting micro-service — falling back to the configured default;
         // with neither, the user is sent to the discovery service first.
         match &self.idp_metadata {
             IdpMetadata::Static { .. } => self.build_authn_redirect(ctx, None).await,
             IdpMetadata::Mdq(_) => {
-                let target = ctx.request.param("entityID").map(str::to_string);
+                let target = ctx.request.param("entityID").map(str::to_string).or_else(|| {
+                    ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                });
                 match target.or_else(|| self.idp_entity_id.clone()) {
                     Some(target) => self.build_authn_redirect(ctx, Some(&target)).await,
                     None => {

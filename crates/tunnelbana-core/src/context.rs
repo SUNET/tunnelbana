@@ -11,6 +11,13 @@ pub const STATE_KEY_BASE: &str = "TUNNELBANA_BASE";
 pub const KEY_REQUESTER: &str = "requester";
 /// Key within [`STATE_KEY_BASE`] holding the routing frontend name.
 pub const KEY_TARGET_FRONTEND: &str = "target_frontend";
+/// Decoration key carrying the target entity id (upstream IdP/OP) chosen by a
+/// discovery service or hint micro-service (SATOSA: `KEY_TARGET_ENTITYID`).
+pub const KEY_TARGET_ENTITYID: &str = "target_entity_id";
+/// Decoration key holding an absolute URL the proxy redirects to instead of
+/// rendering a protocol error, set by micro-services (e.g.
+/// `primary_identifier`'s `on_error`).
+pub const KEY_ERROR_REDIRECT: &str = "error_redirect";
 
 /// Carries the inbound request, routing decisions, mutable session state and
 /// ad-hoc decorations between the frontend, micro-services and backend.
