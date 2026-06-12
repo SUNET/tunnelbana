@@ -17,6 +17,7 @@ use tunnelbana_core::state::State;
 const TA_ID: &str = "https://ta.example.com";
 const OP_ID: &str = "https://op.example.org";
 const RP_ENTITY: &str = "https://proxy.example.com/OIDFedRP";
+const DISCO_SERVICE: &str = "https://discovery.example.net/";
 
 #[derive(Clone, Copy)]
 enum KeyDistribution {
@@ -142,31 +143,6 @@ impl HttpClient for MockNetwork {
                 body: self.op_key.to_public_jwks().to_json().unwrap().into_bytes(),
                 content_type: Some("application/json".into()),
             });
-        } else if url.starts_with(&format!("{TA_ID}/collection")) {
-            // The trust anchor's OP listing for discovery.
-            serde_json::to_string(&serde_json::json!({
-                "entities": [
-                    {
-                        "entity_id": OP_ID,
-                        "entity_types": ["openid_provider", "federation_entity"],
-                        "ui_infos": {
-                            "openid_provider": { "display_name": "The Test OP", "logo_uri": null }
-                        }
-                    },
-                    {
-                        "entity_id": "https://other-op.example.org",
-                        "entity_types": ["openid_provider"],
-                        "ui_infos": {}
-                    },
-                    {
-                        "entity_id": "https://untyped-op.example.org",
-                        "ui_infos": {
-                            "openid_provider": { "display_name": "Untyped OP", "logo_uri": null }
-                        }
-                    }
-                ]
-            }))
-            .unwrap()
         } else {
             return Ok(HttpFetchResponse {
                 status: 404,
@@ -259,8 +235,6 @@ fn content_type_for(url: &str) -> &'static str {
         "application/resolve-response+jwt"
     } else if url == format!("{OP_ID}/signed-jwks") {
         "application/jwk-set+jwt"
-    } else if url.starts_with(&format!("{TA_ID}/collection")) {
-        "application/json"
     } else {
         "application/entity-statement+jwt"
     }
@@ -425,8 +399,7 @@ fn build_discovery_backend(
         "scope": "openid email",
         "discovery": {
             "enable": true,
-            "collection_endpoint": format!("{TA_ID}/collection"),
-            "page_title": "Pick your IdP"
+            "service": DISCO_SERVICE
         },
         "federation": {
             "signing_jwk": fed_jwk,
@@ -553,6 +526,24 @@ async fn full_code_flow_via_resolved_op() {
     let state = qp(&url, "state").expect("state");
     let nonce = qp(&url, "nonce").expect("nonce");
 
+    // Automatic registration: the redirect carries a signed request object
+    // (RFC 9101) verifying against the RP's published client keys, its
+    // claims matching the plain query parameters.
+    let jar = qp(&url, "request").expect("signed request object");
+    let validation = jose_rs::jwt::Validation::new()
+        .with_issuer(RP_ENTITY)
+        .with_audience(OP_ID);
+    let jar_claims = tunnelbana_oidc::jwt::verify_with_jwks(&net.rp_pub_jwks, &jar, &validation)
+        .expect("request object must verify against the RP jwks");
+    assert_eq!(jar_claims.extra["client_id"], RP_ENTITY);
+    assert_eq!(jar_claims.extra["response_type"], "code");
+    assert_eq!(jar_claims.extra["state"], state.as_str());
+    assert_eq!(jar_claims.extra["nonce"], nonce.as_str());
+    assert_eq!(
+        jar_claims.extra["code_challenge"],
+        qp(&url, "code_challenge").unwrap().as_str()
+    );
+
     // The OP (mock) will echo the nonce into the id_token.
     *net.nonce.lock().unwrap() = Some(nonce);
 
@@ -636,37 +627,34 @@ async fn build_requires_trust_anchor() {
 }
 
 #[tokio::test]
-async fn discovery_renders_selection_page_then_starts_auth_with_choice() {
+async fn discovery_redirects_to_service_then_initiate_completes_flow() {
     let rp_fed_key = ec_key("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
     let http: Arc<dyn HttpClient> = net.clone();
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
-    // start_auth in discovery mode renders the OP-selection page (200 HTML),
-    // not a redirect.
+    // start_auth in discovery mode redirects the browser to the external
+    // discovery service, carrying this RP's entity id.
     let mut c = ctx();
-    let page = backend
+    let resp = backend
         .start_auth(&mut c, InternalData::request("https://sp.example"))
         .await
         .unwrap();
-    assert_eq!(page.status, 200);
-    let html = String::from_utf8(page.body.clone()).unwrap();
-    assert!(html.contains("Pick your IdP"), "custom page title");
-    assert!(
-        html.contains("The Test OP"),
-        "OP display name from collection"
-    );
-    assert!(html.contains(OP_ID), "OP entity id present");
-    assert!(
-        html.contains(r#"action="/OIDFedRP/disco""#),
-        "form posts back to the disco endpoint"
-    );
+    assert_eq!(resp.status, 302);
+    let url = location(&resp);
+    assert!(url.starts_with(DISCO_SERVICE), "got {url}");
+    assert_eq!(qp(&url, "entity_id").as_deref(), Some(RP_ENTITY));
+    assert_eq!(qp(&url, "hint"), None, "no hint without a decoration");
+    let target_link_uri = qp(&url, "target_link_uri").expect("discovery verifier target");
 
-    // The user selects the OP: POST entity_id to the disco endpoint -> 302 to
-    // the resolved OP's authorization endpoint.
-    let mut c = ctx();
-    c.request.form.insert("entity_id".into(), OP_ID.into());
-    let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
+    // The service sends the user back to /initiate (third-party initiated
+    // login) with the chosen OP in `iss`; the state cookie from start_auth
+    // rides along -> 302 to the resolved OP's authorization endpoint.
+    c.request.query.insert("iss".into(), OP_ID.into());
+    c.request
+        .query
+        .insert("target_link_uri".into(), target_link_uri);
+    let action = backend.handle_endpoint(&mut c, "initiate").await.unwrap();
     let BackendAction::Respond(resp) = action else {
         panic!("expected a redirect response");
     };
@@ -692,36 +680,149 @@ async fn discovery_renders_selection_page_then_starts_auth_with_choice() {
 }
 
 #[tokio::test]
-async fn discovery_rejects_unlisted_op_and_empty_selection() {
+async fn discovery_forwards_target_entityid_decoration_as_hint() {
+    let rp_fed_key = ec_key("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let http: Arc<dyn HttpClient> = net;
+    let backend = build_discovery_backend(http, fed_jwk, ta_pub);
+
+    // A request-path micro-service (e.g. idp_hinting) pinned an upstream:
+    // it becomes the discovery `hint`.
+    let mut c = ctx();
+    c.decorate(
+        tunnelbana_core::context::KEY_TARGET_ENTITYID,
+        serde_json::json!(OP_ID),
+    );
+    let resp = backend
+        .start_auth(&mut c, InternalData::request("https://sp.example"))
+        .await
+        .unwrap();
+    assert_eq!(qp(&location(&resp), "hint").as_deref(), Some(OP_ID));
+
+    // An unusable hint is dropped rather than failing the flow.
+    let mut c = ctx();
+    c.decorate(
+        tunnelbana_core::context::KEY_TARGET_ENTITYID,
+        serde_json::json!("not a url"),
+    );
+    let resp = backend
+        .start_auth(&mut c, InternalData::request("https://sp.example"))
+        .await
+        .unwrap();
+    let url = location(&resp);
+    assert!(url.starts_with(DISCO_SERVICE), "got {url}");
+    assert_eq!(qp(&url, "hint"), None, "bad hint must be dropped");
+}
+
+#[tokio::test]
+async fn initiate_rejects_unsolicited_missing_and_untrusted_iss() {
     let rp_fed_key = ec_key("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
     let http: Arc<dyn HttpClient> = net.clone();
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
-    // Empty selection re-renders the page with a prompt.
+    // Unsolicited: no discovery flow in flight (no marker in the state
+    // cookie) -> rejected before anything is resolved.
     let mut c = ctx();
-    let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
-    let BackendAction::Respond(resp) = action else {
-        panic!()
-    };
-    assert_eq!(resp.status, 200);
-    assert!(String::from_utf8(resp.body)
-        .unwrap()
-        .contains("Please select"));
+    c.request.query.insert("iss".into(), OP_ID.into());
+    assert!(backend.handle_endpoint(&mut c, "initiate").await.is_err());
 
-    // An entity id not in the collection is refused (no resolution attempted).
+    // In flight but no iss -> bad request.
     let mut c = ctx();
+    let request = InternalData::request("https://sp.example");
+    backend.start_auth(&mut c, request.clone()).await.unwrap();
+    assert!(backend.handle_endpoint(&mut c, "initiate").await.is_err());
+
+    // iss must be a valid https entity id.
+    let mut c = ctx();
+    backend.start_auth(&mut c, request.clone()).await.unwrap();
     c.request
-        .form
-        .insert("entity_id".into(), "https://evil.example/op".into());
-    let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
+        .query
+        .insert("iss".into(), "http://op.example.org".into());
+    assert!(backend.handle_endpoint(&mut c, "initiate").await.is_err());
+
+    // An iss that does not resolve through the configured trust anchors is
+    // refused: the discovery return cannot steer the proxy to an arbitrary
+    // issuer.
+    let mut c = ctx();
+    backend.start_auth(&mut c, request).await.unwrap();
+    c.request
+        .query
+        .insert("iss".into(), "https://evil.example/op".into());
+    assert!(backend.handle_endpoint(&mut c, "initiate").await.is_err());
+}
+
+#[tokio::test]
+async fn initiate_requires_expected_target_link_uri() {
+    let rp_fed_key = ec_key("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let http: Arc<dyn HttpClient> = net;
+    let backend = build_discovery_backend(http, fed_jwk, ta_pub);
+
+    let mut c = ctx();
+    let resp = backend
+        .start_auth(&mut c, InternalData::request("https://sp.example"))
+        .await
+        .unwrap();
+    let discovery_url = location(&resp);
+    let target_link_uri = qp(&discovery_url, "target_link_uri").expect("target_link_uri");
+
+    // Regression: while a discovery flow is in flight, a forged third-party
+    // initiated login without the echoed verifier must not be accepted.
+    c.request.query.insert("iss".into(), OP_ID.into());
+    assert!(backend.handle_endpoint(&mut c, "initiate").await.is_err());
+
+    // The legitimate discovery-service return still succeeds with the exact
+    // target_link_uri this RP attached to the outbound discovery redirect.
+    c.request.query.clear();
+    c.request.query.insert("iss".into(), OP_ID.into());
+    c.request
+        .query
+        .insert("target_link_uri".into(), target_link_uri.clone());
+    let action = backend.handle_endpoint(&mut c, "initiate").await.unwrap();
     let BackendAction::Respond(resp) = action else {
-        panic!()
+        panic!("expected a redirect response");
     };
-    assert_eq!(resp.status, 200);
-    assert!(String::from_utf8(resp.body)
-        .unwrap()
-        .contains("Unknown identity provider"));
+    assert_eq!(resp.status, 302);
+    assert!(
+        location(&resp).starts_with(&format!("{OP_ID}/authorize?")),
+        "got {}",
+        location(&resp)
+    );
+
+    // The verifier is one-time: replaying the same discovery return must now
+    // fail.
+    c.request.query.clear();
+    c.request.query.insert("iss".into(), OP_ID.into());
+    c.request
+        .query
+        .insert("target_link_uri".into(), target_link_uri);
+    assert!(backend.handle_endpoint(&mut c, "initiate").await.is_err());
+}
+
+#[tokio::test]
+async fn discovery_entity_configuration_publishes_initiate_login_uri() {
+    let rp_fed_key = ec_key("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let http: Arc<dyn HttpClient> = net;
+    let backend = build_discovery_backend(http, fed_jwk, ta_pub);
+
+    let action = backend
+        .handle_endpoint(&mut ctx(), "entity_configuration")
+        .await
+        .unwrap();
+    let BackendAction::Respond(resp) = action else {
+        panic!("expected a direct response");
+    };
+    let jwt = String::from_utf8(resp.body).unwrap();
+    let stmt = tunnelbana_oidc::federation::verify_self_signed(&jwt).unwrap();
+    let rp_meta = stmt.metadata("openid_relying_party").expect("rp metadata");
+    // The discovery service resolves us and must find where to send the
+    // user back.
+    assert_eq!(
+        rp_meta["initiate_login_uri"],
+        serde_json::json!(format!("{RP_ENTITY}/initiate"))
+    );
 }
 
 #[tokio::test]
@@ -748,7 +849,7 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
     // Both set -> error.
     let both = serde_json::json!({
         "op_entity_id": OP_ID,
-        "discovery": { "enable": true, "collection_endpoint": format!("{TA_ID}/collection") },
+        "discovery": { "enable": true, "service": DISCO_SERVICE },
         "federation": fed.clone()
     });
     assert!(tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(both)).is_err());
@@ -759,14 +860,22 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
         tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(neither)).is_err()
     );
 
-    // Discovery enabled without a collection endpoint -> error.
-    let no_collection = serde_json::json!({
+    // Discovery enabled without a service URL -> error.
+    let no_service = serde_json::json!({
         "discovery": { "enable": true },
+        "federation": fed.clone()
+    });
+    assert!(
+        tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(no_service)).is_err()
+    );
+
+    // Discovery enabled with an unparseable service URL -> error.
+    let bad_service = serde_json::json!({
+        "discovery": { "enable": true, "service": "not a url" },
         "federation": fed
     });
     assert!(
-        tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(no_collection))
-            .is_err()
+        tunnelbana_plugins::federation_backend::FederationBackend::build(&bx(bad_service)).is_err()
     );
 }
 
@@ -873,25 +982,4 @@ async fn malformed_inline_jwks_does_not_fall_back_to_jwks_uri() {
         err.is_err(),
         "invalid inline jwks must fail instead of downgrading"
     );
-}
-
-#[tokio::test]
-async fn discovery_ignores_entities_without_entity_types() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
-    let http: Arc<dyn HttpClient> = net;
-    let backend = build_discovery_backend(http, fed_jwk, ta_pub);
-
-    let mut c = ctx();
-    c.request
-        .form
-        .insert("entity_id".into(), "https://untyped-op.example.org".into());
-    let action = backend.handle_endpoint(&mut c, "disco").await.unwrap();
-    let BackendAction::Respond(resp) = action else {
-        panic!()
-    };
-    assert_eq!(resp.status, 200);
-    assert!(String::from_utf8(resp.body)
-        .unwrap()
-        .contains("Unknown identity provider"));
 }
