@@ -30,3 +30,4 @@ accepted — supersede with a new record rather than editing history.
 | [0022](0022-primary-identifier-microservice.md) | `primary_identifier` micro-service | Accepted |
 | [0023](0023-custom-logging-microservice.md) | `custom_logging` micro-service (per-flow audit records) | Accepted |
 | [0024](0024-openid-federation-backend.md) | OpenID Federation backend (federation-aware RP, automatic registration) | Accepted |
+| [0025](0025-external-federation-discovery-service.md) | External discovery service for the federation backend (third-party initiated login) | Accepted |

@@ -6,9 +6,17 @@
 //! entity id as the client id (automatic registration).
 //!
 //! The upstream OP is either fixed (`op_entity_id`) or chosen per flow via
-//! **discovery**: when `discovery.enable` is set, `start_auth` renders an
-//! OP-selection page built from a trust anchor's collection endpoint, and the
-//! user's choice (POSTed to `<name>/disco`) drives the rest of the flow.
+//! **discovery**: when `discovery.enable` is set, `start_auth` redirects the
+//! browser to an external OpenID Federation home-organization discovery
+//! service (`discovery.service`, e.g. upptackt). The service lets the user
+//! pick their OP and sends them back to this RP's published
+//! `initiate_login_uri` (`<name>/initiate`) as an OpenID Connect Core §4
+//! Third-Party Initiated Login whose `iss` drives the rest of the flow.
+//!
+//! An earlier revision rendered the OP-selection page inside the proxy from a
+//! trust anchor's collection endpoint. That code is kept commented out below
+//! (look for "In-proxy discovery") for anyone who wants to run discovery
+//! inside the proxy again; see ADR 0025.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,11 +34,15 @@ use tunnelbana_core::internal::{AuthenticationInformation, InternalData, Subject
 use tunnelbana_core::keys::SigningKey;
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
 use tunnelbana_core::util::{now_rfc3339, now_secs, random_token};
+use tunnelbana_oidc::discovery;
 use tunnelbana_oidc::federation::{self, TrustAnchors};
 use tunnelbana_oidc::pkce;
 use tunnelbana_oidc::rp::{self, ClientAuth, ProviderInfo, RpClient};
 
 use crate::keyload::load_signing_key;
+
+const DISCOVERY_VERIFIER_KEY: &str = "disco_verifier";
+const DISCOVERY_VERIFIER_PARAM: &str = "tb_discovery_verifier";
 
 #[derive(Debug, Deserialize)]
 struct TrustAnchorConfig {
@@ -74,27 +86,40 @@ fn default_ec_lifetime() -> u64 {
 fn default_op_cache_ttl() -> u64 {
     3600
 }
-fn default_disco_title() -> String {
-    "Select your identity provider".to_string()
-}
-fn default_op_list_ttl() -> u64 {
-    3600
-}
+// In-proxy discovery (kept for reference, see ADR 0025):
+// fn default_disco_title() -> String {
+//     "Select your identity provider".to_string()
+// }
+// fn default_op_list_ttl() -> u64 {
+//     3600
+// }
 
 /// OP-discovery configuration (mutually exclusive with a fixed `op_entity_id`).
+///
+/// Discovery is delegated to an external home-organization discovery service:
+/// `start_auth` sends the browser to `service` and the service returns the
+/// user to `<module_base>/initiate` with the chosen OP in `iss`.
 #[derive(Debug, Deserialize)]
 struct DiscoveryConfig {
     #[serde(default)]
     enable: bool,
-    /// A trust anchor's collection/listing endpoint enumerating the
-    /// federation's OPs (e.g. an inmor `…/collection`).
+    /// Endpoint URL of the external OpenID Federation discovery service
+    /// (e.g. an upptackt deployment). Required when `enable` is set.
     #[serde(default)]
-    collection_endpoint: Option<String>,
-    #[serde(default = "default_disco_title")]
-    page_title: String,
-    /// How long the fetched OP list is cached before re-fetching.
-    #[serde(default = "default_op_list_ttl")]
-    cache_ttl: u64,
+    service: Option<String>,
+    // ── In-proxy discovery (kept for reference, see ADR 0025) ───────────────
+    // The proxy used to render its own OP-selection page from a trust
+    // anchor's collection endpoint. To bring that back, restore these fields
+    // together with the other "In-proxy discovery" blocks in this file.
+    // /// A trust anchor's collection/listing endpoint enumerating the
+    // /// federation's OPs (e.g. an inmor `…/collection`).
+    // #[serde(default)]
+    // collection_endpoint: Option<String>,
+    // #[serde(default = "default_disco_title")]
+    // page_title: String,
+    // /// How long the fetched OP list is cached before re-fetching.
+    // #[serde(default = "default_op_list_ttl")]
+    // cache_ttl: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,7 +134,7 @@ struct FederationBackendConfig {
     /// `discovery.enable` is set (the two are mutually exclusive).
     #[serde(default)]
     op_entity_id: Option<String>,
-    /// OP discovery: present an OP-selection page instead of a fixed OP.
+    /// OP discovery via an external discovery service instead of a fixed OP.
     #[serde(default)]
     discovery: Option<DiscoveryConfig>,
     #[serde(default)]
@@ -140,13 +165,28 @@ struct ResolvedOp {
     federation_jwks: JwkSet,
 }
 
-/// Runtime state for OP discovery.
+/// Runtime state for OP discovery via an external discovery service.
 struct Discovery {
-    collection_endpoint: String,
-    page_title: String,
-    cache_ttl: u64,
-    /// Cached OP list: (expires_at_secs, entities).
-    op_list_cache: RwLock<Option<(u64, Vec<federation::CollectionEntity>)>>,
+    /// Endpoint URL of the external discovery service.
+    service: String,
+    /// Where the service sends the user back: `<module_base>/initiate`,
+    /// published as `initiate_login_uri` in the RP entity configuration.
+    initiate_login_uri: String,
+    // ── In-proxy discovery (kept for reference, see ADR 0025) ───────────────
+    // collection_endpoint: String,
+    // page_title: String,
+    // cache_ttl: u64,
+    // /// Cached OP list: (expires_at_secs, entities).
+    // op_list_cache: RwLock<Option<(u64, Vec<federation::CollectionEntity>)>>,
+}
+
+impl Discovery {
+    fn target_link_uri(&self, verifier: &str) -> String {
+        format!(
+            "{}?{}={verifier}",
+            self.initiate_login_uri, DISCOVERY_VERIFIER_PARAM
+        )
+    }
 }
 
 pub struct FederationBackend {
@@ -196,17 +236,31 @@ impl FederationBackend {
                         bx.name
                     )));
                 }
-                let collection_endpoint = d.collection_endpoint.ok_or_else(|| {
+                let service = d.service.ok_or_else(|| {
                     Error::Config(format!(
-                        "oidc_federation backend {}: discovery.enable requires collection_endpoint",
+                        "oidc_federation backend {}: discovery.enable requires service \
+                         (the external discovery service URL)",
                         bx.name
                     ))
                 })?;
+                // Fail fast on an unusable service URL or RP entity id: the
+                // same helper builds the live redirect in start_auth.
+                discovery::discovery_request_url(&service, &entity_id, None, None).map_err(
+                    |e| {
+                        Error::Config(format!(
+                            "oidc_federation backend {}: discovery.service: {e}",
+                            bx.name
+                        ))
+                    },
+                )?;
                 Some(Discovery {
-                    collection_endpoint,
-                    page_title: d.page_title,
-                    cache_ttl: d.cache_ttl,
-                    op_list_cache: RwLock::new(None),
+                    service,
+                    initiate_login_uri: format!("{module_base}/initiate"),
+                    // In-proxy discovery (kept for reference, see ADR 0025):
+                    // collection_endpoint,
+                    // page_title: d.page_title,
+                    // cache_ttl: d.cache_ttl,
+                    // op_list_cache: RwLock::new(None),
                 })
             }
             _ => {
@@ -310,6 +364,15 @@ impl FederationBackend {
         );
         relying_party.insert("jwks".into(), serde_json::to_value(&self.client_jwks)?);
         relying_party.insert("scope".into(), Value::String(self.client.scope.clone()));
+        if let Some(d) = &self.discovery {
+            // The discovery service resolves this RP through the federation
+            // and sends the user back here (third-party initiated login), so
+            // the return endpoint must be published in our metadata.
+            relying_party.insert(
+                "initiate_login_uri".into(),
+                Value::String(d.initiate_login_uri.clone()),
+            );
+        }
         if let Some(n) = &self.organization_name {
             relying_party.insert("client_name".into(), Value::String(n.clone()));
         }
@@ -406,49 +469,71 @@ impl FederationBackend {
         ctx.state.set_str(&self.name, "code_verifier", &verifier);
         ctx.state.set_str(&self.name, "op_entity_id", op_entity_id);
 
+        // Automatic registration authenticates the authorization request
+        // itself: a signed request object (RFC 9101) proves possession of the
+        // client keys published in our entity configuration, and federation
+        // OPs (e.g. Shibboleth) use it as the trigger to resolve our trust
+        // chain on the fly. The plain query parameters stay alongside for
+        // OPs that ignore the `request` parameter.
+        let ClientAuth::PrivateKeyJwt(client_key) = &self.client.auth else {
+            return Err(Error::Internal(
+                "federation RP always uses private_key_jwt".into(),
+            ));
+        };
+        let request_object = rp::signed_request_object(
+            &op.provider,
+            &self.client,
+            client_key,
+            &state,
+            &nonce,
+            Some(&challenge),
+        )?;
+
         let url = rp::authorization_url(
             &op.provider,
             &self.client,
             &state,
             &nonce,
             Some(&challenge),
-            &[],
+            &[("request", &request_object)],
         );
         Ok(Response::redirect(url))
     }
 
-    /// Fetch the federation's OP list for the discovery page (TTL-cached). A
-    /// fetch failure yields an empty list (logged), so the page still renders.
-    async fn fetch_op_list(&self, d: &Discovery) -> Vec<federation::CollectionEntity> {
-        if let Some((expires, list)) = d.op_list_cache.read().expect("lock").clone() {
-            if expires > now_secs() {
-                return list;
-            }
-        }
-        match federation::fetch_collection(&self.http, &d.collection_endpoint, "openid_provider")
-            .await
-        {
-            Ok(list) => {
-                *d.op_list_cache.write().expect("lock") =
-                    Some((now_secs() + d.cache_ttl, list.clone()));
-                list
-            }
-            Err(e) => {
-                tracing::error!(error = %e, endpoint = %d.collection_endpoint, "failed to fetch OP collection");
-                Vec::new()
-            }
-        }
-    }
-
-    /// Render the self-contained OP-selection page.
-    fn render_discovery_page(
-        &self,
-        d: &Discovery,
-        ops: &[federation::CollectionEntity],
-        error: Option<&str>,
-    ) -> Response {
-        Response::html(render_discovery_html(&self.name, &d.page_title, ops, error))
-    }
+    // ── In-proxy discovery (kept for reference, see ADR 0025) ───────────────
+    //
+    // /// Fetch the federation's OP list for the discovery page (TTL-cached). A
+    // /// fetch failure yields an empty list (logged), so the page still renders.
+    // async fn fetch_op_list(&self, d: &Discovery) -> Vec<federation::CollectionEntity> {
+    //     if let Some((expires, list)) = d.op_list_cache.read().expect("lock").clone() {
+    //         if expires > now_secs() {
+    //             return list;
+    //         }
+    //     }
+    //     match federation::fetch_collection(&self.http, &d.collection_endpoint, "openid_provider")
+    //         .await
+    //     {
+    //         Ok(list) => {
+    //             *d.op_list_cache.write().expect("lock") =
+    //                 Some((now_secs() + d.cache_ttl, list.clone()));
+    //             list
+    //         }
+    //         Err(e) => {
+    //             tracing::error!(error = %e, endpoint = %d.collection_endpoint, "failed to fetch OP collection");
+    //             Vec::new()
+    //         }
+    //     }
+    // }
+    //
+    // /// Render the self-contained OP-selection page.
+    // fn render_discovery_page(
+    //     &self,
+    //     d: &Discovery,
+    //     ops: &[federation::CollectionEntity],
+    //     error: Option<&str>,
+    // ) -> Response {
+    //     Response::html(render_discovery_html(&self.name, &d.page_title, ops, error))
+    // }
 
     /// The OP's id_token verification keys via the OpenID Federation JWK set
     /// representations (`jwks`, `signed_jwks_uri`, then `jwks_uri`).
@@ -482,22 +567,65 @@ impl Backend for FederationBackend {
         ];
         if self.discovery.is_some() {
             routes.push(Route::new(
-                &regex::escape(&format!("{}/disco", self.name)),
-                "disco",
+                &regex::escape(&format!("{}/initiate", self.name)),
+                "initiate",
             ));
+            // In-proxy discovery selection endpoint (kept for reference,
+            // see ADR 0025):
+            // routes.push(Route::new(
+            //     &regex::escape(&format!("{}/disco", self.name)),
+            //     "disco",
+            // ));
         }
         routes
     }
 
     async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {
         match &self.discovery {
-            // Discovery: show the OP-selection page. The frontend's in-flight
-            // request already rides the encrypted state cookie, so the
-            // selection round-trip needs no extra server state (cf. ADR 0007).
+            // Discovery: send the browser to the external discovery service.
+            // The frontend's in-flight request already rides the encrypted
+            // state cookie, so the round-trip needs no extra server state
+            // (cf. ADR 0007); a one-time verifier ties the eventual /initiate
+            // return to a redirect this proxy actually issued.
             Some(d) => {
-                let ops = self.fetch_op_list(d).await;
-                Ok(self.render_discovery_page(d, &ops, None))
+                let verifier = random_token(16);
+                ctx.state
+                    .set_str(&self.name, DISCOVERY_VERIFIER_KEY, &verifier);
+                let target_link_uri = d.target_link_uri(&verifier);
+                // A request-path micro-service (e.g. idp_hinting) may have
+                // pinned an upstream; forward it as the discovery hint.
+                let hint = ctx
+                    .decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let url = match discovery::discovery_request_url(
+                    &d.service,
+                    &self.entity_id,
+                    hint.as_deref(),
+                    Some(&target_link_uri),
+                ) {
+                    Ok(url) => url,
+                    // A hint that is not a valid entity id must not kill the
+                    // flow; the user just picks the OP without a default.
+                    Err(e) if hint.is_some() => {
+                        tracing::warn!(error = %e, "ignoring unusable OP hint for discovery");
+                        discovery::discovery_request_url(
+                            &d.service,
+                            &self.entity_id,
+                            None,
+                            Some(&target_link_uri),
+                        )?
+                    }
+                    Err(e) => return Err(e),
+                };
+                Ok(Response::redirect(url))
             }
+            // In-proxy discovery (kept for reference, see ADR 0025): show the
+            // OP-selection page rendered by the proxy itself.
+            // Some(d) => {
+            //     let ops = self.fetch_op_list(d).await;
+            //     Ok(self.render_discovery_page(d, &ops, None))
+            // }
             // Fixed OP.
             None => {
                 let op_entity_id = self
@@ -519,7 +647,9 @@ impl Backend for FederationBackend {
                         .with_body(jwt.into_bytes()),
                 ))
             }
-            "disco" => self.handle_disco(ctx).await,
+            "initiate" => self.handle_initiate(ctx).await,
+            // In-proxy discovery (kept for reference, see ADR 0025):
+            // "disco" => self.handle_disco(ctx).await,
             "callback" => self.handle_callback(ctx).await,
             other => Err(Error::NoBoundEndpoint(other.to_string())),
         }
@@ -527,46 +657,81 @@ impl Backend for FederationBackend {
 }
 
 impl FederationBackend {
-    /// Handle an OP selection from the discovery page: validate the chosen
-    /// entity against the federation's OP list, then start auth with it.
-    async fn handle_disco(&self, ctx: &mut Context) -> Result<BackendAction> {
-        let d = self
+    /// Handle the return call from the external discovery service: an OpenID
+    /// Connect Core §4 Third-Party Initiated Login carrying the chosen OP in
+    /// `iss`. The OP is only used after it resolves through the configured
+    /// trust anchors, so the parameter cannot make the proxy authenticate
+    /// against an arbitrary issuer.
+    async fn handle_initiate(&self, ctx: &mut Context) -> Result<BackendAction> {
+        let discovery = self
             .discovery
             .as_ref()
-            .ok_or_else(|| Error::NoBoundEndpoint("disco".into()))?;
-
-        let selected = ctx
-            .request
-            .param("entity_id")
-            .map(str::to_string)
-            .filter(|s| !s.is_empty());
-        let ops = self.fetch_op_list(d).await;
-
-        let Some(selected) = selected else {
-            return Ok(BackendAction::Respond(self.render_discovery_page(
-                d,
-                &ops,
-                Some("Please select an identity provider."),
-            )));
-        };
-        // Only entities the trust anchor actually lists are accepted, so the
-        // selection cannot be used to make the proxy resolve arbitrary ids.
-        if !ops.iter().any(|e| e.entity_id == selected) {
-            return Ok(BackendAction::Respond(self.render_discovery_page(
-                d,
-                &ops,
-                Some("Unknown identity provider; please choose one from the list."),
-            )));
+            .ok_or_else(|| Error::NoBoundEndpoint("initiate".into()))?;
+        let verifier = ctx
+            .state
+            .get_str(&self.name, DISCOVERY_VERIFIER_KEY)
+            .ok_or_else(|| {
+                Error::Authn(
+                    "third-party initiated login without a discovery flow in flight".into(),
+                )
+            })?;
+        let login = discovery::parse_third_party_initiated_login(&ctx.request.query)?;
+        let expected_target_link_uri = discovery.target_link_uri(&verifier);
+        if login.target_link_uri.as_deref() != Some(expected_target_link_uri.as_str()) {
+            return Err(Error::Authn(
+                "third-party initiated login missing or mismatched target_link_uri".into(),
+            ));
         }
-        match self.start_auth_with_op(ctx, &selected).await {
-            Ok(redirect) => Ok(BackendAction::Respond(redirect)),
-            Err(e) => Ok(BackendAction::Respond(self.render_discovery_page(
-                d,
-                &ops,
-                Some(&format!("Could not start login with that provider: {e}")),
-            ))),
-        }
+        // `target_link_uri` is for session-less RPs; here it is only a
+        // one-time return-path verifier and is never used as a redirect target.
+        let redirect = self.start_auth_with_op(ctx, &login.iss).await?;
+        ctx.state
+            .set_value(&self.name, DISCOVERY_VERIFIER_KEY, Value::Null);
+        Ok(BackendAction::Respond(redirect))
     }
+
+    // ── In-proxy discovery (kept for reference, see ADR 0025) ───────────────
+    //
+    // /// Handle an OP selection from the discovery page: validate the chosen
+    // /// entity against the federation's OP list, then start auth with it.
+    // async fn handle_disco(&self, ctx: &mut Context) -> Result<BackendAction> {
+    //     let d = self
+    //         .discovery
+    //         .as_ref()
+    //         .ok_or_else(|| Error::NoBoundEndpoint("disco".into()))?;
+    //
+    //     let selected = ctx
+    //         .request
+    //         .param("entity_id")
+    //         .map(str::to_string)
+    //         .filter(|s| !s.is_empty());
+    //     let ops = self.fetch_op_list(d).await;
+    //
+    //     let Some(selected) = selected else {
+    //         return Ok(BackendAction::Respond(self.render_discovery_page(
+    //             d,
+    //             &ops,
+    //             Some("Please select an identity provider."),
+    //         )));
+    //     };
+    //     // Only entities the trust anchor actually lists are accepted, so the
+    //     // selection cannot be used to make the proxy resolve arbitrary ids.
+    //     if !ops.iter().any(|e| e.entity_id == selected) {
+    //         return Ok(BackendAction::Respond(self.render_discovery_page(
+    //             d,
+    //             &ops,
+    //             Some("Unknown identity provider; please choose one from the list."),
+    //         )));
+    //     }
+    //     match self.start_auth_with_op(ctx, &selected).await {
+    //         Ok(redirect) => Ok(BackendAction::Respond(redirect)),
+    //         Err(e) => Ok(BackendAction::Respond(self.render_discovery_page(
+    //             d,
+    //             &ops,
+    //             Some(&format!("Could not start login with that provider: {e}")),
+    //         ))),
+    //     }
+    // }
 
     async fn handle_callback(&self, ctx: &mut Context) -> Result<BackendAction> {
         // CSRF: state must match what we stored at start_auth.
@@ -670,111 +835,113 @@ fn merge_json(base: &mut Value, extra: &Value) {
     }
 }
 
-/// Minimal HTML attribute/text escaping for the discovery page.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Render the self-contained OP-selection page. Each OP is a form that POSTs
-/// its `entity_id` back to `/<name>/disco`.
-fn render_discovery_html(
-    name: &str,
-    page_title: &str,
-    ops: &[federation::CollectionEntity],
-    error: Option<&str>,
-) -> String {
-    let title = html_escape(page_title);
-    let action = format!("/{}/disco", html_escape(name));
-
-    let error_html = error
-        .map(|e| {
-            format!(
-                r#"<div class="error" role="alert">{}</div>"#,
-                html_escape(e)
-            )
-        })
-        .unwrap_or_default();
-
-    let items = if ops.is_empty() {
-        r#"<p class="empty">No identity providers are available right now.</p>"#.to_string()
-    } else {
-        ops.iter()
-            .map(|op| {
-                let eid = html_escape(&op.entity_id);
-                let display = html_escape(&op.display_name);
-                let logo = match &op.logo_uri {
-                    Some(u) if !u.is_empty() => format!(
-                        r#"<img class="logo" src="{}" alt="" width="28" height="28">"#,
-                        html_escape(u)
-                    ),
-                    _ => r#"<span class="logo placeholder" aria-hidden="true">&#127970;</span>"#
-                        .to_string(),
-                };
-                format!(
-                    r#"<form method="post" action="{action}">
-<input type="hidden" name="entity_id" value="{eid}">
-<button type="submit" class="op">{logo}<span class="meta"><span class="name">{display}</span><span class="eid">{eid}</span></span></button>
-</form>"#
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-:root {{ color-scheme: light dark; }}
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f6f8; color: #1c1e21; }}
-.card {{ background: #fff; max-width: 28rem; width: calc(100% - 2rem); margin: 2rem auto;
-  border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 8px 24px rgba(0,0,0,.08); padding: 1.75rem; }}
-h1 {{ font-size: 1.25rem; margin: 0 0 1.25rem; }}
-.error {{ background: #fdecea; color: #8a1c1c; border-radius: 8px; padding: .6rem .8rem; margin-bottom: 1rem; font-size: .9rem; }}
-.empty {{ color: #65676b; font-size: .95rem; }}
-form {{ margin: 0 0 .6rem; }}
-.op {{ display: flex; align-items: center; gap: .85rem; width: 100%; text-align: left; cursor: pointer;
-  background: #fff; border: 1px solid #dadde1; border-radius: 10px; padding: .7rem .9rem; font: inherit; color: inherit; }}
-.op:hover {{ border-color: #1877f2; background: #f0f6ff; }}
-.logo {{ flex: 0 0 28px; width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; }}
-.logo.placeholder {{ background: #e4e6eb; font-size: 1rem; }}
-.meta {{ display: flex; flex-direction: column; min-width: 0; }}
-.name {{ font-weight: 600; }}
-.eid {{ color: #65676b; font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-@media (prefers-color-scheme: dark) {{
-  body {{ background: #18191a; color: #e4e6eb; }}
-  .card {{ background: #242526; box-shadow: none; }}
-  .op {{ background: #3a3b3c; border-color: #3e4042; }}
-  .op:hover {{ background: #2d3a4f; border-color: #1877f2; }}
-  .logo.placeholder {{ background: #4e4f50; }}
-  .eid {{ color: #b0b3b8; }}
-}}
-</style>
-</head>
-<body>
-<main class="card">
-<h1>{title}</h1>
-{error_html}
-{items}
-</main>
-</body>
-</html>"#
-    )
-}
+// ── In-proxy discovery (kept for reference, see ADR 0025) ──────────────────
+//
+// /// Minimal HTML attribute/text escaping for the discovery page.
+// fn html_escape(s: &str) -> String {
+//     let mut out = String::with_capacity(s.len());
+//     for c in s.chars() {
+//         match c {
+//             '&' => out.push_str("&amp;"),
+//             '<' => out.push_str("&lt;"),
+//             '>' => out.push_str("&gt;"),
+//             '"' => out.push_str("&quot;"),
+//             '\'' => out.push_str("&#x27;"),
+//             _ => out.push(c),
+//         }
+//     }
+//     out
+// }
+//
+// /// Render the self-contained OP-selection page. Each OP is a form that POSTs
+// /// its `entity_id` back to `/<name>/disco`.
+// fn render_discovery_html(
+//     name: &str,
+//     page_title: &str,
+//     ops: &[federation::CollectionEntity],
+//     error: Option<&str>,
+// ) -> String {
+//     let title = html_escape(page_title);
+//     let action = format!("/{}/disco", html_escape(name));
+//
+//     let error_html = error
+//         .map(|e| {
+//             format!(
+//                 r#"<div class="error" role="alert">{}</div>"#,
+//                 html_escape(e)
+//             )
+//         })
+//         .unwrap_or_default();
+//
+//     let items = if ops.is_empty() {
+//         r#"<p class="empty">No identity providers are available right now.</p>"#.to_string()
+//     } else {
+//         ops.iter()
+//             .map(|op| {
+//                 let eid = html_escape(&op.entity_id);
+//                 let display = html_escape(&op.display_name);
+//                 let logo = match &op.logo_uri {
+//                     Some(u) if !u.is_empty() => format!(
+//                         r#"<img class="logo" src="{}" alt="" width="28" height="28">"#,
+//                         html_escape(u)
+//                     ),
+//                     _ => r#"<span class="logo placeholder" aria-hidden="true">&#127970;</span>"#
+//                         .to_string(),
+//                 };
+//                 format!(
+//                     r#"<form method="post" action="{action}">
+// <input type="hidden" name="entity_id" value="{eid}">
+// <button type="submit" class="op">{logo}<span class="meta"><span class="name">{display}</span><span class="eid">{eid}</span></span></button>
+// </form>"#
+//                 )
+//             })
+//             .collect::<Vec<_>>()
+//             .join("\n")
+//     };
+//
+//     format!(
+//         r#"<!DOCTYPE html>
+// <html lang="en">
+// <head>
+// <meta charset="utf-8">
+// <meta name="viewport" content="width=device-width, initial-scale=1">
+// <title>{title}</title>
+// <style>
+// :root {{ color-scheme: light dark; }}
+// * {{ box-sizing: border-box; }}
+// body {{ margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+//   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f6f8; color: #1c1e21; }}
+// .card {{ background: #fff; max-width: 28rem; width: calc(100% - 2rem); margin: 2rem auto;
+//   border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 8px 24px rgba(0,0,0,.08); padding: 1.75rem; }}
+// h1 {{ font-size: 1.25rem; margin: 0 0 1.25rem; }}
+// .error {{ background: #fdecea; color: #8a1c1c; border-radius: 8px; padding: .6rem .8rem; margin-bottom: 1rem; font-size: .9rem; }}
+// .empty {{ color: #65676b; font-size: .95rem; }}
+// form {{ margin: 0 0 .6rem; }}
+// .op {{ display: flex; align-items: center; gap: .85rem; width: 100%; text-align: left; cursor: pointer;
+//   background: #fff; border: 1px solid #dadde1; border-radius: 10px; padding: .7rem .9rem; font: inherit; color: inherit; }}
+// .op:hover {{ border-color: #1877f2; background: #f0f6ff; }}
+// .logo {{ flex: 0 0 28px; width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; }}
+// .logo.placeholder {{ background: #e4e6eb; font-size: 1rem; }}
+// .meta {{ display: flex; flex-direction: column; min-width: 0; }}
+// .name {{ font-weight: 600; }}
+// .eid {{ color: #65676b; font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+// @media (prefers-color-scheme: dark) {{
+//   body {{ background: #18191a; color: #e4e6eb; }}
+//   .card {{ background: #242526; box-shadow: none; }}
+//   .op {{ background: #3a3b3c; border-color: #3e4042; }}
+//   .op:hover {{ background: #2d3a4f; border-color: #1877f2; }}
+//   .logo.placeholder {{ background: #4e4f50; }}
+//   .eid {{ color: #b0b3b8; }}
+// }}
+// </style>
+// </head>
+// <body>
+// <main class="card">
+// <h1>{title}</h1>
+// {error_html}
+// {items}
+// </main>
+// </body>
+// </html>"#
+//     )
+// }

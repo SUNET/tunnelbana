@@ -11,7 +11,8 @@
 
 #[doc(no_inline)]
 pub use grindvakt::{
-    client, dpop, federation, jwt, metadata, oauth_error, pkce, provider, request, rp, tokens,
+    client, discovery, dpop, federation, jwt, metadata, oauth_error, pkce, provider, request, rp,
+    tokens,
 };
 
 pub use grindvakt::{
