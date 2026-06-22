@@ -244,13 +244,13 @@ name = "OIDFedRP"
   op_entity_id = "https://op.example.org"
   scope        = "openid profile email"
 
-  # Instead of a fixed op_entity_id, enable OP discovery: present a selection
-  # page built from a trust anchor's collection endpoint.
+  # Instead of a fixed op_entity_id, enable OP discovery: send the user to an
+  # external OpenID Federation discovery service (e.g. upptackt) which returns
+  # the chosen OP to <name>/initiate as a third-party initiated login
+  # (ADR 0025).
   # [backend.config.discovery]
-  # enable              = true
-  # collection_endpoint = "https://ta.example.com/collection"
-  # page_title          = "Select your identity provider"   # default
-  # cache_ttl           = 3600    # OP-list cache TTL, seconds (default 3600)
+  # enable  = true
+  # service = "https://discovery.example.com"
 
   # Optional dedicated private_key_jwt key; defaults to the federation key.
   # signing_key_path  = "keys/rp_oidc.key"
@@ -281,10 +281,13 @@ How a flow works:
    through a trust anchor's `federation_resolve_endpoint` (the response is a
    `resolve-response+jwt` verified against the pinned anchor keys) and caches
    the result for `op_cache_ttl` seconds. With **discovery** enabled it
-   instead fetches the federation's OP list from the `collection_endpoint`
-   and renders an OP-selection page (see below).
+   instead redirects the browser to the external discovery service (see
+   below).
 2. The user is redirected to the resolved `authorization_endpoint` with
-   `client_id = <entity_id>`, PKCE (S256), and `state`/`nonce` (plus the
+   `client_id = <entity_id>`, PKCE (S256), a **signed request object**
+   (RFC 9101, signed with the `private_key_jwt` key — federation OPs doing
+   automatic registration authenticate the RP with it; plain parameters are
+   kept alongside for OPs that ignore it), and `state`/`nonce` (plus the
    chosen OP) sealed in the encrypted state cookie.
 3. The callback (`…/OIDFedRP/callback`) checks the state, exchanges the code
    at the resolved `token_endpoint` with a `private_key_jwt` assertion, and
@@ -311,23 +314,43 @@ federation keys; the two key sets are deliberately separate). At least one
 ### OP discovery
 
 With `[backend.config.discovery]` instead of a fixed `op_entity_id`, the
-backend lets the user choose the OP per flow (SATOSA's `discovery` mode):
+backend delegates the per-flow OP choice to an **external OpenID Federation
+discovery service** such as [upptackt](https://github.com/kushaldas/upptackt)
+(ADR 0025):
 
-1. `start_auth` GETs `collection_endpoint?entity_type=openid_provider` (a
-   trust anchor's listing endpoint, e.g. an inmor `…/collection`), flattening
-   each entity's `ui_infos` into a name + logo, and caches the list for
-   `cache_ttl` seconds.
-2. It renders a self-contained OP-selection page (all values HTML-escaped)
-   whose buttons POST the chosen `entity_id` to `…/OIDFedRP/disco`.
-3. `disco` validates the choice against the fetched list (so it can only
-   resolve OPs the trust anchor actually lists), then continues exactly as
-   the fixed-OP path. The chosen OP is sealed in the state cookie, so the
-   callback resolves the same OP.
+1. `start_auth` 302s to `service?entity_id=<rp_entity_id>&target_link_uri=…`.
+   The `target_link_uri` is a **one-time return-path verifier**:
+   `…/OIDFedRP/initiate?tb_discovery_verifier=<random token>`, with the
+   token also stored in the encrypted state cookie. If a request-path
+   micro-service pinned an upstream via the `KEY_TARGET_ENTITYID` decoration
+   (e.g. `idp_hinting`), it is forwarded as `hint`; an invalid hint is
+   dropped, not fatal.
+2. The discovery service verifies the RP through the federation (it resolves
+   the RP's entity configuration, where this backend publishes
+   `initiate_login_uri = …/OIDFedRP/initiate` in discovery mode), lets the
+   user search and pick an OP, and sends the user back to
+   `…/OIDFedRP/initiate?iss=<op>&target_link_uri=<echoed verbatim>` - an
+   OpenID Connect Core §4 Third-Party Initiated Login.
+3. `initiate` accepts the return only when a discovery flow is actually in
+   flight (the verifier stored in the encrypted state cookie by
+   `start_auth`) **and** the echoed `target_link_uri` exactly matches the
+   verifier URL emitted in step 1 - binding the return to that specific
+   outgoing redirect (anti-CSRF/anti-replay; the verifier is cleared after
+   use). It then validates `iss` as an https entity id and continues exactly
+   as the fixed-OP path: the OP must resolve through the configured trust
+   anchors, and the chosen OP is sealed in the state cookie so the callback
+   resolves the same OP. The `target_link_uri` is only ever compared, never
+   used as a redirect target - the proxy's continuation rides the state
+   cookie, never a caller-supplied URL.
 
 `op_entity_id` and `discovery.enable` are mutually exclusive and validated at
-startup; `discovery.enable` requires a `collection_endpoint`. If the listing
-endpoint is unreachable the page still renders (empty list, logged). The
-`disco` route is only registered in discovery mode.
+startup; `discovery.enable` requires `service` (the URL is also validated at
+startup). The `initiate` route is only registered in discovery mode.
+
+> An earlier revision rendered the OP-selection page inside the proxy from a
+> trust anchor's collection endpoint. That implementation is kept commented
+> out in `federation_backend.rs` ("In-proxy discovery") for deployments that
+> want a built-in chooser; see ADR 0025.
 
 ## `saml2` backend - Service Provider
 

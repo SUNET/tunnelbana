@@ -659,6 +659,20 @@ impl Saml2Backend {
         } else {
             None
         };
+        // Tell the validator (check 6) exactly which IDs we cryptographically
+        // verified above, so it accepts only signatures we actually proved.
+        // When the envelope verified (Response XML signature or Redirect-binding
+        // detached signature over the whole message), the Response ID covers
+        // every contained assertion. Otherwise each assertion — cleartext and
+        // decrypted alike — was individually verified against the XML it
+        // travelled in, so list each assertion ID.
+        let verified_signed_ids: Vec<String> = if envelope_verified {
+            vec![response.base.id.clone()]
+        } else {
+            response.assertions.iter().map(|a| a.id.clone()).collect()
+        };
+        let verified_signed_id_refs: Vec<&str> =
+            verified_signed_ids.iter().map(String::as_str).collect();
         let params = ValidationParams {
             received_url: &self.acs_url,
             expected_idp_entity_id,
@@ -669,6 +683,7 @@ impl Saml2Backend {
             relay_state: None,
             response_signature_xml: None,
             response_signature_verified,
+            verified_signed_ids: &verified_signed_id_refs,
             current_proxy_depth: 0,
             now: Utc::now(),
         };

@@ -1348,9 +1348,9 @@ dependencies = [
 
 [[package]]
 name = "gamlastan"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7311334e4b988d5e00f25d110347b7cd4fd2998c1d535b94100e38b14ec4a4b2"
+checksum = "78a4e922b7786bb27e6e66d1d9937c0eef7d9e6b49915a4f38202fb4dce9f92f"
 dependencies = [
  "base64",
  "bergshamra",
@@ -1372,9 +1372,9 @@ dependencies = [
 
 [[package]]
 name = "gamlastan-mdq"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d93f4954a927f2bb2de700bcd920ad8824fa53bfcf7320d0237cc0ecdf1760a"
+checksum = "64a7e91c071cd955f5562ce8c59e3e8251839a63beafed9fe48cf3b6943600b2"
 dependencies = [
  "base64",
  "bytes",
@@ -1473,9 +1473,9 @@ dependencies = [
 
 [[package]]
 name = "grindvakt"
-version = "0.2.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e828da6c824961904e168740f590877b7027b42884002033db66f6c425f71a"
+checksum = "5496920e646ee5b110d91e25ffbe9c021993d77743b849fd93d43d24876cc190"
 dependencies = [
  "async-trait",
  "base64",

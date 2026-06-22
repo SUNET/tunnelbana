@@ -44,15 +44,15 @@ Published at **https://satosa.labb.sunet.se** (entity_id is the bare host).
 
 ## Build & deploy (fast path — no Rust on the remote)
 
-The binary is cross-built on the dev host inside a bookworm container so its
-glibc matches `debian:bookworm-slim`; the remote only mounts it.
+The binary is cross-built on the dev host inside a debian-13 (trixie) container
+so its glibc matches `debian:13-slim`; the remote only mounts it.
 
 ```bash
 # 1. Build (cached target + host cargo registry):
-./build.sh                        # -> .build-cache/target/release/tunnelbana
+./build.sh                        # -> .build-cache/target-trixie/release/tunnelbana
 
 # 2. Ship the binary and restart (no rebuild):
-rsync -a ../../.build-cache/target/release/tunnelbana \
+rsync -a ../../.build-cache/target-trixie/release/tunnelbana \
       debian@realta.labb.sunet.se:~/tunnelbana-idp/bin/tunnelbana
 ssh debian@realta.labb.sunet.se 'cd ~/tunnelbana-idp && docker compose restart'
 
