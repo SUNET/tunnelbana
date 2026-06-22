@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Bumped `gamlastan`/`gamlastan-mdq` to 0.5.0. The SAML assertion validator's
+  signature check (check 6) no longer trusts the mere presence of a
+  `<ds:Signature>` element: `ValidationParams` now carries a required
+  `verified_signed_ids` listing the IDs whose XML-DSig references were
+  actually cryptographically verified, and a signed assertion is accepted only
+  when its ID (or its enclosing Response ID) is in that list. The `saml2`
+  backend feeds in the IDs it already proved in `process_acs`: the Response ID
+  when the envelope verified (Response-level XML signature or Redirect-binding
+  detached signature over the whole message, both of which cover every
+  contained assertion), otherwise each individually verified assertion ID
+  (cleartext and decrypted alike).
+
 - The `oidc_federation` backend now sends an RFC 9101 **signed request
   object** (grindvakt 0.3.1 `rp::signed_request_object`, signed with the
   `private_key_jwt` client key) on every authorization request, closing the
