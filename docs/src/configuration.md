@@ -78,6 +78,66 @@ You may list multiple frontends, backends and micro-services. Micro-services run
 in the order listed. The per-plugin `config` keys are documented in the
 [built-in plugin reference](built-in-plugins.md).
 
+### Backend selection
+
+With more than one `[[backend]]`, every authentication flow is steered to exactly
+one of them. The choice is resolved with this precedence (first match wins):
+
+1. **Frontend pin** — a frontend with `backend = "<name>"` in its `config` always
+   routes its flows to that backend.
+2. **Micro-service routing** — a request-path service such as
+   [`custom_routing`](micro-services.md#custom_routing) (often fed by
+   [`idp_hinting`](micro-services.md#idp_hinting)) sets the target backend per
+   request.
+3. **Default backend** — the **first** `[[backend]]` in the file, used when
+   nothing above selected one.
+
+The frontend pin is the most direct way to say *"this entry point always talks to
+that upstream."* For example, a SAML IdP frontend that should always authenticate
+against an OIDC upstream, alongside an OIDC OP frontend pinned to a SAML SP
+backend:
+
+```toml
+# Two backends. "FederationSP" is listed first, so it is the default.
+[[backend]]
+type = "oidc_federation"
+name = "FederationSP"
+  [backend.config]
+  # … RP/federation keys …
+
+[[backend]]
+type = "saml2"
+name = "SamlSP"
+  [backend.config]
+  # … SP keys …
+
+# A SAML IdP frontend, pinned to the federation backend regardless of routing.
+[[frontend]]
+type = "saml2"
+name = "SamlIdP"
+  [frontend.config]
+  backend = "FederationSP"
+  # … IdP keys …
+
+# An OIDC OP frontend, pinned to the SAML SP backend.
+[[frontend]]
+type = "oidc"
+name = "OidcOP"
+  [frontend.config]
+  backend = "SamlSP"
+  # … OP keys …
+```
+
+`backend` is optional and accepted by all three frontends (`oidc`,
+`oidc_federation`, `saml2`). It must name a configured `[[backend]]`; an unknown
+name fails the flow at runtime with an unknown-module error (the same surface as
+a `custom_routing` rule pointing at a missing backend). Because the pin sits
+above micro-service routing, a pinned frontend ignores `custom_routing` /
+`idp_hinting` for backend selection. The request-path services still execute, so
+other effects (for example, a target-entity decoration consumed by the selected
+backend) still apply. Leave `backend` unset when you want those services to
+choose the backend (ADR 0027).
+
 ### Mount points
 
 A module named `Saml2` is mounted at `<base_url>/Saml2`, and its endpoints hang

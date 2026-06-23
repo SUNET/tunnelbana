@@ -60,6 +60,10 @@ struct RequesterProbe {
     seen: Arc<Mutex<Option<String>>>,
 }
 
+struct BackendPinProbe {
+    backend: String,
+}
+
 #[async_trait]
 impl MicroService for RequesterProbe {
     fn name(&self) -> &str {
@@ -72,6 +76,18 @@ impl MicroService for RequesterProbe {
         data: InternalData,
     ) -> Result<InternalData> {
         *self.seen.lock().unwrap() = data.requester.clone();
+        Ok(data)
+    }
+}
+
+#[async_trait]
+impl MicroService for BackendPinProbe {
+    fn name(&self) -> &str {
+        "backend_pin_probe"
+    }
+
+    async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData> {
+        ctx.target_backend = Some(self.backend.clone());
         Ok(data)
     }
 }
@@ -93,11 +109,23 @@ fn build_frontend(mapper: Arc<AttributeMapper>) -> Box<dyn Frontend> {
 }
 
 fn build_frontend_with_grants(mapper: Arc<AttributeMapper>, grants: &[&str]) -> Box<dyn Frontend> {
+    build_frontend_full(mapper, grants, None)
+}
+
+fn build_frontend_pinned(mapper: Arc<AttributeMapper>, backend: &str) -> Box<dyn Frontend> {
+    build_frontend_full(mapper, &["authorization_code"], Some(backend))
+}
+
+fn build_frontend_full(
+    mapper: Arc<AttributeMapper>,
+    grants: &[&str],
+    backend: Option<&str>,
+) -> Box<dyn Frontend> {
     let mut jwk = jose_rs::jwk::generate_ec("P-256").unwrap();
     jwk.alg = Some("ES256".into());
     let signing_jwk: serde_json::Value = serde_json::from_str(&jwk.to_json().unwrap()).unwrap();
 
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "signing_jwk": signing_jwk,
         "signing_algorithm": "ES256",
         "signing_key_id": "k1",
@@ -109,6 +137,9 @@ fn build_frontend_with_grants(mapper: Arc<AttributeMapper>, grants: &[&str]) -> 
             "token_endpoint_auth_method": "none"
         }]
     });
+    if let Some(b) = backend {
+        config["backend"] = serde_json::Value::String(b.to_string());
+    }
 
     let bx = BuildContext {
         name: "OIDC".to_string(),
@@ -384,6 +415,47 @@ async fn response_microservice_sees_restored_requester() {
     let r2 = proxy.run(req("Mock/callback", "GET", Some(&cookie1))).await;
     assert_eq!(r2.status, 302, "callback should redirect to RP with code");
     assert_eq!(seen.lock().unwrap().as_deref(), Some("rp-1"));
+}
+
+/// A frontend's `backend = "..."` config pin overrides request-path backend
+/// routing and the default backend (which is the first one registered).
+#[tokio::test]
+async fn frontend_backend_pin_overrides_request_routing_and_default() {
+    let mapper = attribute_mapper();
+    let frontend = build_frontend_pinned(mapper.clone(), "Pinned");
+    // "Default" is registered first, so it is the proxy default backend; the
+    // micro-service also tries to steer the flow to "Default". The frontend
+    // pin must still steer the flow to "Pinned" instead.
+    let default_backend: Box<dyn Backend> = Box::new(MockBackend {
+        name: "Default".to_string(),
+    });
+    let pinned_backend: Box<dyn Backend> = Box::new(MockBackend {
+        name: "Pinned".to_string(),
+    });
+    let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
+    let proxy = Proxy::new(
+        vec![frontend],
+        vec![default_backend, pinned_backend],
+        vec![Box::new(BackendPinProbe {
+            backend: "Default".to_string(),
+        })],
+        sealer,
+    );
+
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let challenge = pkce::s256_challenge(verifier);
+    let authz_url = format!(
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        urlenc("https://rp.example.com/cb"),
+        challenge
+    );
+    let r1 = proxy.run(req(&authz_url, "GET", None)).await;
+    assert_eq!(r1.status, 302, "authorization should redirect");
+    assert!(
+        location(&r1).contains("Pinned/callback"),
+        "flow must be pinned to the configured backend, got {}",
+        location(&r1)
+    );
 }
 
 fn urlenc(s: &str) -> String {

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- All three frontends (`oidc`, `oidc_federation`, `saml2`) accept an optional
+  **`backend = "<name>"`** config key that pins every flow from that frontend to
+  a named backend, for deployments running more than one `[[backend]]`. The pin
+  reuses the existing selection precedence - **frontend pin → `custom_routing` /
+  `idp_hinting` → default backend (the first one listed)** - so a pinned frontend
+  deterministically overrides backend selections from routing micro-services;
+  leave it unset to let those services choose. An unknown name fails the flow at runtime
+  (`UnknownModule`), the same surface as a stray `custom_routing` rule. See
+  ADR 0027 and [Backend selection](docs/src/configuration.md).
+
 - The `oidc` and `oidc_federation` frontends now support the **`refresh_token`
   grant** (grindvakt 0.4.0, RFC 6749 §6). A client registered with
   `refresh_token` in its `grant_types` receives a refresh token from the

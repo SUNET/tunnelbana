@@ -39,6 +39,10 @@ name = "OIDC"
   access_token_ttl  = 3600            # seconds (default 3600)
   id_token_ttl      = 3600            # seconds (default 3600)
   refresh_token_ttl = 2592000         # seconds (default 2592000 = 30 days)
+  # Optional: pin every flow from this frontend to a named backend, overriding
+  # custom_routing and the default backend (see Backend selection). Omit to let
+  # routing micro-services / the default backend decide.
+  # backend         = "Saml2"
 
   [frontend.config.dpop]
   enabled             = true           # default false
@@ -96,6 +100,9 @@ name = "OIDFed"
   signing_key_path  = "keys/oidc_signing.key"
   signing_algorithm = "RS256"
   signing_key_id    = "oidc-key-1"
+  # Optional: pin every flow from this frontend to a named backend, overriding
+  # custom_routing and the default backend (see Backend selection).
+  # backend         = "Saml2"
 
   [frontend.config.federation]
   # Federation signing key - signs the entity configuration.
@@ -148,6 +155,9 @@ name = "Saml2IDP"
   # Require signed AuthnRequests even when the SP's metadata does not say
   # AuthnRequestsSigned="true". Also advertised in IdP metadata.
   want_authn_requests_signed = false
+  # Optional: pin every flow from this frontend to a named backend, overriding
+  # custom_routing and the default backend (see Backend selection).
+  # backend                  = "OidcUpstream"
 
   # REQUIRED: registered SP metadata (see the security note below).
   [frontend.config.metadata]

@@ -104,6 +104,10 @@ struct FederationFrontendConfig {
     id_token_ttl: Option<u64>,
     #[serde(default)]
     refresh_token_ttl: Option<u64>,
+    /// Pin every flow from this frontend to a named backend. Overrides
+    /// `custom_routing` and the default backend.
+    #[serde(default)]
+    backend: Option<String>,
     federation: FederationConfig,
 }
 
@@ -126,6 +130,8 @@ pub struct FederationFrontend {
     organization_name: Option<String>,
     organization_uri: Option<String>,
     trust_marks: Vec<Value>,
+    /// Backend name every flow is pinned to, if configured.
+    backend: Option<String>,
 }
 
 impl FederationFrontend {
@@ -204,6 +210,7 @@ impl FederationFrontend {
             organization_name: fed.organization_name.clone(),
             organization_uri: fed.organization_uri.clone(),
             trust_marks: fed.trust_marks.clone(),
+            backend: cfg.backend,
         }))
     }
 
@@ -386,7 +393,7 @@ impl FederationFrontend {
         }
         Ok(FrontendAction::StartAuth {
             request,
-            target_backend: None,
+            target_backend: self.backend.clone(),
         })
     }
 
