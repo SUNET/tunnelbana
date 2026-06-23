@@ -43,6 +43,8 @@ struct OidcFrontendConfig {
     access_token_ttl: Option<u64>,
     #[serde(default)]
     id_token_ttl: Option<u64>,
+    #[serde(default)]
+    refresh_token_ttl: Option<u64>,
     /// Extra metadata fields to merge into the discovery document.
     #[serde(default)]
     extra_metadata: serde_json::Map<String, serde_json::Value>,
@@ -100,6 +102,7 @@ impl OidcFrontend {
             code_ttl: cfg.code_ttl.unwrap_or(600),
             access_token_ttl: cfg.access_token_ttl.unwrap_or(3600),
             id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
+            refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
         let provider = Provider::new(metadata, signing_key, clients, codec, lifetimes);
 

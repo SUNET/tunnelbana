@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- The `oidc` and `oidc_federation` frontends now support the **`refresh_token`
+  grant** (grindvakt 0.4.0, RFC 6749 §6). A client registered with
+  `refresh_token` in its `grant_types` receives a refresh token from the
+  authorization-code exchange, and the token endpoint accepts
+  `grant_type=refresh_token` to mint a fresh access token and id_token (scope
+  may be narrowed, never widened). Refresh tokens are stateless and **rotated**
+  on each use; a new `refresh_token_ttl` knob (default 30 days) sets the
+  sliding lifetime. `refresh_token` is advertised in `grant_types_supported`.
+  As before, statelessness means tokens cannot be revoked before expiry.
+  Hardening that came with the grindvakt bump: every sealed token (code,
+  access, refresh) now carries a verified type tag, so one kind can no longer
+  be replayed as another.
+
 - Bumped `gamlastan`/`gamlastan-mdq` to 0.5.0. The SAML assertion validator's
   signature check (check 6) no longer trusts the mere presence of a
   `<ds:Signature>` element: `ValidationParams` now carries a required

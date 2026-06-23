@@ -38,6 +38,7 @@ name = "OIDC"
   code_ttl          = 600             # seconds (default 600)
   access_token_ttl  = 3600            # seconds (default 3600)
   id_token_ttl      = 3600            # seconds (default 3600)
+  refresh_token_ttl = 2592000         # seconds (default 2592000 = 30 days)
 
   [frontend.config.dpop]
   enabled             = true           # default false
@@ -52,6 +53,10 @@ name = "OIDC"
   redirect_uris              = ["https://rp.example.com/callback"]
   response_types             = ["code"]
   token_endpoint_auth_method = "client_secret_basic"
+  # grant_types defaults to ["authorization_code"]. Add "refresh_token" to issue
+  # a refresh token from the code exchange and accept grant_type=refresh_token;
+  # add "client_credentials" for the service-to-service grant.
+  grant_types                = ["authorization_code", "refresh_token"]
 
   # Optional: extra fields merged into the discovery document.
   [frontend.config.extra_metadata]
@@ -60,9 +65,15 @@ name = "OIDC"
 
 Serves `…/OIDC/.well-known/openid-configuration`, `…/OIDC/jwks`,
 `…/OIDC/authorization`, `…/OIDC/token`, `…/OIDC/userinfo`. Supports the code
-flow with PKCE, the `client_credentials` grant for confidential clients, and
-the `client_secret_basic`, `client_secret_post`, `none` and `private_key_jwt`
-token-endpoint auth methods. When `frontend.config.dpop.enabled = true`, the
+flow with PKCE, the `client_credentials` grant for confidential clients, the
+`refresh_token` grant (RFC 6749 §6) for clients that register it, and the
+`client_secret_basic`, `client_secret_post`, `none` and `private_key_jwt`
+token-endpoint auth methods. Refresh tokens are stateless (a sealed,
+self-contained token) and are rotated on each use; like all tokens here they
+carry their own expiry and cannot be revoked server-side before that expiry
+elapses.
+
+When `frontend.config.dpop.enabled = true`, the
 frontend advertises `dpop_signing_alg_values_supported = ["ES256"]`, accepts
 DPoP proofs on the token and userinfo endpoints, and issues sender-constrained
 access tokens (`token_type = "DPoP"`).
@@ -144,7 +155,7 @@ name = "Saml2IDP"
   # Optional MDQ source for SPs not found in the local files; the role
   # requirement is forced to "sp". Same keys as the backend's [mdq] table.
   # [frontend.config.metadata.mdq]
-  # url               = "https://mdq.swamid.se/"
+  # url               = "https://mdq.swamid.se/entities/"
   # signing_cert_path = "keys/mdq-signer.crt"
 
   # Optional per-SP attribute release policy (internal attribute names).
@@ -421,7 +432,9 @@ name = "Saml2"
     security            = "permissive"
 
      [backend.config.mdq]
-     url               = "https://mdq.example.org/"
+     # The encoded entityID is appended verbatim to `url`, so include the MDQ
+     # "entities/" path segment and keep the trailing slash.
+     url               = "https://mdq.example.org/entities/"
      signing_cert_path = "keys/mdq-signer.crt"
      transform         = "sha1"           # "url_encoded" (default) or "sha1"
      require_role      = "idp"            # "idp" (default), "sp", or "any"
