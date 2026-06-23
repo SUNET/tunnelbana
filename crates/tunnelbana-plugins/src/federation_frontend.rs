@@ -96,6 +96,11 @@ struct FederationFrontendConfig {
     signing_key_id: Option<String>,
     #[serde(default)]
     clients: Vec<Client>,
+    /// Path to a JSON file holding a bare array of additional statically
+    /// pre-registered clients, merged with `clients` (these coexist with RPs
+    /// auto-registered at runtime). A duplicate `client_id` is a boot error.
+    #[serde(default)]
+    clients_file: Option<String>,
     #[serde(default)]
     code_ttl: Option<u64>,
     #[serde(default)]
@@ -169,7 +174,9 @@ impl FederationFrontend {
         );
         metadata.request_parameter_supported = true;
 
-        let store = Arc::new(InMemoryClientStore::with_clients(cfg.clients));
+        let client_list =
+            crate::client_loader::load_clients(cfg.clients, cfg.clients_file.as_deref())?;
+        let store = Arc::new(InMemoryClientStore::with_clients(client_list));
         let dyn_store: Arc<dyn tunnelbana_oidc::client::ClientStore> = store.clone();
         let codec = TokenCodec::new(&bx.secret).with_previous_secrets(&bx.previous_secrets);
         let lifetimes = TokenLifetimes {

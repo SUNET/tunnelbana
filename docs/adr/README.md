@@ -33,3 +33,4 @@ accepted — supersede with a new record rather than editing history.
 | [0025](0025-external-federation-discovery-service.md) | External discovery service for the federation backend (third-party initiated login) | Accepted |
 | [0026](0026-oidc-refresh-token-grant.md) | OIDC `refresh_token` grant (stateless, rotated) | Accepted |
 | [0027](0027-frontend-backend-pin.md) | Frontend-level backend pin (`backend = "<name>"`) | Accepted |
+| [0028](0028-clients-file.md) | External client roster file (`clients_file`) | Accepted |

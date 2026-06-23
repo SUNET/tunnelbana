@@ -1,6 +1,8 @@
 target/
 docs/book
 .build-cache
+deploy/tunnelbana/
+deploy/tunnelbana-sp/
 deploy/tunnelbana/bin/
 deploy/tunnelbana/keys/
 deploy/tunnelbana/.env

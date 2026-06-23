@@ -458,6 +458,62 @@ async fn frontend_backend_pin_overrides_request_routing_and_default() {
     );
 }
 
+/// A client loaded from an external `clients_file` (JSON) completes the
+/// authorization flow exactly like an inline client.
+#[tokio::test]
+async fn client_loaded_from_clients_file_can_authorize() {
+    // A roster file holding one client distinct from any inline client.
+    let clients_path = std::env::temp_dir().join("tb_proxy_oidc_clients_file.json");
+    std::fs::write(
+        &clients_path,
+        r#"[{"client_id":"rp-file","redirect_uris":["https://file-rp.example.com/cb"],
+            "response_types":["code"],"grant_types":["authorization_code"],
+            "token_endpoint_auth_method":"none"}]"#,
+    )
+    .unwrap();
+
+    let mut jwk = jose_rs::jwk::generate_ec("P-256").unwrap();
+    jwk.alg = Some("ES256".into());
+    let signing_jwk: serde_json::Value = serde_json::from_str(&jwk.to_json().unwrap()).unwrap();
+    let config = serde_json::json!({
+        "signing_jwk": signing_jwk,
+        "signing_algorithm": "ES256",
+        "signing_key_id": "k1",
+        "clients_file": clients_path.to_str().unwrap(),
+        // No inline clients: the roster comes entirely from the file.
+    });
+    let bx = BuildContext {
+        name: "OIDC".to_string(),
+        base_url: "https://proxy.example.com".to_string(),
+        config,
+        attribute_mapper: attribute_mapper(),
+        http_client: Arc::new(NullHttpClient),
+        secret: "test-secret".to_string(),
+        previous_secrets: Vec::new(),
+    };
+    let frontend = tunnelbana_plugins::oidc_frontend::OidcFrontend::build(&bx).unwrap();
+
+    let backend: Box<dyn Backend> = Box::new(MockBackend {
+        name: "Mock".to_string(),
+    });
+    let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
+    let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
+
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let challenge = pkce::s256_challenge(verifier);
+    let authz_url = format!(
+        "OIDC/authorization?client_id=rp-file&response_type=code&redirect_uri={}&scope=openid&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        urlenc("https://file-rp.example.com/cb"),
+        challenge
+    );
+    let r1 = proxy.run(req(&authz_url, "GET", None)).await;
+    assert_eq!(
+        r1.status, 302,
+        "file-loaded client should be accepted and redirect into the backend"
+    );
+    assert!(location(&r1).contains("Mock/callback"));
+}
+
 fn urlenc(s: &str) -> String {
     form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }

@@ -164,6 +164,13 @@ name = "OIDFed"
 include = "plugins/oidfed.toml"
 ```
 
+`include` replaces the **whole** plugin `config` (TOML, path relative to this
+file). To externalize **only** the OIDC client roster while keeping keys and
+other settings inline, use the `oidc`/`oidc_federation` frontends'
+[`clients_file`](built-in-plugins.md#client-roster-from-a-file) key instead - a
+JSON array of clients, merged with any inline `clients`, with its path read
+relative to the working directory (like the key paths beside it).
+
 ## SAML MDQ and discovery
 
 The `saml2` backend has two upstream-metadata modes:
