@@ -14,7 +14,7 @@ license = "BSD-2-Clause"
 rust-version = "1.83"
 
 [workspace.dependencies]
-grindvakt = { version = "0.3.1" }
+grindvakt = { version = "0.4" }
 jose-rs = { version = "0.3.1", default-features = false }
 gamlastan = { version = "0.5.0" }
 gamlastan-mdq = { version = "0.5.0" }

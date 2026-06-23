@@ -39,6 +39,7 @@ impl Backend for MockBackend {
         let mut attributes = BTreeMap::new();
         attributes.insert("mail".to_string(), vec!["anna@example.com".to_string()]);
         attributes.insert("givenname".to_string(), vec!["Anna".to_string()]);
+        attributes.insert("email_verified".to_string(), vec!["true".to_string()]);
         let response = InternalData {
             auth_info: AuthenticationInformation {
                 auth_class_ref: Some("urn:acr:mock".into()),
@@ -81,11 +82,17 @@ fn attribute_mapper() -> Arc<AttributeMapper> {
         openid = ["email"]
         [attributes.givenname]
         openid = ["given_name"]
+        [attributes.email_verified]
+        openid = ["email_verified"]
     "#;
     Arc::new(AttributeMapper::from_toml(toml_str).unwrap())
 }
 
 fn build_frontend(mapper: Arc<AttributeMapper>) -> Box<dyn Frontend> {
+    build_frontend_with_grants(mapper, &["authorization_code"])
+}
+
+fn build_frontend_with_grants(mapper: Arc<AttributeMapper>, grants: &[&str]) -> Box<dyn Frontend> {
     let mut jwk = jose_rs::jwk::generate_ec("P-256").unwrap();
     jwk.alg = Some("ES256".into());
     let signing_jwk: serde_json::Value = serde_json::from_str(&jwk.to_json().unwrap()).unwrap();
@@ -98,6 +105,7 @@ fn build_frontend(mapper: Arc<AttributeMapper>) -> Box<dyn Frontend> {
             "client_id": "rp-1",
             "redirect_uris": ["https://rp.example.com/cb"],
             "response_types": ["code"],
+            "grant_types": grants,
             "token_endpoint_auth_method": "none"
         }]
     });
@@ -237,6 +245,12 @@ async fn oidc_op_full_flow_through_proxy() {
         claims.extra.get("given_name").and_then(|v| v.as_str()),
         Some("Anna")
     );
+    // email_verified is emitted as a real JSON boolean (OIDC Core §5.1), not a
+    // string — Vaultwarden and other strict RPs require the boolean type.
+    assert_eq!(
+        claims.extra.get("email_verified"),
+        Some(&serde_json::Value::Bool(true))
+    );
 
     // 5) UserInfo with the access token.
     let mut ui_req = req("OIDC/userinfo", "GET", None);
@@ -260,6 +274,84 @@ async fn oidc_op_full_flow_through_proxy() {
         disco["token_endpoint"],
         "https://proxy.example.com/OIDC/token"
     );
+}
+
+#[tokio::test]
+async fn oidc_op_refresh_token_flow_through_proxy() {
+    let mapper = attribute_mapper();
+    let frontend = build_frontend_with_grants(mapper.clone(), &["authorization_code", "refresh_token"]);
+    let backend: Box<dyn Backend> = Box::new(MockBackend {
+        name: "Mock".to_string(),
+    });
+    let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
+    let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
+
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let challenge = pkce::s256_challenge(verifier);
+
+    // Authorization → backend callback → code redirect to RP.
+    let authz_url = format!(
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        urlenc("https://rp.example.com/cb"),
+        challenge
+    );
+    let r1 = proxy.run(req(&authz_url, "GET", None)).await;
+    let cookie1 = set_cookie(&r1);
+    let r2 = proxy.run(req("Mock/callback", "GET", Some(&cookie1))).await;
+    let code = query_param(&location(&r2), "code").expect("code");
+
+    // Code exchange returns a refresh token.
+    let mut token_req = req("OIDC/token", "POST", None);
+    token_req.form = form_parse(&format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}&client_id=rp-1&code_verifier={}",
+        urlenc(&code),
+        urlenc("https://rp.example.com/cb"),
+        verifier
+    ));
+    let r3 = proxy.run(token_req).await;
+    assert_eq!(r3.status, 200);
+    let token_json: serde_json::Value = serde_json::from_slice(&r3.body).unwrap();
+    let refresh = token_json["refresh_token"]
+        .as_str()
+        .expect("refresh_token issued")
+        .to_string();
+
+    // Refresh exchange returns fresh tokens and a rotated refresh token.
+    let mut refresh_req = req("OIDC/token", "POST", None);
+    refresh_req.form = form_parse(&format!(
+        "grant_type=refresh_token&refresh_token={}&client_id=rp-1",
+        urlenc(&refresh),
+    ));
+    let r4 = proxy.run(refresh_req).await;
+    assert_eq!(
+        r4.status,
+        200,
+        "refresh should succeed: {}",
+        String::from_utf8_lossy(&r4.body)
+    );
+    let refreshed: serde_json::Value = serde_json::from_slice(&r4.body).unwrap();
+    let new_access = refreshed["access_token"].as_str().expect("access_token");
+    let rotated = refreshed["refresh_token"].as_str().expect("rotated refresh");
+    assert_ne!(rotated, refresh, "refresh token should rotate");
+    assert!(refreshed["id_token"].is_string(), "id_token on refresh");
+
+    // The new access token works at userinfo.
+    let mut ui_req = req("OIDC/userinfo", "GET", None);
+    ui_req
+        .headers
+        .insert("authorization".into(), format!("Bearer {new_access}"));
+    let r5 = proxy.run(ui_req).await;
+    assert_eq!(r5.status, 200);
+    let userinfo: serde_json::Value = serde_json::from_slice(&r5.body).unwrap();
+    assert_eq!(userinfo["sub"], "user-anna");
+
+    // Discovery advertises the refresh_token grant.
+    let r6 = proxy
+        .run(req("OIDC/.well-known/openid-configuration", "GET", None))
+        .await;
+    let disco: serde_json::Value = serde_json::from_slice(&r6.body).unwrap();
+    let grants = disco["grant_types_supported"].as_array().unwrap();
+    assert!(grants.iter().any(|g| g == "refresh_token"));
 }
 
 #[tokio::test]

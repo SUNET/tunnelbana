@@ -64,9 +64,11 @@ name = "OIDC"
   redirect_uris = ["https://rp.example.com/callback"]
   response_types = ["code"]
   token_endpoint_auth_method = "client_secret_basic"
-  # Add "client_credentials" to grant_types for the service-to-service grant
-  # (RFC 6749 §4.4); `scope` lists the space-delimited scopes it may request.
-  # grant_types = ["authorization_code", "client_credentials"]
+  # grant_types defaults to ["authorization_code"]. Add "refresh_token" to issue
+  # and accept refresh tokens (RFC 6749 §6), and/or "client_credentials" for the
+  # service-to-service grant (RFC 6749 §4.4); `scope` lists the space-delimited
+  # scopes a client_credentials client may request.
+  # grant_types = ["authorization_code", "refresh_token", "client_credentials"]
   # scope = "read write"
 
 # To run a federation OP instead, replace the block above with:
@@ -170,7 +172,7 @@ name = "Upstream"
 #   sp_cert_path = "keys/sp.crt"
 #   sign_authn_requests = false
 #     [backend.config.mdq]
-#     url = "https://mdq.eduid.se/"             # MDQ server base URL (keep the trailing slash)
+#     url = "https://mdq.eduid.se/entities/"    # the encoded entityID is appended verbatim, so include the MDQ "entities/" path (and trailing slash)
 #     signing_cert_path = "keys/mdq-signer.crt" # cert that verifies the signed entity statements
 #     transform = "sha1"                        # entityID→path: "url_encoded" (default) or "sha1" ({sha1}<hex>)
 #     require_role = "idp"                       # fetched metadata must carry an IDPSSODescriptor
@@ -212,7 +214,7 @@ name = "Upstream"
 #   local = ["metadata/sp1.xml", "metadata/federation-sps.xml"]
 #   # Optional MDQ source for SPs not in the local files (role forced to "sp"):
 #   # [frontend.config.metadata.mdq]
-#   # url = "https://mdq.swamid.se/"
+#   # url = "https://mdq.swamid.se/entities/"   # include the "entities/" path: the encoded entityID is appended verbatim
 #   # signing_cert_path = "keys/mdq-signer.crt"
 #
 #   # Per-SP attribute release policy (internal attribute names). The

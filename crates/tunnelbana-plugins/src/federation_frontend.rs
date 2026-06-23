@@ -102,6 +102,8 @@ struct FederationFrontendConfig {
     access_token_ttl: Option<u64>,
     #[serde(default)]
     id_token_ttl: Option<u64>,
+    #[serde(default)]
+    refresh_token_ttl: Option<u64>,
     federation: FederationConfig,
 }
 
@@ -168,6 +170,7 @@ impl FederationFrontend {
             code_ttl: cfg.code_ttl.unwrap_or(600),
             access_token_ttl: cfg.access_token_ttl.unwrap_or(3600),
             id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
+            refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
         let provider = Provider::new(metadata, op_key, dyn_store, codec, lifetimes);
 

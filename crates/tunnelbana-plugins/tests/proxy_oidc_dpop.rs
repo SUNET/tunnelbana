@@ -131,7 +131,7 @@ async fn discovery_advertises_dpop() {
     );
     assert_eq!(
         disco["grant_types_supported"],
-        serde_json::json!(["authorization_code", "client_credentials"])
+        serde_json::json!(["authorization_code", "client_credentials", "refresh_token"])
     );
     assert_eq!(disco["issuer"], ISSUER);
 }
