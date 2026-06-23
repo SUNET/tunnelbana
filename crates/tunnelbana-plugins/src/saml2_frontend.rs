@@ -92,6 +92,10 @@ struct Saml2FrontendConfig {
     /// replaces the default (no merge). Attribute names are *internal* names.
     #[serde(default)]
     policy: BTreeMap<String, SpPolicy>,
+    /// Pin every flow from this frontend to a named backend. Overrides
+    /// `custom_routing` and the default backend.
+    #[serde(default)]
+    backend: Option<String>,
 }
 
 /// `[frontend.config.policy."<sp-entity-id-or-default>"]`.
@@ -290,6 +294,8 @@ pub struct Saml2Frontend {
     contact_persons: Vec<gamlastan::metadata::types::contact::ContactPerson>,
     policy: BTreeMap<String, SpPolicy>,
     mapper: Arc<AttributeMapper>,
+    /// Backend name every flow is pinned to, if configured.
+    backend: Option<String>,
 }
 
 impl Saml2Frontend {
@@ -414,6 +420,7 @@ impl Saml2Frontend {
             contact_persons: crate::saml_metadata::contact_persons(&cfg.contact_person)?,
             policy: cfg.policy,
             mapper: bx.attribute_mapper.clone(),
+            backend: cfg.backend,
         }))
     }
 
@@ -530,7 +537,7 @@ impl Saml2Frontend {
 
         Ok(FrontendAction::StartAuth {
             request: InternalData::request(processed.sp_entity_id),
-            target_backend: None,
+            target_backend: self.backend.clone(),
         })
     }
 

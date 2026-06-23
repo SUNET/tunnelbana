@@ -546,6 +546,14 @@ discovery choice wins), and the SAML2 backend still resolves whatever is
 selected through MDQ - signature-verified metadata, IdP role required - so a
 hint can only choose among legitimate federation IdPs.
 
+These services still run when a frontend has pinned a backend, but their backend
+selection loses to the frontend pin. A frontend with `backend = "<name>"` in its
+config (see [Backend selection](configuration.md#backend-selection), ADR 0027)
+overrides the backend selected by `custom_routing` / `idp_hinting` and the
+default backend. Other request-path effects, such as a target-entity decoration
+that the pinned backend itself consumes, still apply. Leave the frontend
+unpinned when you want request-time backend routing.
+
 ## `custom_logging`: audit records
 
 One JSON line per completed authentication, for SIEM/compliance pipelines

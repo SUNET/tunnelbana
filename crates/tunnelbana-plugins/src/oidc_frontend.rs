@@ -51,6 +51,10 @@ struct OidcFrontendConfig {
     /// DPoP (RFC 9449) settings; disabled unless `dpop.enabled = true`.
     #[serde(default)]
     dpop: DpopSettings,
+    /// Pin every flow from this frontend to a named backend. Overrides
+    /// `custom_routing` and the default backend.
+    #[serde(default)]
+    backend: Option<String>,
 }
 
 /// The OIDC OP frontend plugin.
@@ -61,6 +65,8 @@ pub struct OidcFrontend {
     mapper: Arc<AttributeMapper>,
     /// DPoP runtime (config + replay store) when enabled, else `None`.
     dpop: Option<DpopRuntime>,
+    /// Backend name every flow is pinned to, if configured.
+    backend: Option<String>,
 }
 
 impl OidcFrontend {
@@ -112,6 +118,7 @@ impl OidcFrontend {
             provider,
             mapper: bx.attribute_mapper.clone(),
             dpop,
+            backend: cfg.backend,
         }))
     }
 
@@ -221,7 +228,7 @@ impl OidcFrontend {
         }
         Ok(FrontendAction::StartAuth {
             request,
-            target_backend: None,
+            target_backend: self.backend.clone(),
         })
     }
 
