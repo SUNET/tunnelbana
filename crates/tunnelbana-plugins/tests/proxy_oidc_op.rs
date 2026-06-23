@@ -279,7 +279,8 @@ async fn oidc_op_full_flow_through_proxy() {
 #[tokio::test]
 async fn oidc_op_refresh_token_flow_through_proxy() {
     let mapper = attribute_mapper();
-    let frontend = build_frontend_with_grants(mapper.clone(), &["authorization_code", "refresh_token"]);
+    let frontend =
+        build_frontend_with_grants(mapper.clone(), &["authorization_code", "refresh_token"]);
     let backend: Box<dyn Backend> = Box::new(MockBackend {
         name: "Mock".to_string(),
     });
@@ -331,7 +332,9 @@ async fn oidc_op_refresh_token_flow_through_proxy() {
     );
     let refreshed: serde_json::Value = serde_json::from_slice(&r4.body).unwrap();
     let new_access = refreshed["access_token"].as_str().expect("access_token");
-    let rotated = refreshed["refresh_token"].as_str().expect("rotated refresh");
+    let rotated = refreshed["refresh_token"]
+        .as_str()
+        .expect("rotated refresh");
     assert_ne!(rotated, refresh, "refresh token should rotate");
     assert!(refreshed["id_token"].is_string(), "id_token on refresh");
 
