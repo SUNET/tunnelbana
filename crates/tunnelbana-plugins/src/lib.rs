@@ -3,6 +3,7 @@
 //! Concrete frontends, backends and micro-services, plus [`register_all`] which
 //! installs their constructors into a [`tunnelbana_core::plugin::Registry`].
 
+pub mod client_loader;
 pub mod dpop;
 pub mod federation_backend;
 pub mod federation_frontend;

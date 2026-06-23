@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- The `oidc` and `oidc_federation` frontends accept an optional **`clients_file`**
+  pointing at a JSON file (a bare array of client objects) whose clients are
+  **merged** with the inline `clients`. It externalizes a large or
+  machine-generated client roster while keys/TTLs stay inline. A duplicate
+  `client_id` anywhere in the merged set is now a fail-fast boot error
+  (previously the in-memory store silently last-won, shadowing a client's
+  secret/redirect URIs - this guard applies to inline-only configs too). An
+  unknown field in a file entry (e.g. a misspelled `redirect_uri`) is rejected
+  rather than silently dropped, so a typo cannot produce a half-configured
+  client. The path is read as-given (working-directory relative, like
+  `signing_key_path`), `${ENV}` applies, and the file is read once at startup. The SAML2 frontend is
+  unaffected: its SPs are already file-based via `metadata.local` + MDQ. See
+  ADR 0028 and [Client roster from a file](docs/src/built-in-plugins.md).
+
 - All three frontends (`oidc`, `oidc_federation`, `saml2`) accept an optional
   **`backend = "<name>"`** config key that pins every flow from that frontend to
   a named backend, for deployments running more than one `[[backend]]`. The pin

@@ -23,6 +23,7 @@ regex.workspace = true
 sha2.workspace = true
 chrono = "0.4"
 flate2 = "1"
+serde_ignored = "0.1.14"
 
 [dev-dependencies]
 tokio.workspace = true

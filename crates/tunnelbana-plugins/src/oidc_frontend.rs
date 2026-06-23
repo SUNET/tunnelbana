@@ -37,6 +37,10 @@ struct OidcFrontendConfig {
     signing_key_id: Option<String>,
     #[serde(default)]
     clients: Vec<Client>,
+    /// Path to a JSON file holding a bare array of additional clients, merged
+    /// with `clients`. A duplicate `client_id` across the two is a boot error.
+    #[serde(default)]
+    clients_file: Option<String>,
     #[serde(default)]
     code_ttl: Option<u64>,
     #[serde(default)]
@@ -102,7 +106,9 @@ impl OidcFrontend {
             metadata.extra.insert(k, v);
         }
 
-        let clients = Arc::new(InMemoryClientStore::with_clients(cfg.clients));
+        let client_list =
+            crate::client_loader::load_clients(cfg.clients, cfg.clients_file.as_deref())?;
+        let clients = Arc::new(InMemoryClientStore::with_clients(client_list));
         let codec = TokenCodec::new(&bx.secret).with_previous_secrets(&bx.previous_secrets);
         let lifetimes = TokenLifetimes {
             code_ttl: cfg.code_ttl.unwrap_or(600),

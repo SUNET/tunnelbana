@@ -50,6 +50,11 @@ name = "OIDC"
   require_nonce       = false          # default false
   nonce_lifetime_secs = 300            # default 300
 
+  # Optional: load extra clients from an external JSON file, merged with the
+  # inline `clients` below (see "Client roster from a file"). Path is read
+  # as-given (relative to the working directory).
+  # clients_file    = "clients/oidc-rps.json"
+
   # Statically registered clients (repeat the table per client).
   [[frontend.config.clients]]
   client_id                  = "demo-rp"
@@ -66,6 +71,42 @@ name = "OIDC"
   [frontend.config.extra_metadata]
   # e.g. service_documentation = "https://…"
 ```
+
+### Client roster from a file
+
+Both the `oidc` and `oidc_federation` frontends accept an optional
+`clients_file` pointing at a JSON file that holds a **bare array** of client
+objects (same fields as an inline `[[frontend.config.clients]]` table). It is
+useful when the roster is large or machine-generated and you want it out of the
+main config while keeping keys, TTLs, and other settings inline.
+
+```json
+[
+  {
+    "client_id": "demo-rp",
+    "client_secret": "demo-rp-secret",
+    "redirect_uris": ["https://rp.example.com/callback"],
+    "response_types": ["code"],
+    "grant_types": ["authorization_code"],
+    "token_endpoint_auth_method": "client_secret_basic"
+  }
+]
+```
+
+- The file's clients are **merged** with any inline `clients` (inline first,
+  then file).
+- A **duplicate `client_id`** anywhere in the merged set is a fail-fast boot
+  error - the roster never silently shadows another client's secret or redirect
+  URIs.
+- An **unknown field** in a file entry (e.g. `redirect_uri` instead of
+  `redirect_uris`) is rejected at boot rather than silently dropped, so a typo
+  cannot quietly yield a half-configured client.
+- The path is read **as-given** (relative to the process working directory, like
+  `signing_key_path`), and `${ENV}` interpolation applies. The file is read
+  **once at startup**; editing it requires a restart.
+- Only the JSON format is accepted (a bare array). To externalize the *entire*
+  frontend config instead, use the [`include`](configuration.md#splitting-config-out-with-include)
+  directive (ADR 0028).
 
 Serves `…/OIDC/.well-known/openid-configuration`, `…/OIDC/jwks`,
 `…/OIDC/authorization`, `…/OIDC/token`, `…/OIDC/userinfo`. Supports the code
@@ -103,6 +144,10 @@ name = "OIDFed"
   # Optional: pin every flow from this frontend to a named backend, overriding
   # custom_routing and the default backend (see Backend selection).
   # backend         = "Saml2"
+  # Optional: seed statically pre-registered clients from a JSON file (see
+  # "Client roster from a file"). These coexist with RPs the federation OP
+  # auto-registers at runtime through the trust chain.
+  # clients_file    = "clients/oidfed-rps.json"
 
   [frontend.config.federation]
   # Federation signing key - signs the entity configuration.

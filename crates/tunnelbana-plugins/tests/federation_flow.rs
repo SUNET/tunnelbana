@@ -12,7 +12,9 @@ use tunnelbana_core::error::Result as CoreResult;
 use tunnelbana_core::http::{HttpClient, HttpFetchResponse, HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::keys::{signing_key_from_jwk_json, SigningKey};
-use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
+use tunnelbana_core::plugin::{
+    Backend, BackendAction, BuildContext, Frontend, NullHttpClient, Route,
+};
 use tunnelbana_core::proxy::Proxy;
 use tunnelbana_core::state::StateSealer;
 
@@ -353,4 +355,84 @@ async fn auto_registration_and_private_key_jwt_flow() {
 
 fn enc(s: &str) -> String {
     form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// Build a federation OP frontend with the given inline `clients` and optional
+/// `clients_file`. `build()` does no network, so a fresh trust anchor + null
+/// HTTP client suffice. Returns the build `Result` to exercise error paths.
+fn build_frontend_with_clients(
+    clients: serde_json::Value,
+    clients_file: Option<&str>,
+) -> CoreResult<Box<dyn Frontend>> {
+    let op_jwk: serde_json::Value =
+        serde_json::from_str(&ec_key("op-1").jwk.to_json().unwrap()).unwrap();
+    let ta_pub: serde_json::Value =
+        serde_json::from_str(&ec_key("ta-1").public_jwk().to_json().unwrap()).unwrap();
+    let mut config = serde_json::json!({
+        "signing_jwk": op_jwk,
+        "signing_algorithm": "ES256",
+        "signing_key_id": "op-1",
+        "clients": clients,
+        "federation": {
+            "signing_jwk": op_jwk,
+            "signing_algorithm": "ES256",
+            "signing_key_id": "fed-1",
+            "authority_hints": [TA_ID],
+            "trust_anchor": [ { "entity_id": TA_ID, "keys": [ ta_pub ] } ]
+        }
+    });
+    if let Some(p) = clients_file {
+        config["clients_file"] = serde_json::Value::String(p.to_string());
+    }
+    let bx = BuildContext {
+        name: "OIDFed".to_string(),
+        base_url: "https://proxy.example.com".to_string(),
+        config,
+        attribute_mapper: mapper(),
+        http_client: Arc::new(NullHttpClient),
+        secret: "fed-secret".to_string(),
+        previous_secrets: Vec::new(),
+    };
+    tunnelbana_plugins::federation_frontend::FederationFrontend::build(&bx)
+}
+
+/// The federation frontend seeds statically pre-registered clients from
+/// `clients_file`, merged with inline `clients` (F5: parity with the `oidc`
+/// frontend's clients_file wiring).
+#[test]
+fn clients_file_loads_in_federation_frontend() {
+    let path = std::env::temp_dir().join("tb_fed_clients_file.json");
+    std::fs::write(
+        &path,
+        r#"[{"client_id":"file-rp","redirect_uris":["https://file-rp.example/cb"],
+            "token_endpoint_auth_method":"private_key_jwt"}]"#,
+    )
+    .unwrap();
+    let res = build_frontend_with_clients(
+        serde_json::json!([{ "client_id": "inline-rp" }]),
+        Some(path.to_str().unwrap()),
+    );
+    assert!(
+        res.is_ok(),
+        "federation frontend should load clients_file: {:?}",
+        res.err()
+    );
+}
+
+/// A `client_id` duplicated across inline `clients` and `clients_file` fails the
+/// federation frontend build, just like the `oidc` frontend.
+#[test]
+fn clients_file_duplicate_fails_federation_build() {
+    let path = std::env::temp_dir().join("tb_fed_clients_file_dup.json");
+    std::fs::write(&path, r#"[{"client_id":"dup"}]"#).unwrap();
+    let err = build_frontend_with_clients(
+        serde_json::json!([{ "client_id": "dup" }]),
+        Some(path.to_str().unwrap()),
+    )
+    .err()
+    .expect("duplicate client_id must fail the build");
+    assert!(
+        err.to_string().contains("duplicate client_id"),
+        "got: {err}"
+    );
 }
