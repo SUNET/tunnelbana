@@ -10,9 +10,11 @@
 //!
 //! - `static_attributes_for_virtual_idp` — **replace**: set the attribute to
 //!   the configured values.
-//! - `static_appended_attributes_for_virtual_idp` — **append**: union the
-//!   configured values with whatever the IdP already released, de-duplicated
-//!   and sorted for stability.
+//! - `static_appended_attributes_for_virtual_idp` — **append**: the configured
+//!   values plus any released values not already among them. Matching eduID,
+//!   the configured list is kept as-is (no de-duplication of its own entries),
+//!   and the result is sorted **only when the attribute was already released**;
+//!   if it was absent, the configured order is preserved.
 
 use std::collections::BTreeMap;
 
@@ -91,7 +93,10 @@ impl MicroService for StaticAttributesForVirtualIdp {
             }
         }
 
-        // Append: union configured + already-released values, dedup and sort.
+        // Append: the configured values, plus any released values not already
+        // among them. eduID sorts only when the attribute was already released
+        // (static_attributes.py:73-79); when absent, the configured order is
+        // kept verbatim.
         if let Some(recipe) = Self::recipe(&self.append, &requester, &vidp) {
             for (attr, values) in recipe {
                 let mut merged = values.clone();
@@ -101,8 +106,8 @@ impl MicroService for StaticAttributesForVirtualIdp {
                             merged.push(v.clone());
                         }
                     }
+                    merged.sort();
                 }
-                merged.sort();
                 data.attributes.insert(attr.clone(), merged);
             }
         }
@@ -186,6 +191,35 @@ mod tests {
         assert_eq!(
             data.attributes.get("edupersonassurance"),
             Some(&vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn append_to_absent_attribute_keeps_configured_order() {
+        // eduID parity (static_attributes.py:73-79): when the attribute was not
+        // already released, the configured list is emitted verbatim - no sort.
+        let ms = StaticAttributesForVirtualIdp::build(&bx(
+            "static_vidp",
+            serde_json::json!({
+                "static_appended_attributes_for_virtual_idp": {
+                    "default": { "SunetIDP": { "edupersonassurance": ["b", "a"] } }
+                }
+            }),
+        ))
+        .unwrap();
+
+        // No existing edupersonassurance attribute.
+        let data = ms
+            .process_response(
+                &mut with_frontend("SunetIDP"),
+                response_from("https://sp.example"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            data.attributes.get("edupersonassurance"),
+            Some(&vec!["b".to_string(), "a".to_string()]),
+            "configured order preserved when the attribute was absent"
         );
     }
 

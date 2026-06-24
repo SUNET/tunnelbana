@@ -74,11 +74,23 @@ impl Accr {
                 )));
             }
         }
-        let reverse_rewrite = cfg
-            .internal_accr_rewrite_map
-            .iter()
-            .map(|(origin, rewritten)| (rewritten.clone(), origin.clone()))
-            .collect();
+        // The reverse map (used on the response leg) inverts the rewrite map.
+        // Reject a non-injective map at build time: if two origins shared one
+        // rewritten value, the inverse could not reverse it unambiguously and
+        // one mapping would be silently lost.
+        let mut reverse_rewrite: BTreeMap<String, String> = BTreeMap::new();
+        for (origin, rewritten) in &cfg.internal_accr_rewrite_map {
+            if reverse_rewrite
+                .insert(rewritten.clone(), origin.clone())
+                .is_some()
+            {
+                return Err(Error::Config(format!(
+                    "accr {}: internal_accr_rewrite_map is not one-to-one; \
+                     multiple origins map to {rewritten}",
+                    bx.name
+                )));
+            }
+        }
         Ok(Box::new(Accr {
             name: bx.name.clone(),
             supported: cfg.supported_accr_sorted_by_prio,
@@ -316,6 +328,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn minimum_response_leg_downgrades_to_sp_request_eduid_parity() {
+        // eduID parity (accr.py:73,76,87-101): the per-vIdP minimum reshapes only
+        // the forwarded request; the saved `requested_accr` stays the SP's
+        // filtered request. So even though the IdP returns a value inside the
+        // enforced range (MFA), the response leg validates against [PWD] and
+        // downgrades to it. This is intentional and documented (ADR 0030, F2);
+        // the test locks it in so the behavior is not "fixed" by accident.
+        let accr = build_accr(serde_json::json!({
+            "supported_accr_sorted_by_prio": [MFA, SFA, PWD],
+            "lowest_accepted_accr_for_virtual_idp": { "SunetIDP": SFA }
+        }));
+        let mut c = ctx();
+        c.target_frontend = Some("SunetIDP".into());
+        c.decorate(KEY_REQUESTED_ACCR, json_strings(&[PWD.into()]));
+        let _ = accr
+            .process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        // IdP honored the enforced minimum and returned MFA (stronger than PWD).
+        let mut data = response_from("sp");
+        data.auth_info.auth_class_ref = Some(MFA.into());
+        let data = accr.process_response(&mut c, data).await.unwrap();
+        // Downgraded back to the SP's original request, per eduID.
+        assert_eq!(data.auth_info.auth_class_ref.as_deref(), Some(PWD));
+    }
+
+    #[tokio::test]
     async fn applies_rewrite_and_forwards_comparison() {
         let accr = build_accr(serde_json::json!({
             "supported_accr_sorted_by_prio": [MFA, SFA],
@@ -414,6 +454,23 @@ mod tests {
             serde_json::json!({
                 "supported_accr_sorted_by_prio": [MFA],
                 "lowest_accepted_accr_for_virtual_idp": { "X": SFA }
+            })
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_non_injective_rewrite_map() {
+        // Two origins mapping to the same rewritten value cannot be reversed
+        // unambiguously on the response leg -> fail fast at build.
+        assert!(Accr::build(&bx(
+            "accr",
+            serde_json::json!({
+                "supported_accr_sorted_by_prio": [MFA, SFA],
+                "internal_accr_rewrite_map": {
+                    MFA: "urn:upstream:loa",
+                    SFA: "urn:upstream:loa"
+                }
             })
         ))
         .is_err());
