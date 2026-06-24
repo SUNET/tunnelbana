@@ -51,7 +51,7 @@ pub fn load_clients(inline: Vec<Client>, clients_file: Option<&str>) -> Result<V
     for c in &clients {
         if !seen.insert(c.client_id.as_str()) {
             return Err(Error::Config(format!(
-                "duplicate client_id '{}'",
+                "duplicate client_id '{}' across inline clients and clients_file",
                 c.client_id
             )));
         }

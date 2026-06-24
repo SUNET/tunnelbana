@@ -147,6 +147,92 @@ impl MicroService for FilterAttributes {
 }
 ```
 
+## Scoping a service to specific SPs and IdPs
+
+A tunnelbana micro-service is not wired to one SP or IdP the way a frontend or
+backend is: **every** service in the chain runs on **every** auth flow. What
+makes a service behave differently for one downstream relying party or one
+upstream identity provider is its **config nesting** - exactly the model SATOSA
+uses, where a micro-service carries per-entity rule maps rather than being
+instantiated per entity. Two flow facts drive the lookup:
+
+- **requester** - the downstream SP/RP that started the flow
+  (`InternalData.requester`, the SAML SP entityID or the OIDC `client_id`).
+- **provider** - the upstream IdP/OP that authenticated the user
+  (`InternalData.auth_info.issuer`).
+
+Services that take per-entity config key their rule maps on one or both of
+these. There are two wildcard conventions and two ways the entries combine, and
+they are not the same across services (this matches SATOSA's own
+inconsistencies, kept deliberately for drop-in parity):
+
+- **Wildcard tokens.** Most services treat `""` **and** `"default"` as
+  synonymous catch-alls (the shared `level()` lookup is *exact key, else `""`,
+  else `"default"`*). `filter_attribute_values` and `hasher` recognise only
+  `""`. `primary_identifier` overrides match the entity id exactly, with no
+  wildcard.
+- **Combination model.** Most services are **selected, not merged**: the most
+  specific matching block *replaces* the wildcard block, so a per-SP entry must
+  restate any rule it still wants. The exception is `filter_attribute_values`,
+  whose layers **stack** (default-provider then specific-provider, and within
+  each default-requester then specific-requester all apply cumulatively).
+
+This table is the quick reference for which services can be scoped and how:
+
+| Service | Scopes on | Wildcards | Combination | Config key |
+| --- | --- | --- | --- | --- |
+| `filter_attributes` | requester | `""` / `default` | selected (replaces global `allowed`) | `policy."<requester>"` |
+| `attribute_authorization` | requester -> provider | `""` / `default` | selected | `attribute_allow."<requester>"."<provider>"` |
+| `attribute_generation` | requester -> provider | `""` / `default` | selected | `synthetic_attributes."<requester>"."<provider>"` |
+| `filter_attribute_values` | provider -> requester | `""` only | **stacked** | `attribute_filters."<provider>"."<requester>"` |
+| `hasher` | requester | `""` only | per-field override of the `""` defaults | `"<requester>"` |
+| `primary_identifier` | requester or provider | none (exact) | IdP override first, **SP override wins** | `override."<entity id>"` |
+| `custom_routing` | requester and/or target issuer | (rule list) | first matching rule, else `default_backend` | `rule` / `issuer_rule` |
+| `static_attributes`, `rename_attributes`, `attribute_processor`, `custom_logging`, `idp_hinting` | - | - | apply uniformly to every flow | - |
+
+Note the **order of the two keys flips** between families: the authorization and
+generation services nest *requester then provider*, while
+`filter_attribute_values` nests *provider then requester*. Read each service's
+own section below before writing a nested block.
+
+A worked example - release a narrow attribute set to one strict SP, the default
+set to everyone else, and additionally require a staff affiliation when the
+assertion comes from one specific upstream IdP:
+
+```toml
+# filter_attributes: per-SP release (selected - the SP entry replaces the global)
+[[microservice]]
+type = "filter_attributes"
+name = "release"
+  [microservice.config]
+  allowed = ["mail", "givenname", "surname", "edupersonprincipalname"]
+  [microservice.config.policy."https://strict-sp.example.org"]
+  allowed = ["mail"]                       # this SP gets only mail
+
+# attribute_authorization: per-(SP, IdP) gate (requester -> provider)
+[[microservice]]
+type = "attribute_authorization"
+name = "authz"
+  [microservice.config]
+  force_attributes_presence_on_allow = true
+  # Any SP, any IdP: mail must be present.
+  [microservice.config.attribute_allow.default.default]
+  mail = ["."]
+  # This SP, only when the named IdP asserted: also require a staff affiliation.
+  # Because blocks are SELECTED not merged, the mail rule is restated here.
+  [microservice.config.attribute_allow."https://strict-sp.example.org"."https://idp.example.org"]
+  mail = ["."]
+  affiliation = ["^staff$"]
+```
+
+Services that don't take per-entity config (`static_attributes`,
+`attribute_processor`, ...) still apply to one SP/IdP combination if you want -
+gate them by listing a scoped service such as `filter_attributes` or
+`attribute_authorization` alongside, or split the upstream into its own backend
+and [pin the frontend](configuration.md#backend-selection) to it. There is no
+global "run this service only for SP X" wrapper; per-entity behavior is always
+expressed inside the service's own rule map, as above.
+
 ## `attribute_processor`: value transforms
 
 The SATOSA-parity attribute transformer (ADRs 0011 and 0020, SATOSA:

@@ -1,31 +1,78 @@
 # Built-in plugin reference
 
-Every built-in plugin and its config `type`:
+This chapter is the per-plugin **config reference**: one TOML example per
+plugin `type`, with every key explained inline. It is organized by the three
+plugin kinds:
 
-| `type` | Kind | Role |
+- **[Frontends](#frontends)** speak a protocol *downstream* to relying parties
+  and service providers - they are the entry point a user-facing application
+  talks to. tunnelbana is an OpenID Provider, a federation OP, or a SAML IdP
+  here.
+- **[Backends](#backends)** speak a protocol *upstream* to the identity
+  providers and OPs that actually authenticate the user. tunnelbana is a
+  relying party, a federation RP, or a SAML SP here.
+- **[Micro-services](#micro-services)** sit *in the middle* and reshape the
+  attributes/identity as a flow passes between a frontend and a backend. The
+  [micro-services chapter](micro-services.md) covers their semantics and
+  ordering; this chapter is the config reference for each one.
+
+A single tunnelbana instance combines one or more frontends, one or more
+backends, and any number of micro-services; how a flow is steered from a
+frontend to a backend is [backend selection](configuration.md#backend-selection).
+
+## The plugin catalogue
+
+### Frontend types
+
+| `type` | Role | Section |
 | --- | --- | --- |
-| `oidc` | frontend | OpenID Provider (OP) |
-| `oidc_federation` | frontend | OpenID Federation 1.0 OP |
-| `saml2` | frontend | SAML2 Identity Provider (IdP) |
-| `oidc` | backend | OpenID Connect Relying Party (RP) |
-| `oidc_federation` | backend | OpenID Federation 1.0 RP (automatic registration) |
-| `saml2` | backend | SAML2 Service Provider (SP) |
-| `static_attributes` | micro-service | inject fixed attributes (response path) |
-| `filter_attributes` | micro-service | allow-list attributes, globally or per requester (response path) |
-| `filter_attribute_values` | micro-service | drop attribute *values* not matching a regex (response path) |
-| `rename_attributes` | micro-service | rename internal attributes (response path) |
-| `attribute_processor` | micro-service | per-attribute transform chains: regex, hash, scope, gender (response path) |
-| `attribute_generation` | micro-service | synthesize attributes from Tera templates (response path) |
-| `attribute_authorization` | micro-service | reject flows failing regex allow/deny rules (response path) |
-| `hasher` | micro-service | salted-hash subject id / attributes per requester (response path) |
-| `primary_identifier` | micro-service | construct a primary id from ordered candidates (response path) |
-| `custom_logging` | micro-service | per-flow JSON audit records to a file (response path) |
-| `custom_routing` | micro-service | pick a backend by requester or target issuer (request path) |
-| `idp_hinting` | micro-service | lift an IdP-hint query parameter into the flow (request path) |
+| `oidc` | OpenID Provider (OP) | [reference](#oidc-frontend---openid-provider) |
+| `oidc_federation` | OpenID Federation 1.1 OP | [reference](#oidc_federation-frontend---federation-op) |
+| `saml2` | SAML2 Identity Provider (IdP) | [reference](#saml2-frontend---identity-provider) |
+
+### Backend types
+
+| `type` | Role | Section |
+| --- | --- | --- |
+| `oidc` | OpenID Connect Relying Party (RP) | [reference](#oidc-backend---relying-party) |
+| `oidc_federation` | OpenID Federation 1.1 RP (automatic registration) | [reference](#oidc_federation-backend---federation-relying-party) |
+| `saml2` | SAML2 Service Provider (SP) | [reference](#saml2-backend---service-provider) |
+
+### Micro-service types
+
+The **path** column says which half of the flow the service runs on: a
+*request-path* service runs on the way from the frontend to the backend (and
+can steer backend selection); a *response-path* service runs on the way back,
+once the backend has produced attributes. See
+[where they run](micro-services.md#where-they-run-in-the-pipeline).
+
+| `type` | Path | What it does |
+| --- | --- | --- |
+| `static_attributes` | response | Inject fixed attributes (does not overwrite existing ones). |
+| `filter_attributes` | response | Allow-list whole attributes, globally or per requester. |
+| `filter_attribute_values` | response | Drop attribute *values* not matching a regex, per provider/requester. |
+| `rename_attributes` | response | Rename internal attributes (values merge on collision). |
+| `attribute_processor` | response | Per-attribute transform chains: regex, hash, scope, gender. |
+| `attribute_generation` | response | Synthesize attributes from Tera templates. |
+| `attribute_authorization` | response | Reject flows whose attributes fail regex allow/deny rules. |
+| `hasher` | response | Salted-hash the subject id / attributes per requester. |
+| `primary_identifier` | response | Construct a primary id from ordered candidates. |
+| `custom_logging` | response | Append a per-flow JSON audit record to a file. |
+| `custom_routing` | request | Pick a backend by requester or target issuer. |
+| `idp_hinting` | request | Lift an IdP-hint query parameter into the flow. |
 
 All `signing_*` keys follow the [key-loading rules](configuration.md#keys-pem-or-jwk).
+The attribute transforms above have a narrative, worked-example walkthrough in
+[Attributes and transforms](attributes.md).
 
-## `oidc` frontend - OpenID Provider
+## Frontends
+
+A frontend is mounted at `<base_url>/<name>` and serves the protocol endpoints a
+downstream application talks to. List one `[[frontend]]` table per entry point;
+a single instance can run several frontends side by side (for example a SAML
+IdP and an OIDC OP over the same backend).
+
+### `oidc` frontend - OpenID Provider
 
 ```toml
 [[frontend]]
@@ -72,7 +119,7 @@ name = "OIDC"
   # e.g. service_documentation = "https://…"
 ```
 
-### Client roster from a file
+#### Client roster from a file
 
 Both the `oidc` and `oidc_federation` frontends accept an optional
 `clients_file` pointing at a JSON file that holds a **bare array** of client
@@ -123,7 +170,7 @@ frontend advertises `dpop_signing_alg_values_supported = ["ES256"]`, accepts
 DPoP proofs on the token and userinfo endpoints, and issues sender-constrained
 access tokens (`token_type = "DPoP"`).
 
-## `oidc_federation` frontend - Federation OP
+### `oidc_federation` frontend - Federation OP
 
 A federation-aware OP: it serves a signed entity configuration, auto-registers
 unknown RPs by resolving them through a trust anchor, unpacks request objects
@@ -174,7 +221,7 @@ The entity configuration is served at `…/OIDFed/.well-known/openid-federation`
 the bare host). The OIDC endpoints mirror the plain `oidc` frontend, under
 `…/OIDFed/`.
 
-## `saml2` frontend - Identity Provider
+### `saml2` frontend - Identity Provider
 
 ```toml
 [[frontend]]
@@ -225,11 +272,11 @@ name = "Saml2IDP"
   # [frontend.config.organization]
   # name = "SUNET"
   # display_name = "Sunet"
-  # url = "https://sunet.se"
+  # url = "https://example.com"
   # lang = "en"                       # default "en"
   # [[frontend.config.contact_person]]
   # contact_type  = "technical"       # technical|support|administrative|billing|other
-  # email_address = "noc@sunet.se"
+  # email_address = "noc@example.com"
   # given_name    = "Ops"
 ```
 
@@ -250,7 +297,7 @@ name = "Saml2IDP"
 > **Signing.** By default tunnelbana signs the **assertion** only, which is the
 > common interoperable pattern: an SP that verifies the single assertion
 > signature is satisfied. Set `sign_responses = true` to also sign the Response
-> envelope. (Conversely, the [SAML SP backend](#saml2-backend--service-provider)
+> envelope. (Conversely, the [SAML SP backend](#saml2-backend---service-provider)
 > accepts either a signed assertion **or** a signed Response.)
 
 The IdP serves `…/Saml2IDP/sso` (Redirect + POST) and `…/Saml2IDP/metadata`.
@@ -258,7 +305,15 @@ When `idp_entity_id` is itself a URL under the module base (the common
 `…/Saml2IDP/proxy.xml` convention), the metadata document is additionally
 served at that path (SATOSA's `entityid_endpoint`).
 
-## `oidc` backend - Relying Party
+## Backends
+
+A backend is the upstream side: it sends the user to an external IdP or OP,
+receives the response, and hands tunnelbana the resulting `InternalData`. Its
+own callback/ACS endpoints are mounted under `<base_url>/<name>`. With more than
+one backend, [backend selection](configuration.md#backend-selection) decides
+which one a given flow uses.
+
+### `oidc` backend - Relying Party
 
 ```toml
 [[backend]]
@@ -286,13 +341,13 @@ name = "Upstream"
 
 Always uses PKCE (S256). The callback is served at `…/Upstream/`.
 
-## `oidc_federation` backend - Federation Relying Party
+### `oidc_federation` backend - Federation Relying Party
 
 The federation-aware RP (ADR 0024): no pre-registered client, no
 `.well-known` discovery. The proxy publishes its own signed RP entity
 configuration, resolves the upstream OP through the configured trust
 anchors, and authenticates with `private_key_jwt` using its **entity id as
-the client id** (automatic registration, OpenID Federation 1.0 section 12.1).
+the client id** (automatic registration, OpenID Federation 1.1 section 12.1).
 
 ```toml
 [[backend]]
@@ -351,7 +406,7 @@ How a flow works:
    below).
 2. The user is redirected to the resolved `authorization_endpoint` with
    `client_id = <entity_id>`, PKCE (S256), a **signed request object**
-   (RFC 9101, signed with the `private_key_jwt` key — federation OPs doing
+   (RFC 9101, signed with the `private_key_jwt` key - federation OPs doing
    automatic registration authenticate the RP with it; plain parameters are
    kept alongside for OPs that ignore it), and `state`/`nonce` (plus the
    chosen OP) sealed in the encrypted state cookie.
@@ -377,12 +432,42 @@ federation keys; the two key sets are deliberately separate). At least one
 > instances can attach to each other across a federation with no manual
 > registration on either side.
 
-### OP discovery
+#### OP discovery
 
 With `[backend.config.discovery]` instead of a fixed `op_entity_id`, the
 backend delegates the per-flow OP choice to an **external OpenID Federation
-discovery service** such as [upptackt](https://github.com/kushaldas/upptackt)
-(ADR 0025):
+discovery service** such as [upptackt](https://github.com/SUNET/upptackt)
+(ADR 0025).
+
+The flow at a glance:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Browser
+    participant RP as RP backend (OIDFedRP)
+    participant D as Discovery service
+    participant TA as Trust anchor
+    participant OP as Federation OP
+
+    Note over RP: start_auth, no fixed OP
+    RP->>U: 302 to discovery service with entity_id<br/>and a one-time target_link_uri verifier<br/>(verifier also sealed in the state cookie)
+    U->>D: follow redirect (entity_id, target_link_uri)
+    D->>TA: resolve and verify the RP via the federation
+    TA-->>D: RP entity configuration (initiate_login_uri)
+    Note over U,D: user searches and picks their home OP
+    D->>U: redirect to /OIDFedRP/initiate with iss=OP<br/>and target_link_uri echoed verbatim
+    U->>RP: GET /initiate (carries the state cookie)
+    Note over RP: verifier in cookie must equal the echoed<br/>target_link_uri (anti-CSRF / anti-replay), then cleared
+    RP->>TA: resolve the chosen OP through a trust anchor
+    TA-->>RP: OP metadata (keys, endpoints)
+    Note over RP: seal the chosen OP in the state cookie
+    RP->>U: 302 to the OP authorization_endpoint<br/>(PKCE S256 + signed request object)
+    U->>OP: authorization request
+    Note over U,OP: normal code flow, then the callback completes the login
+```
+
+In detail:
 
 1. `start_auth` 302s to `service?entity_id=<rp_entity_id>&target_link_uri=…`.
    The `target_link_uri` is a **one-time return-path verifier**:
@@ -418,7 +503,7 @@ startup). The `initiate` route is only registered in discovery mode.
 > out in `federation_backend.rs` ("In-proxy discovery") for deployments that
 > want a built-in chooser; see ADR 0025.
 
-## `saml2` backend - Service Provider
+### `saml2` backend - Service Provider
 
 Static single-IdP mode:
 
@@ -459,10 +544,10 @@ name = "Saml2"
   # [backend.config.organization]
   # name = "SUNET"
   # display_name = "Sunet"
-  # url = "https://sunet.se"
+  # url = "https://example.com"
   # [[backend.config.contact_person]]
   # contact_type  = "technical"
-  # email_address = "noc@sunet.se"
+  # email_address = "noc@example.com"
 ```
 
   Dynamic federation mode via MDQ, with IdP discovery:
@@ -525,7 +610,7 @@ name = "Saml2"
   > must survive it (`cookie_same_site = "None"`, or `"Lax"` for GET returns).
   > See ADR 0007.
 
-  ### Encrypted assertions
+  #### Encrypted assertions
 
   With `[[backend.config.encryption_keypairs]]` configured, the ACS decrypts
   `<EncryptedAssertion>` elements (RSA-OAEP / RSA-1.5 key transport,
@@ -541,7 +626,7 @@ name = "Saml2"
   Response carrying encrypted assertions with no `encryption_keypairs`
   configured is rejected. See ADR 0009.
 
-  ### MDQ options
+  #### MDQ options
 
   | Key | Required | Default | Meaning |
   | --- | --- | --- | --- |
@@ -552,7 +637,7 @@ name = "Saml2"
   | `mdq.fallback_ttl_secs` | | metadata-driven | Cache TTL used when the metadata omits `validUntil` and `cacheDuration`. |
   | `mdq.allow_unverified` | | `false` | Accept unsigned/unverified metadata. For testing only. |
 
-  ### The MDQ signer certificate
+  #### The MDQ signer certificate
 
   `mdq.signing_cert_path` points at the **federation's metadata-signing
   certificate** - a PEM-encoded X.509 certificate, published by the federation
@@ -577,7 +662,7 @@ name = "Saml2"
   > file contents at the announced cutover rather than expecting both keys to
   > be accepted simultaneously.
 
-  ### Subject identifier selection
+  #### Subject identifier selection
 
   A non-success SAML status (for example a cancelled login) is surfaced as an
   authentication error to the frontend. The ACS also **fails closed** on

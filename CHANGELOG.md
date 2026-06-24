@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Docs:** the book gained two end-to-end tutorial chapters - *SAML and OIDC
+  over a SWAMID SP backend* (SAML2 IdP + OIDC OP frontends over a SWAMID
+  MDQ/SeamlessAccess SP backend, including the `email_verified` / Vaultwarden
+  case) and *SAML IdP over an OpenID Federation RP backend* (discovery via
+  upptackt) - plus a new *Attributes and transforms* chapter documenting the
+  internal-name pivot, the attribute map, subject-id composition, the
+  response-path transform pipeline, and the `email_verified` OIDC-vs-SAML gap
+  with a security note. The *Built-in plugin reference* was reorganized into a
+  plugin catalogue grouped under Frontends / Backends / Micro-services, and
+  *Micro-services* gained a "Scoping a service to specific SPs and IdPs"
+  section. Wide reference tables now render full-width and readable. No code
+  changes.
+
 - The `oidc` and `oidc_federation` frontends accept an optional **`clients_file`**
   pointing at a JSON file (a bare array of client objects) whose clients are
   **merged** with the inline `clients`. It externalizes a large or

@@ -18,7 +18,7 @@ pre-registered `client_id` and secret/key, none of which exist in an OpenID
 Federation deployment: there, the RP's identity is its entity id, its keys
 are published in its own signed entity configuration, the OP's metadata is
 obtained through the trust chain, and client registration is *automatic*
-(OpenID Federation 1.0 section 12.1).
+(OpenID Federation 1.1 section 12.1).
 
 This was the recorded "planned tunnelbana differentiator" in
 `satosa_parity.md` section 3.4. The protocol building blocks were already in
@@ -126,5 +126,5 @@ metadata-policy application on the RP side.
 - `../grindvakt/src/federation.rs` - `resolve_via_trust_anchors`,
   `fetch_collection` / `parse_collection` (OP listing),
   `build_entity_configuration`, `verify_typed`
-- OpenID Federation 1.0 sections 10 (resolve endpoint) and 12.1 (automatic
+- OpenID Federation 1.1 sections 10 (resolve endpoint) and 12.1 (automatic
   registration)

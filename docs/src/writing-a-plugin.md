@@ -50,6 +50,12 @@ pub trait MicroService: Send + Sync {
 }
 ```
 
+This chapter dissects a **frontend**. For the `MicroService` trait specifically -
+how `process_request`/`process_response` map onto the request and response
+paths, the decoration signals services exchange, a worked "writing your own"
+example, and how to scope a service to specific SPs/IdPs - see the
+[Micro-services](micro-services.md) chapter.
+
 The two return enums drive the proxy:
 
 ```rust
@@ -86,7 +92,7 @@ impl BuildContext {
 ```
 
 Define a `#[derive(Deserialize)]` struct for your config and call
-`bx.parse_config()` — the `config` TOML table is already converted to JSON, so
+`bx.parse_config()` - the `config` TOML table is already converted to JSON, so
 serde does the rest.
 
 ### `Route`
@@ -149,7 +155,7 @@ struct FederationFrontendConfig {
 struct TrustAnchorConfig { entity_id: String, keys: Vec<Value> }
 ```
 
-### 2. `build` — the constructor
+### 2. `build` - the constructor
 
 ```rust
 pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
@@ -181,10 +187,10 @@ Two lessons here:
 
 - **Derive, don't hardcode.** `issuer`/`entity_id` and the endpoint base are
   kept separate so the public identifier and the URL layout can differ.
-- **Take what you need from `BuildContext`** — the HTTP client (for trust-chain
+- **Take what you need from `BuildContext`** - the HTTP client (for trust-chain
   resolution), the attribute mapper, and `secret` (for the token codec).
 
-### 3. `register_endpoints` — the routes
+### 3. `register_endpoints` - the routes
 
 ```rust
 fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
@@ -200,7 +206,7 @@ fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
 // where:  fn route(&self, suffix: &str) -> String { format!("{}/{}", self.name, suffix) }
 ```
 
-### 4. `handle_endpoint` — dispatch on `route_id`
+### 4. `handle_endpoint` - dispatch on `route_id`
 
 ```rust
 async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<FrontendAction> {
@@ -242,10 +248,10 @@ async fn handle_authorization(&self, ctx: &mut Context) -> Result<FrontendAction
 }
 ```
 
-### 5. `handle_authn_response` — render the result
+### 5. `handle_authn_response` - render the result
 
 When the backend returns an `AuthResponse`, the proxy hands the `InternalData`
-back to the frontend, which turns it into a protocol response — here, an OIDC
+back to the frontend, which turns it into a protocol response - here, an OIDC
 redirect carrying an authorization code:
 
 ```rust
@@ -266,10 +272,10 @@ async fn handle_authn_response(&self, ctx: &mut Context, response: InternalData)
 }
 ```
 
-### 6. `handle_backend_error` — render failures
+### 6. `handle_backend_error` - render failures
 
 If the backend fails (including an upstream IdP saying "access denied" or the
-user cancelling), the frontend turns it into a protocol-appropriate error —
+user cancelling), the frontend turns it into a protocol-appropriate error -
 here, an OAuth `access_denied` redirect to the RP:
 
 ```rust
@@ -307,7 +313,7 @@ To add **`my_frontend`**:
 1. Write the module with a `pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>>`
    and a type implementing `Frontend`.
 2. Add `registry.register_frontend("my_frontend", my_frontend::MyFrontend::build);`
-   — either by editing `register_all`, or in your own binary:
+   - either by editing `register_all`, or in your own binary:
 
    ```rust
    let mut registry = Registry::new();
