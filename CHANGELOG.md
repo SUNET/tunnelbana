@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Performance:** the URL router now resolves literal endpoint paths through an
+  exact-match hash map instead of a linear regex scan, making `resolve` O(1) in
+  the number of mounted modules. Each frontend mounts five routes, so a proxy
+  fronting `N` frontends previously did up to `5N` regex matches per request
+  (and a non-matching path - the scan's worst case - walked the whole list);
+  this matters at federation scale (10-15k entities). `Route` gains
+  `Route::exact` (literal, no regex compiled) alongside the unchanged
+  `Route::new` (true regex, kept as a fallback); the `pattern` field is replaced
+  by `Route::matches`. First-match precedence is preserved (including a frontend
+  and backend that share a name and so both register e.g. `Saml2/metadata`).
+  Verified on the `toomanyfronts/` scale rig at 10000 frontends: first/last/miss
+  resolve within ~0.1 ms of each other (vs a 2.4 ms first-vs-last spread at 1000
+  before), boot drops the ~5N regex compilations, and RSS fell from ~95 MB
+  (1000) to ~71 MB (10000). See [ADR 0029](docs/adr/0029-router-exact-match-dispatch.md).
+
 - **Docs:** the book gained two end-to-end tutorial chapters - *SAML and OIDC
   over a SWAMID SP backend* (SAML2 IdP + OIDC OP frontends over a SWAMID
   MDQ/SeamlessAccess SP backend, including the `email_verified` / Vaultwarden

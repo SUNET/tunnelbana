@@ -98,14 +98,22 @@ serde does the rest.
 ### `Route`
 
 ```rust
-Route::new("OIDFed/authorization", "authorization")
+Route::exact("OIDFed/authorization", "authorization")
 ```
 
-The pattern is a regex; if it does not start with `^` it is anchored to
-`^…$`. The second argument is an opaque `route_id` your `handle_endpoint`
-matches on. Build paths relative to `module_base()` so a renamed instance keeps
-working. Routing matches the request path with the leading `/` stripped, so a
-route's name prefix must be non-empty.
+`Route::exact(path, id)` registers a **literal** path, matched by string
+equality. This is the right choice for fixed endpoints and is what every
+built-in plugin uses: the router keeps exact routes in a hash map and resolves
+them in O(1), independent of how many modules are mounted (see
+[ADR 0029](https://github.com/SUNET/tunnelbana/blob/main/docs/adr/0029-router-exact-match-dispatch.md)). The second argument is
+an opaque `route_id` your `handle_endpoint` matches on. Build paths relative to
+`module_base()` so a renamed instance keeps working. Routing matches the request
+path with the leading `/` stripped, so a route's name prefix must be non-empty.
+
+If you genuinely need a pattern, `Route::new(pattern, id)` takes a regex
+(anchored to `^…$` unless it already starts with `^`). Regex routes fall back to
+a linear scan and an exact route always wins over them, so prefer `Route::exact`
+unless the path is truly dynamic.
 
 ### The `Context`
 
@@ -195,12 +203,12 @@ Two lessons here:
 ```rust
 fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
     vec![
-        Route::new(&regex::escape(&self.route(".well-known/openid-federation")), "entity_configuration"),
-        Route::new(&regex::escape(&self.route(".well-known/openid-configuration")), "discovery"),
-        Route::new(&regex::escape(&self.route("jwks")),          "jwks"),
-        Route::new(&regex::escape(&self.route("authorization")), "authorization"),
-        Route::new(&regex::escape(&self.route("token")),         "token"),
-        Route::new(&regex::escape(&self.route("userinfo")),      "userinfo"),
+        Route::exact(self.route(".well-known/openid-federation"), "entity_configuration"),
+        Route::exact(self.route(".well-known/openid-configuration"), "discovery"),
+        Route::exact(self.route("jwks"),          "jwks"),
+        Route::exact(self.route("authorization"), "authorization"),
+        Route::exact(self.route("token"),         "token"),
+        Route::exact(self.route("userinfo"),      "userinfo"),
     ]
 }
 // where:  fn route(&self, suffix: &str) -> String { format!("{}/{}", self.name, suffix) }

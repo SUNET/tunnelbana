@@ -618,11 +618,8 @@ impl Frontend for Saml2Frontend {
 
     fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
         let mut routes = vec![
-            Route::new(&regex::escape(&format!("{}/sso", self.name)), "sso"),
-            Route::new(
-                &regex::escape(&format!("{}/metadata", self.name)),
-                "metadata",
-            ),
+            Route::exact(format!("{}/sso", self.name), "sso"),
+            Route::exact(format!("{}/metadata", self.name), "metadata"),
         ];
         // SATOSA's `entityid_endpoint`: when the entity id is itself a URL
         // under this module, serve the metadata document there too (the
@@ -630,10 +627,7 @@ impl Frontend for Saml2Frontend {
         let module_base = self.sso_url.trim_end_matches("/sso");
         if let Some(rest) = self.idp_entity_id.strip_prefix(&format!("{module_base}/")) {
             if !rest.is_empty() && rest != "sso" && rest != "metadata" {
-                routes.push(Route::new(
-                    &regex::escape(&format!("{}/{rest}", self.name)),
-                    "metadata",
-                ));
+                routes.push(Route::exact(format!("{}/{rest}", self.name), "metadata"));
             }
         }
         routes
