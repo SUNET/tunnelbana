@@ -29,7 +29,7 @@ impl Backend for MockBackend {
         &self.name
     }
     fn register_endpoints(&self) -> Vec<Route> {
-        vec![Route::new(&format!("{}/callback", self.name), "callback")]
+        vec![Route::exact(format!("{}/callback", self.name), "callback")]
     }
     async fn start_auth(&self, _ctx: &mut Context, _req: InternalData) -> Result<Response> {
         // Simulate redirecting to an IdP that instantly bounces back to our ACS.

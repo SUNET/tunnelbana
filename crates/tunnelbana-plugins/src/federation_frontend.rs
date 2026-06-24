@@ -448,21 +448,15 @@ impl Frontend for FederationFrontend {
 
     fn register_endpoints(&self, _backend_names: &[String]) -> Vec<Route> {
         vec![
-            Route::new(
-                &regex::escape(&self.route(".well-known/openid-federation")),
+            Route::exact(
+                self.route(".well-known/openid-federation"),
                 "entity_configuration",
             ),
-            Route::new(
-                &regex::escape(&self.route(".well-known/openid-configuration")),
-                "discovery",
-            ),
-            Route::new(&regex::escape(&self.route("jwks")), "jwks"),
-            Route::new(
-                &regex::escape(&self.route("authorization")),
-                "authorization",
-            ),
-            Route::new(&regex::escape(&self.route("token")), "token"),
-            Route::new(&regex::escape(&self.route("userinfo")), "userinfo"),
+            Route::exact(self.route(".well-known/openid-configuration"), "discovery"),
+            Route::exact(self.route("jwks"), "jwks"),
+            Route::exact(self.route("authorization"), "authorization"),
+            Route::exact(self.route("token"), "token"),
+            Route::exact(self.route("userinfo"), "userinfo"),
         ]
     }
 

@@ -148,7 +148,7 @@ impl Backend for MockBackend {
         "Mock"
     }
     fn register_endpoints(&self) -> Vec<Route> {
-        vec![Route::new("Mock/callback", "callback")]
+        vec![Route::exact("Mock/callback", "callback")]
     }
     async fn start_auth(&self, _ctx: &mut Context, _req: InternalData) -> CoreResult<Response> {
         Ok(Response::redirect("/Mock/callback"))

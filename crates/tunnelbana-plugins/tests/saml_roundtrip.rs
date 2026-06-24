@@ -1386,7 +1386,7 @@ async fn saml_frontend_serves_metadata_at_entity_id_url() {
     let routes = idp.register_endpoints(&[]);
     let entity_route = routes
         .iter()
-        .find(|r| r.pattern.is_match("IdP/proxy.xml"))
+        .find(|r| r.matches("IdP/proxy.xml"))
         .expect("route for the entity-id path");
     assert_eq!(entity_route.id, "metadata");
 

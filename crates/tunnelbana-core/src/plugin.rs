@@ -9,15 +9,39 @@ use crate::internal::InternalData;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// How a [`Route`] matches an inbound path.
+///
+/// Almost every route is a literal `{module}/{suffix}` path, so the common
+/// `Exact` variant matches by string equality and the router can dispatch it
+/// with an O(1) hash probe instead of a regex scan. `Regex` keeps the public
+/// API able to register a true pattern when needed (none do today).
+#[derive(Clone)]
+pub(crate) enum Matcher {
+    /// Literal exact path, compared by string equality. No regex is compiled.
+    Exact(String),
+    /// Anchored regex. Falls through to the router's regex fallback list.
+    Regex(regex::Regex),
+}
+
 /// A registered endpoint: a path matcher plus an opaque handler id the plugin
 /// understands.
 #[derive(Clone)]
 pub struct Route {
-    pub pattern: regex::Regex,
+    pub(crate) matcher: Matcher,
     pub id: String,
 }
 
 impl Route {
+    /// Build a literal exact-path route (the common case). The path is matched
+    /// by string equality, which is inherently fully anchored; no regex is
+    /// compiled. Prefer this over `new` for fixed endpoint paths.
+    pub fn exact(path: impl Into<String>, id: impl Into<String>) -> Self {
+        Route {
+            matcher: Matcher::Exact(path.into()),
+            id: id.into(),
+        }
+    }
+
     /// Build a route from an anchored or unanchored regex pattern.
     pub fn new(pattern: &str, id: impl Into<String>) -> Self {
         let anchored = if pattern.starts_with('^') {
@@ -26,8 +50,17 @@ impl Route {
             format!("^{pattern}$")
         };
         Route {
-            pattern: regex::Regex::new(&anchored).expect("invalid route regex"),
+            matcher: Matcher::Regex(regex::Regex::new(&anchored).expect("invalid route regex")),
             id: id.into(),
+        }
+    }
+
+    /// Whether this route matches `path` (exact string equality, or anchored
+    /// regex for `Route::new` patterns).
+    pub fn matches(&self, path: &str) -> bool {
+        match &self.matcher {
+            Matcher::Exact(p) => p == path,
+            Matcher::Regex(re) => re.is_match(path),
         }
     }
 }

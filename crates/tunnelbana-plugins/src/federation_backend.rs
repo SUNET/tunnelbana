@@ -556,26 +556,17 @@ impl Backend for FederationBackend {
 
     fn register_endpoints(&self) -> Vec<Route> {
         let mut routes = vec![
-            Route::new(
-                &regex::escape(&format!("{}/.well-known/openid-federation", self.name)),
+            Route::exact(
+                format!("{}/.well-known/openid-federation", self.name),
                 "entity_configuration",
             ),
-            Route::new(
-                &regex::escape(&format!("{}/callback", self.name)),
-                "callback",
-            ),
+            Route::exact(format!("{}/callback", self.name), "callback"),
         ];
         if self.discovery.is_some() {
-            routes.push(Route::new(
-                &regex::escape(&format!("{}/initiate", self.name)),
-                "initiate",
-            ));
+            routes.push(Route::exact(format!("{}/initiate", self.name), "initiate"));
             // In-proxy discovery selection endpoint (kept for reference,
             // see ADR 0025):
-            // routes.push(Route::new(
-            //     &regex::escape(&format!("{}/disco", self.name)),
-            //     "disco",
-            // ));
+            // routes.push(Route::exact(format!("{}/disco", self.name), "disco"));
         }
         routes
     }

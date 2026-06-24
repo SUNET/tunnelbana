@@ -135,10 +135,7 @@ impl Backend for OidcBackend {
     }
 
     fn register_endpoints(&self) -> Vec<Route> {
-        vec![Route::new(
-            &regex::escape(&format!("{}/callback", self.name)),
-            "callback",
-        )]
+        vec![Route::exact(format!("{}/callback", self.name), "callback")]
     }
 
     async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {

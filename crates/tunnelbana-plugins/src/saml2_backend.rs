@@ -827,12 +827,9 @@ impl Backend for Saml2Backend {
 
     fn register_endpoints(&self) -> Vec<Route> {
         vec![
-            Route::new(&regex::escape(&format!("{}/acs", self.name)), "acs"),
-            Route::new(&regex::escape(&format!("{}/disco", self.name)), "disco"),
-            Route::new(
-                &regex::escape(&format!("{}/metadata", self.name)),
-                "metadata",
-            ),
+            Route::exact(format!("{}/acs", self.name), "acs"),
+            Route::exact(format!("{}/disco", self.name), "disco"),
+            Route::exact(format!("{}/metadata", self.name), "metadata"),
         ]
     }
 
