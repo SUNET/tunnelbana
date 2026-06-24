@@ -35,3 +35,4 @@ accepted — supersede with a new record rather than editing history.
 | [0027](0027-frontend-backend-pin.md) | Frontend-level backend pin (`backend = "<name>"`) | Accepted |
 | [0028](0028-clients-file.md) | External client roster file (`clients_file`) | Accepted |
 | [0029](0029-router-exact-match-dispatch.md) | O(1) router dispatch (exact-match map + regex fallback) | Accepted |
+| [0030](0030-eduid-scimapi-microservices.md) | eduID `scimapi` micro-services (`pairwiseid`, `static_attributes_for_virtual_idp`, `nameid`, `accr`) | Accepted |
