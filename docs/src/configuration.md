@@ -21,6 +21,7 @@ cookie_same_site     = "None"                        # default; None|Lax|Strict
 state_cookie_max_age = 1800                           # default, seconds (0 disables)
 attributes           = "config/attributes.toml"      # path, relative to this file
 cache_dir            = "/var/lib/tunnelbana/cache"    # optional, disk cache snapshots
+index_html           = "index.html"                  # optional, custom landing page at /
 ```
 
 | Key | Required | Default | Meaning |
@@ -34,6 +35,29 @@ cache_dir            = "/var/lib/tunnelbana/cache"    # optional, disk cache sna
 | `state_cookie_max_age` | | `1800` | Max lifetime of sealed state, in seconds; emitted as `Max-Age` and enforced on unseal. `0` disables the freshness check. |
 | `attributes` | | - | Path to the [attribute map](#the-attribute-map). Without it, no attribute translation happens. |
 | `cache_dir` | | - | Directory for cache persistence snapshots (e.g. federation metadata). |
+| `index_html` | | - | Path to a custom HTML file served verbatim at `/`. Without it, a [built-in landing page](#the-index-page) is served. |
+
+### The index page
+
+The proxy serves a landing page at `/` (and, for the built-in page, its logo at
+`/assets/tunnelbana.png`). By default this is a small static page with the
+tunnelbana logo, tagline, and a link to the project.
+
+Point `index_html` at your own HTML file to replace it. A relative path is
+resolved against the **config file's directory** (the same rule as a plugin
+`include`), so a file sitting next to `proxy.toml` is named directly:
+
+```toml
+index_html = "index.html"   # next to proxy.toml; or an absolute path
+```
+
+The file is read **once at boot** and served verbatim with
+`Content-Type: text/html; charset=utf-8`; it is never re-read per request, so
+edits require a restart. A configured-but-unreadable path is a fatal startup
+error (fail-fast) rather than a silent fall-back to the default. A custom page
+is responsible for its own assets — the built-in `/assets/tunnelbana.png` route
+remains available, but nothing else is served for you. See
+[ADR 0031](https://github.com/SUNET/tunnelbana/blob/main/docs/adr/0031-custom-index-page.md).
 
 > **Security:** `state_encryption_key`, the cookie attributes, and the TTL all
 > harden the [stateless state cookie](security-state-cookie.md) that carries

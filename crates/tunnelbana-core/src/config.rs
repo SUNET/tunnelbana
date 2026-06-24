@@ -106,6 +106,12 @@ pub struct ProxyConfig {
     /// Directory for cache persistence snapshots.
     #[serde(default)]
     pub cache_dir: Option<String>,
+    /// Optional path (relative to the config file, or absolute) to a custom HTML
+    /// file served verbatim at `/`. When unset, the binary serves its built-in
+    /// landing page. The file is read once at boot; an unreadable path aborts
+    /// startup (fail-fast), it is never re-read per request.
+    #[serde(default)]
+    pub index_html: Option<String>,
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(rename = "frontend", default)]
