@@ -75,19 +75,24 @@ impl Router {
     /// register e.g. `Saml2/metadata`) resolve to the frontend, matching the
     /// old first-match-wins linear scan.
     pub fn add(&mut self, kind: ModuleKind, module: &str, routes: &[Route]) {
+        let make = |route_id: &str| EndpointData {
+            kind,
+            module: module.to_string(),
+            route_id: route_id.to_string(),
+        };
         for r in routes {
-            let data = EndpointData {
-                kind,
-                module: module.to_string(),
-                route_id: r.id.clone(),
-            };
             match &r.matcher {
                 Matcher::Exact(path) => {
-                    self.exact.entry(path.clone()).or_insert(data);
+                    // Build EndpointData only on first insert: a duplicate exact
+                    // path (which first-registrant-wins precedence relies on) is
+                    // ignored without allocating a discarded module/route_id.
+                    self.exact
+                        .entry(path.clone())
+                        .or_insert_with(|| make(&r.id));
                 }
                 Matcher::Regex(re) => self.regexes.push(RegexEndpoint {
                     pattern: re.clone(),
-                    data,
+                    data: make(&r.id),
                 }),
             }
         }
@@ -219,16 +224,23 @@ mod tests {
     #[test]
     fn large_n_resolves_correctly() {
         // The eduGAIN-scale case: many literal routes, O(1) lookup, no scan.
+        // Each route is mounted under its own instance name (as real frontends
+        // are), so resolving a path must return that exact module — guarding
+        // against the router returning the wrong module for a matched path.
         let mut router = Router::new();
         for i in 0..15_000u32 {
             router.add(
                 ModuleKind::Frontend,
-                "f",
+                &format!("oidc{i}"),
                 &[Route::exact(format!("oidc{i}/jwks"), "jwks")],
             );
         }
-        assert_eq!(router.resolve("oidc0/jwks").unwrap().route_id, "jwks");
-        assert_eq!(router.resolve("oidc14999/jwks").unwrap().route_id, "jwks");
+        for i in [0u32, 7777, 14999] {
+            let m = router.resolve(&format!("oidc{i}/jwks")).unwrap();
+            assert_eq!(m.module, format!("oidc{i}"));
+            assert_eq!(m.route_id, "jwks");
+            assert_eq!(m.kind, ModuleKind::Frontend);
+        }
         assert!(router.resolve("oidc99999/jwks").is_none());
         // All routes were literal, so nothing landed in the regex fallback.
         assert!(router.regexes.is_empty());
