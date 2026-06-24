@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Landing page:** the binary now serves a static page at `/` (logo, tagline,
+  and project link) plus the logo at `/assets/tunnelbana.png`. A new top-level
+  config key `index_html` lets an operator point at their own HTML file to
+  replace the page; absent it, the built-in default is served. The file is read
+  once at boot (resolved relative to the config file, or absolute) and served
+  verbatim as `text/html`; a configured-but-unreadable path aborts startup
+  (fail-fast). See [ADR 0031](docs/adr/0031-custom-index-page.md) and the
+  "[The index page](docs/src/configuration.md)" section.
+
 - **Micro-services:** ported eduID's four SATOSA `scimapi` services
   ([ADR 0030](docs/adr/0030-eduid-scimapi-microservices.md)):
   `pairwiseid` (per-SP `pairwise-id` via `HMAC-SHA256(salt, "{requester}-{subject-id}")@scope`),

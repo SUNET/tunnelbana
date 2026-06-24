@@ -97,5 +97,7 @@ Port all four, matching eduID's config shape and internal attribute names
 - `crates/tunnelbana-core/src/context.rs` - `KEY_NAME_ID_FORMAT`,
   `KEY_REQUESTED_ACCR`, `KEY_REQUESTED_ACCR_COMPARISON`,
   `KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`, `KEY_TARGET_ACCR_COMPARISON`.
-- `https://github.com/SUNET/eduid-backend/src/eduid/satosa/scimapi/{pairwiseid,static_attributes,nameid,accr}.py`
-  - ported behavior.
+- Upstream sources (ported behavior):
+  [`src/eduid/satosa/scimapi/`](https://github.com/SUNET/eduid-backend/tree/main/src/eduid/satosa/scimapi)
+  in `SUNET/eduid-backend` - `pairwiseid.py`, `static_attributes.py`,
+  `nameid.py`, `accr.py`.
