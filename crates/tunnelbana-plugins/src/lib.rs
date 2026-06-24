@@ -59,4 +59,11 @@ pub fn register_all(registry: &mut Registry) {
     );
     registry.register_microservice("idp_hinting", microservices::IdpHinting::build);
     registry.register_microservice("custom_logging", microservices::CustomLogging::build);
+    registry.register_microservice("pairwiseid", microservices::PairwiseId::build);
+    registry.register_microservice(
+        "static_attributes_for_virtual_idp",
+        microservices::StaticAttributesForVirtualIdp::build,
+    );
+    registry.register_microservice("nameid", microservices::NameId::build);
+    registry.register_microservice("accr", microservices::Accr::build);
 }

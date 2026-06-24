@@ -531,8 +531,39 @@ impl Saml2Frontend {
         ctx.state.set_str(&self.name, "acs_url", &processed.acs_url);
         ctx.state
             .set_str(&self.name, "name_id_format", &name_id_format);
+        // Also publish under the shared base namespace so a response-path
+        // micro-service (e.g. `nameid`) can read the resolved format without
+        // knowing this frontend's configured name.
+        ctx.state.set_str(
+            tunnelbana_core::context::STATE_KEY_BASE,
+            tunnelbana_core::context::KEY_NAME_ID_FORMAT,
+            &name_id_format,
+        );
         if let Some(rs) = &relay_state {
             ctx.state.set_str(&self.name, "relay_state", rs);
+        }
+
+        // Surface the SP's RequestedAuthnContext for a request-path
+        // micro-service (e.g. `accr`). A decoration, not state: this is a
+        // single-leg frontend→backend handoff, mirroring `KEY_TARGET_ENTITYID`.
+        if !processed.requested_authn_context_class_refs.is_empty() {
+            ctx.decorate(
+                tunnelbana_core::context::KEY_REQUESTED_ACCR,
+                serde_json::Value::Array(
+                    processed
+                        .requested_authn_context_class_refs
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            if let Some(cmp) = processed.authn_context_comparison {
+                ctx.decorate(
+                    tunnelbana_core::context::KEY_REQUESTED_ACCR_COMPARISON,
+                    serde_json::Value::String(cmp.as_str().to_string()),
+                );
+            }
         }
 
         Ok(FrontendAction::StartAuth {

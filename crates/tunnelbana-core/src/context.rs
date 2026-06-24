@@ -11,6 +11,10 @@ pub const STATE_KEY_BASE: &str = "TUNNELBANA_BASE";
 pub const KEY_REQUESTER: &str = "requester";
 /// Key within [`STATE_KEY_BASE`] holding the routing frontend name.
 pub const KEY_TARGET_FRONTEND: &str = "target_frontend";
+/// Key within [`STATE_KEY_BASE`] holding the resolved SAML NameID format URI,
+/// published by the SAML frontend so a response-path micro-service (e.g.
+/// `nameid`) can shape the subject without knowing the frontend's name.
+pub const KEY_NAME_ID_FORMAT: &str = "name_id_format";
 /// Decoration key carrying the target entity id (upstream IdP/OP) chosen by a
 /// discovery service or hint micro-service (SATOSA: `KEY_TARGET_ENTITYID`).
 pub const KEY_TARGET_ENTITYID: &str = "target_entity_id";
@@ -18,6 +22,20 @@ pub const KEY_TARGET_ENTITYID: &str = "target_entity_id";
 /// rendering a protocol error, set by micro-services (e.g.
 /// `primary_identifier`'s `on_error`).
 pub const KEY_ERROR_REDIRECT: &str = "error_redirect";
+/// Decoration key carrying the SP's requested AuthnContextClassRef URIs
+/// (a JSON array of strings), published by the SAML frontend on the request
+/// path for the `accr` micro-service (SATOSA: `KEY_AUTHN_CONTEXT_CLASS_REF`).
+pub const KEY_REQUESTED_ACCR: &str = "requested_accr";
+/// Decoration key carrying the SP's RequestedAuthnContext `Comparison`
+/// attribute (string: `exact`/`minimum`/`maximum`/`better`).
+pub const KEY_REQUESTED_ACCR_COMPARISON: &str = "requested_accr_comparison";
+/// Decoration key carrying the AuthnContextClassRef URIs (a JSON array of
+/// strings) a request-path micro-service wants forwarded into the outgoing
+/// AuthnRequest. First writer wins, mirroring [`KEY_TARGET_ENTITYID`].
+pub const KEY_TARGET_AUTHN_CONTEXT_CLASS_REF: &str = "target_authn_context_class_ref";
+/// Decoration key carrying the `Comparison` attribute to forward alongside
+/// [`KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`].
+pub const KEY_TARGET_ACCR_COMPARISON: &str = "target_accr_comparison";
 
 /// Carries the inbound request, routing decisions, mutable session state and
 /// ad-hoc decorations between the frontend, micro-services and backend.

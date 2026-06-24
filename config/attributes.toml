@@ -28,6 +28,12 @@ openid = ["sub"]
 saml = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
 
 # SAML subject-id (released by IdPs under the REFEDS Personalized Access
-# entity category instead of eduPersonPrincipalName).
-[attributes.subjectid]
+# entity category instead of eduPersonPrincipalName). The internal name matches
+# eduID's literal `subject-id` so the `pairwiseid`/`nameid` micro-services see it.
+[attributes.subject-id]
 saml = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }
+
+# Pairwise identifier synthesized by the `pairwiseid` micro-service. Mapped so it
+# can also be released to an SP as a SAML attribute when desired.
+[attributes.pairwise-id]
+saml = { names = ["pairwise-id"], oid = "urn:oasis:names:tc:SAML:attribute:pairwise-id", friendly_name = "pairwise-id" }

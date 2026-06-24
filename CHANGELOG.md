@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Micro-services:** ported eduID's four SATOSA `scimapi` services
+  ([ADR 0030](docs/adr/0030-eduid-scimapi-microservices.md)):
+  `pairwiseid` (per-SP `pairwise-id` via `HMAC-SHA256(salt, "{requester}-{subject-id}")@scope`),
+  `static_attributes_for_virtual_idp` (replace/append static attributes by
+  `(requester, virtual_idp)`), `nameid` (SAML subject value from
+  `pairwise-id`/`mail` per requested NameID format), and `accr`
+  (AuthnContextClassRef / LoA negotiation). `accr` adds request/response
+  plumbing: the SAML frontend now publishes the SP's requested ACCR (and the
+  resolved NameID format) for micro-services, and the SAML backend forwards a
+  chosen `RequestedAuthnContext` into the outgoing AuthnRequest via new
+  decorations (`KEY_REQUESTED_ACCR`, `KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`, …).
+  The attribute map gains literal `subject-id` / `pairwise-id` internal names.
+
 - **Performance:** the URL router now resolves literal endpoint paths through an
   exact-match hash map instead of a linear regex scan, making `resolve` O(1) in
   the number of mounted modules. Each frontend mounts five routes, so a proxy

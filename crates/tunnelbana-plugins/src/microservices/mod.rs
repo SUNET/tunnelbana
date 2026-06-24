@@ -22,6 +22,16 @@
 //!   (SATOSA: `AttributeAuthorization`).
 //! - `custom_logging` — append a per-flow JSON audit record to a file
 //!   (SATOSA: `CustomLoggingService`).
+//! - `pairwiseid` — derive a privacy-preserving per-SP `pairwise-id` from the
+//!   `subject-id` attribute (eduID: `GeneratePairwiseId`).
+//! - `static_attributes_for_virtual_idp` — inject/append static attributes
+//!   keyed by `(requester, virtual_idp)` (eduID: `AddStaticAttributesForVirtualIdp`).
+//! - `nameid` — set the SAML subject id from `pairwise-id`/`mail` per the
+//!   requested NameID format (eduID: `nameid`).
+//!
+//! Request + response (Level of Assurance):
+//! - `accr` — filter, minimum-enforce, rewrite and validate the
+//!   AuthnContextClassRef (eduID: `accr`).
 //!
 //! Request-path routing:
 //! - `custom_routing` — pick the backend by requester and/or target issuer
@@ -30,24 +40,32 @@
 //!   decoration (SATOSA: `IdpHinting`). List it *before* `custom_routing` in
 //!   the config so the hint is visible to issuer-based routing rules.
 
+mod accr;
 mod authorization;
 mod generation;
 mod hasher;
 mod logging;
+mod nameid;
+mod pairwiseid;
 mod policy;
 mod primary_identifier;
 mod processor;
 mod routing;
+mod static_virtual_idp;
 mod values;
 
+pub use accr::Accr;
 pub use authorization::AttributeAuthorization;
 pub use generation::AttributeGeneration;
 pub use hasher::Hasher;
 pub use logging::CustomLogging;
+pub use nameid::NameId;
+pub use pairwiseid::PairwiseId;
 pub use policy::{FilterAttributes, StaticAttributes};
 pub use primary_identifier::PrimaryIdentifier;
 pub use processor::AttributeProcessor;
 pub use routing::{CustomRouting, IdpHinting};
+pub use static_virtual_idp::StaticAttributesForVirtualIdp;
 pub use values::{FilterAttributeValues, RenameAttributes};
 
 use std::collections::BTreeMap;

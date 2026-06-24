@@ -923,6 +923,11 @@ impl Saml2Backend {
             }
         };
 
+        // A request-path micro-service (e.g. `accr`) may have selected the
+        // AuthnContextClassRef to forward; absent that, no RequestedAuthnContext
+        // is emitted (preserving prior behavior).
+        let (authn_context_class_refs, authn_context_comparison) = read_target_accr(ctx);
+
         let options = AuthnRequestOptions {
             sp_entity_id: self.sp_entity_id.clone(),
             acs_url: Some(self.acs_url.clone()),
@@ -930,6 +935,8 @@ impl Saml2Backend {
             protocol_binding: Some(constants::BINDING_HTTP_POST.to_string()),
             name_id_format: self.name_id_format.clone(),
             allow_create: true,
+            authn_context_class_refs,
+            authn_context_comparison,
             ..Default::default()
         };
         let req = sp_profile::create_authn_request(&options)
@@ -956,6 +963,31 @@ impl Saml2Backend {
             .map_err(|e| Error::Internal(format!("redirect encode: {e}")))?;
         Ok(Response::redirect(url))
     }
+}
+
+/// Read the AuthnContextClassRef list + comparison a request-path micro-service
+/// (e.g. `accr`) asked to forward into the outgoing AuthnRequest. Returns empty
+/// when nothing was selected, in which case no RequestedAuthnContext is emitted.
+fn read_target_accr(
+    ctx: &Context,
+) -> (
+    Vec<String>,
+    Option<gamlastan::core::protocol::request::AuthnContextComparison>,
+) {
+    let refs = ctx
+        .decoration(tunnelbana_core::context::KEY_TARGET_AUTHN_CONTEXT_CLASS_REF)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let comparison = ctx
+        .decoration(tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON)
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
+    (refs, comparison)
 }
 
 fn subject_type_from_name_id_format(name_id_format: Option<&str>) -> SubjectType {

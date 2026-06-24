@@ -128,6 +128,10 @@ and worth reading as templates. Full config examples are in the
 | `hasher` | response | Salted-hashes the subject id and/or selected attributes per requester. See [below](#hasher-pseudonymizing-subject-ids-and-attributes). |
 | `primary_identifier` | response | Builds a primary identifier from an ordered candidate list. See [below](#primary_identifier-ordered-identifier-candidates). |
 | `custom_logging` | response | Appends a JSON audit record per completed authentication. See [below](#custom_logging-audit-records). |
+| `pairwiseid` | response | Derives a per-SP `pairwise-id` from `subject-id`. See [below](#pairwiseid-per-sp-pairwise-identifiers). |
+| `static_attributes_for_virtual_idp` | response | Injects/appends static attributes per `(requester, virtual_idp)`. See [below](#static_attributes_for_virtual_idp-per-sp-virtual-idp-attributes). |
+| `nameid` | response | Sets the SAML subject id from `pairwise-id`/`mail` per the requested NameID format. See [below](#nameid-saml-subject-value-from-attributes). |
+| `accr` | request + response | Negotiates the AuthnContextClassRef (LoA). See [below](#accr-authncontextclassref-loa-negotiation). |
 | `custom_routing` | request | Pins `ctx.target_backend` from the target issuer or the `requester`, with an optional default. See [below](#routing-the-flow-custom_routing-and-idp_hinting). |
 | `idp_hinting` | request | Lifts an IdP-hint query parameter into `KEY_TARGET_ENTITYID`. See [below](#routing-the-flow-custom_routing-and-idp_hinting). |
 
@@ -669,6 +673,113 @@ audit completeness - monitor the error log). Rotation is external
 (`logrotate` with copy-truncate works; the file is re-opened per write).
 Record only what your data-protection review allows: `attrs` is empty by
 default and nothing else carries attribute values.
+
+## `pairwiseid`: per-SP pairwise identifiers
+
+Turns the released `subject-id` into a stable-but-unlinkable identifier scoped to
+the requesting SP (ADR 0030, eduID `scimapi`). Response path; run it **before**
+`nameid`, which consumes the result for persistent NameIDs.
+
+```toml
+[[microservice]]
+type = "pairwiseid"
+name = "pairwise"
+  [microservice.config]
+  pairwise_salt = "${TUNNELBANA_PAIRWISE_SALT}"   # required, non-empty secret
+```
+
+The value is
+`hex(HMAC-SHA256(pairwise_salt, "{requester}-{subject-id}")) + "@" + scope`,
+where `scope` is the part of `subject-id` after the last `@`. Different SPs get
+different values for the same user; the same SP always gets the same value. Treat
+`pairwise_salt` as a secret - a leak lets an attacker recompute ids for a known
+`(sp, subject-id)`. A missing `subject-id` fails the flow; an empty salt fails at
+startup.
+
+## `static_attributes_for_virtual_idp`: per-(SP, virtual-IdP) attributes
+
+The virtual-IdP-aware cousin of `static_attributes` (ADR 0030, eduID `scimapi`).
+It resolves a recipe by a two-level `(requester, virtual_idp)` lookup - where
+`virtual_idp` is the originating frontend (`ctx.target_frontend`) - each level
+using the usual exact → `""` → `"default"` fallback. Response path.
+
+```toml
+[[microservice]]
+type = "static_attributes_for_virtual_idp"
+name = "vidp-attrs"
+  # REPLACE: overwrite the attribute with these values.
+  [microservice.config.static_attributes_for_virtual_idp.default.SunetIDP]
+  schachomeorganization = ["sunet.se"]
+
+  # APPEND: union with the released values (dedup + sort).
+  [microservice.config.static_appended_attributes_for_virtual_idp.default.SunetIDP]
+  edupersonassurance = [
+    "https://refeds.org/assurance/ATP/ePA-1m",
+    "https://refeds.org/assurance/IAP/local-enterprise",
+  ]
+```
+
+A requester (SP) key wins over `default`; a `virtual_idp` key wins over its
+`default`. With no matching recipe the response passes through unchanged.
+
+## `nameid`: SAML subject value from attributes
+
+Picks the SAML subject *value* per the NameID format the SAML frontend already
+negotiated (ADR 0030, eduID `scimapi`). Response path; list it **after**
+`pairwiseid`. No config.
+
+```toml
+[[microservice]]
+type = "nameid"
+name = "nameid"
+```
+
+The resolved format (published by the SAML frontend) drives the choice:
+
+| NameID format | Subject value |
+| --- | --- |
+| `persistent` | the hash part of `pairwise-id` (before `@`) |
+| `emailAddress` | the `mail` attribute |
+| `transient` / `unspecified` | left to the frontend (a fresh opaque value) |
+
+A missing `pairwise-id` (persistent) or `mail` (emailAddress) fails the flow. On
+an OIDC frontend, where no NameID format is in play, the service is a no-op.
+
+## `accr`: AuthnContextClassRef (LoA) negotiation
+
+The only **request + response** built-in (ADR 0030, eduID `scimapi`). It
+negotiates the AuthnContextClassRef / Level of Assurance between the SP request
+and the upstream IdP.
+
+```toml
+[[microservice]]
+type = "accr"
+name = "accr"
+  [microservice.config]
+  supported_accr_sorted_by_prio = [        # highest priority first; required
+    "https://refeds.org/profile/mfa",
+    "https://refeds.org/profile/sfa",
+    "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
+  ]
+  # default_comparison = "exact"           # forwarded when the SP omits one
+
+  [microservice.config.lowest_accepted_accr_for_virtual_idp]
+  SunetIDP = "https://refeds.org/profile/mfa"   # must be in the supported list
+
+  [microservice.config.internal_accr_rewrite_map]
+  "http://id.swedenconnect.se/loa/1.0/uncertified-loa2" = "http://id.elegnamnden.se/loa/1.0/loa2"
+```
+
+On the **request** path it reads the SP's requested ACCRs (the SAML frontend
+publishes them as the `requested_accr` decoration), drops unsupported values,
+enforces a per-`virtual_idp` minimum range, applies `internal_accr_rewrite_map`
+for the upstream IdP, and forwards the result into the outgoing
+`RequestedAuthnContext` (first writer wins). On the **response** path it reverses
+the rewrite and, if the IdP returned an unrequested value, falls back to the
+highest-priority requested ACCR. It is *lenient*: a too-weak response is
+downgraded-to-best-requested rather than rejected (eduID-faithful). When the
+minimum is enforced, the rewrite map is intentionally not applied to the forced
+range.
 
 ## Writing your own
 

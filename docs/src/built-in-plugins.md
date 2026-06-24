@@ -58,6 +58,10 @@ once the backend has produced attributes. See
 | `hasher` | response | Salted-hash the subject id / attributes per requester. |
 | `primary_identifier` | response | Construct a primary id from ordered candidates. |
 | `custom_logging` | response | Append a per-flow JSON audit record to a file. |
+| `pairwiseid` | response | Derive a privacy-preserving per-SP `pairwise-id` from `subject-id`. |
+| `static_attributes_for_virtual_idp` | response | Inject/append static attributes keyed by `(requester, virtual_idp)`. |
+| `nameid` | response | Set the SAML subject id from `pairwise-id`/`mail` per requested NameID format. |
+| `accr` | request + response | Filter, minimum-enforce, rewrite and validate the AuthnContextClassRef. |
 | `custom_routing` | request | Pick a backend by requester or target issuer. |
 | `idp_hinting` | request | Lift an IdP-hint query parameter into the flow. |
 
@@ -897,6 +901,81 @@ name = "audit"
   [microservice.config]
   log_target = "/var/log/tunnelbana/audit.jsonl"
   attrs      = ["edupersonprincipalname", "mail"]
+```
+
+### `pairwiseid` - privacy-preserving per-SP identifier (ADR 0030)
+
+```toml
+# pairwise-id = hex(HMAC-SHA256(pairwise_salt, "{requester}-{subject-id}"))@scope
+# where scope is the part of subject-id after the last '@'. Requires a
+# subject-id attribute; consumed by `nameid` for the persistent NameID.
+[[microservice]]
+type = "pairwiseid"
+name = "pairwise"
+  [microservice.config]
+  pairwise_salt = "${TUNNELBANA_PAIRWISE_SALT}"   # required, non-empty secret
+```
+
+### `static_attributes_for_virtual_idp` - per-(SP, virtual-IdP) attributes (ADR 0030)
+
+```toml
+# Two-level lookup: requester (SP) then virtual_idp (the originating frontend),
+# each with exact -> "" -> "default" fallback. `static_attributes_*` REPLACES;
+# `static_appended_attributes_*` unions with the released values (dedup+sort).
+[[microservice]]
+type = "static_attributes_for_virtual_idp"
+name = "vidp-attrs"
+  [microservice.config.static_attributes_for_virtual_idp.default.SunetIDP]
+  schachomeorganization = ["sunet.se"]
+
+  [microservice.config.static_appended_attributes_for_virtual_idp.default.SunetIDP]
+  edupersonassurance = [
+    "https://refeds.org/assurance/ATP/ePA-1m",
+    "https://refeds.org/assurance/IAP/local-enterprise",
+  ]
+```
+
+### `nameid` - SAML subject id from attributes (ADR 0030)
+
+```toml
+# Response-path only, no config. Shapes the SAML subject *value* per the NameID
+# format the SAML frontend negotiated:
+#   persistent   -> the hash part of `pairwise-id` (before '@')
+#   emailAddress -> the `mail` attribute
+#   transient    -> left to the frontend (fresh opaque value)
+# On an OIDC frontend (no NameID format) it is a no-op. List AFTER `pairwiseid`.
+[[microservice]]
+type = "nameid"
+name = "nameid"
+```
+
+### `accr` - AuthnContextClassRef negotiation (request + response, ADR 0030)
+
+```toml
+# Request path: keep only supported ACCRs the SP requested, enforce a per
+# virtual-IdP minimum (the supported range from strongest down to the minimum),
+# rewrite for the upstream IdP, and forward into the outgoing AuthnRequest.
+# Response path: reverse the rewrite and, if the IdP returned an unrequested
+# value, fall back to the highest-priority requested ACCR.
+[[microservice]]
+type = "accr"
+name = "accr"
+  [microservice.config]
+  supported_accr_sorted_by_prio = [        # highest priority first; required
+    "https://refeds.org/profile/mfa",
+    "https://refeds.org/profile/sfa",
+    "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
+  ]
+  # default_comparison = "exact"           # forwarded when the SP omits one
+
+  # Per virtual-IdP (frontend name) minimum acceptable ACCR (must be in the
+  # supported list).
+  [microservice.config.lowest_accepted_accr_for_virtual_idp]
+  SunetIDP = "https://refeds.org/profile/mfa"
+
+  # Rewrite SP-facing ACCR -> upstream-understood ACCR (reversed on the way back).
+  [microservice.config.internal_accr_rewrite_map]
+  "http://id.swedenconnect.se/loa/1.0/uncertified-loa2" = "http://id.elegnamnden.se/loa/1.0/loa2"
 ```
 
 ### `custom_routing` - backend selection (request path, ADR 0015)
