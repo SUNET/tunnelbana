@@ -25,15 +25,15 @@ cache_dir            = "/var/lib/tunnelbana/cache"    # optional, disk cache sna
 
 | Key | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `base_url` | ✅ | — | Public base URL. Each module is mounted under `<base_url>/<name>`. |
-| `state_encryption_key` | ✅ | — | Secret used to derive the state-cookie AEAD key and the OIDC token-codec key. Must be ≥ 32 bytes; see [Security](security-state-cookie.md). |
+| `base_url` | ✅ | - | Public base URL. Each module is mounted under `<base_url>/<name>`. |
+| `state_encryption_key` | ✅ | - | Secret used to derive the state-cookie AEAD key and the OIDC token-codec key. Must be ≥ 32 bytes; see [Security](security-state-cookie.md). |
 | `previous_state_encryption_keys` | | `[]` | Old secrets kept for **decryption only**, to allow zero-downtime [key rotation](security-state-cookie.md#algorithm-pinning-and-key-rotation). |
 | `cookie_name` | | `TUNNELBANA_STATE` | Name of the encrypted state cookie. Carries a `__Host-` prefix when `cookie_secure` is on. |
 | `cookie_secure` | | `true` | Sets the cookie `Secure` flag. Set `false` only for local plain-HTTP testing. |
 | `cookie_same_site` | | `None` | The cookie `SameSite` attribute (`None`, `Lax`, or `Strict`). `None` is needed for cross-site SSO POST-back. |
 | `state_cookie_max_age` | | `1800` | Max lifetime of sealed state, in seconds; emitted as `Max-Age` and enforced on unseal. `0` disables the freshness check. |
-| `attributes` | | — | Path to the [attribute map](#the-attribute-map). Without it, no attribute translation happens. |
-| `cache_dir` | | — | Directory for cache persistence snapshots (e.g. federation metadata). |
+| `attributes` | | - | Path to the [attribute map](#the-attribute-map). Without it, no attribute translation happens. |
+| `cache_dir` | | - | Directory for cache persistence snapshots (e.g. federation metadata). |
 
 > **Security:** `state_encryption_key`, the cookie attributes, and the TTL all
 > harden the [stateless state cookie](security-state-cookie.md) that carries
@@ -83,13 +83,15 @@ in the order listed. The per-plugin `config` keys are documented in the
 With more than one `[[backend]]`, every authentication flow is steered to exactly
 one of them. The choice is resolved with this precedence (first match wins):
 
-1. **Frontend pin** — a frontend with `backend = "<name>"` in its `config` always
+1. **Frontend pin** - a frontend with `backend = "<name>"` in its `config` always
    routes its flows to that backend.
-2. **Micro-service routing** — a request-path service such as
-   [`custom_routing`](micro-services.md#custom_routing) (often fed by
-   [`idp_hinting`](micro-services.md#idp_hinting)) sets the target backend per
+2. **Micro-service routing** - a request-path service such as
+   [`custom_routing`](micro-services.md#routing-the-flow-custom_routing-and-idp_hinting)
+   (often fed by
+   [`idp_hinting`](micro-services.md#routing-the-flow-custom_routing-and-idp_hinting))
+   sets the target backend per
    request.
-3. **Default backend** — the **first** `[[backend]]` in the file, used when
+3. **Default backend** - the **first** `[[backend]]` in the file, used when
    nothing above selected one.
 
 The frontend pin is the most direct way to say *"this entry point always talks to
@@ -141,7 +143,7 @@ choose the backend (ADR 0027).
 ### Mount points
 
 A module named `Saml2` is mounted at `<base_url>/Saml2`, and its endpoints hang
-off that prefix — e.g. the SAML backend serves `…/Saml2/acs` and
+off that prefix - e.g. the SAML backend serves `…/Saml2/acs` and
 `…/Saml2/metadata`; the federation OP serves `…/OIDFed/authorization`,
 `…/OIDFed/token`, `…/OIDFed/jwks` and `…/OIDFed/.well-known/openid-federation`.
 
@@ -183,7 +185,7 @@ The `saml2` backend has two upstream-metadata modes:
 
 In MDQ mode, the chosen IdP can arrive on the auth request as an `entityID`
 parameter (a discovery-service return, a frontend-specific handoff, or a
-reverse-proxy rewrite) — or the backend runs the discovery itself when
+reverse-proxy rewrite) - or the backend runs the discovery itself when
 `disco_srv` is configured. The flow:
 
 1. Read `entityID` from the inbound query or form parameters. If it is absent,
@@ -219,8 +221,8 @@ has to be trusted. Without it the backend refuses to start unless
 The `saml2` **frontend** has its own metadata requirement in the other
 direction: downstream SPs must be registered via
 `[frontend.config.metadata]` (local files and/or MDQ with the role forced to
-`"sp"`) before their AuthnRequests are accepted — see the
-[plugin reference](built-in-plugins.md#saml2-frontend--identity-provider).
+`"sp"`) before their AuthnRequests are accepted - see the
+[plugin reference](built-in-plugins.md#saml2-frontend---identity-provider).
 
 ## `${ENV}` interpolation
 

@@ -9,7 +9,7 @@ Published at **https://satosa.labb.sunet.se** (entity_id is the bare host).
 
 ```
   Federation RP                tunnelbana OP (this)              SAML IdP
-       │   OpenID Federation 1.0       ┌──────────────┐   SAML2 SP    │
+       │   OpenID Federation 1.1       ┌──────────────┐   SAML2 SP    │
        │   + OIDC ─────────────────────►│ oidc_federation│─────────────►│
        │   (trust-chain discovery,      │ frontend (OP)  │  (samlidp.   │
        │    private_key_jwt)            │ + saml2        │   labb...)   │

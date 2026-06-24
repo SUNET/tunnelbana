@@ -1,13 +1,20 @@
 # Architecture
 
-tunnelbana is a workspace of four crates:
+tunnelbana is a workspace of four crates, sitting on top of one external library:
 
 | Crate                | Role |
 | -------------------- | ---- |
-| `tunnelbana-core`    | Framework: `Context`, `InternalData`, encrypted state cookie, plugin traits + `Registry`, router, the `Proxy` orchestrator, TOML config, attribute mapping, key loading, TTL/disk cache. **Web-framework agnostic.** |
-| `tunnelbana-oidc`    | Reusable OAuth2 / OIDC / OpenID Federation library on `jose-rs`. No proxy or runtime coupling. |
+| `tunnelbana-core`    | Framework: `Context`, `InternalData`, encrypted state cookie, plugin traits + `Registry`, router, the `Proxy` orchestrator, TOML config, attribute mapping, TTL/disk cache. **Web-framework agnostic.** Re-exports `grindvakt`'s generic primitives (`error`, `http`, `keys`, `mac`, `util`) so the whole workspace shares one type universe. |
+| `tunnelbana-oidc`    | A thin compatibility **shim** that re-exports `grindvakt`'s OAuth2 / OIDC / OpenID Federation surface under the old `tunnelbana_oidc::*` paths. New code should depend on `grindvakt` directly. |
 | `tunnelbana-plugins` | The concrete frontends, backends and micro-services, plus `register_all`. |
 | `tunnelbana`         | The actix-web binary: config load, plugin instantiation, a `reqwest` HTTP client, request/response glue. |
+
+The OAuth2 / OIDC / OpenID Federation protocol layer (and the generic `error`,
+`http`, `keys`, `mac`, `util` primitives) lives **outside** this workspace in the
+standalone [`grindvakt`](https://crates.io/crates/grindvakt) crate, so other
+projects can consume it. It depends only on `jose-rs` plus crypto crates - no
+proxy or runtime coupling; outbound HTTP is injected via
+`grindvakt::http::HttpClient`. SAML lives in the separate `gamlastan` crate.
 
 ## The request flow
 
@@ -48,18 +55,18 @@ The two sides never share protocol concepts. They communicate only through
 
 There are three plugin traits, all in `tunnelbana_core::plugin`:
 
-- **`Frontend`** — speaks a protocol to downstream RPs/SPs. Serves endpoints
+- **`Frontend`** - speaks a protocol to downstream RPs/SPs. Serves endpoints
   (discovery, JWKS, authorization, token, ACS POST, …), starts authentication,
   and renders the final response (a signed SAML Response, an OIDC redirect with
   a code, …).
-- **`Backend`** — speaks a protocol to an upstream IdP/OP. Starts authentication
+- **`Backend`** - speaks a protocol to an upstream IdP/OP. Starts authentication
   (an AuthnRequest redirect, an authorization request) and handles the return
   endpoint (the SAML ACS, the OIDC callback).
-- **`MicroService`** — intercepts the request and/or response path to transform
+- **`MicroService`** - intercepts the request and/or response path to transform
   `InternalData` (inject attributes, filter attributes, pick a backend).
 
 A plugin is selected by a `type` string in config and instantiated by a
-constructor registered in the [`Registry`](writing-a-plugin.md#the-registry).
+constructor registered in the [`Registry`](writing-a-plugin.md#registering-your-plugin).
 
 ## InternalData
 
@@ -80,7 +87,8 @@ pub struct InternalData {
 
 Attributes here use **internal** names (e.g. `mail`, `givenname`). The
 [attribute map](configuration.md#the-attribute-map) translates to and from each
-protocol's external names.
+protocol's external names; [Attributes and transforms](attributes.md) is the
+full narrative, including the response-path transform pipeline.
 
 ## State is a stateless encrypted cookie
 

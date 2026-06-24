@@ -12,7 +12,15 @@ default-theme = "light"
 preferred-dark-theme = "navy"
 no-section-label = false
 git-repository-url = "https://github.com/SUNET/tunnelbana"
+# Widen and tidy the wide reference tables (Key/Required/Default/Meaning).
+additional-css = ["custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]
 enable = true
 level = 1
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

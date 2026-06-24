@@ -1,0 +1,50 @@
+/* tunnelbana docs - readability tweaks.
+ *
+ * Two table shapes need help:
+ *   1. Wide prose tables (Key / Required / Default / Meaning) - mdBook sizes
+ *      them to content, starving the prose column. Letting them fill the text
+ *      column fixes that.
+ *   2. Dense reference tables with long `code` keys (the micro-service scoping
+ *      table) - if code is allowed to wrap, it breaks character-by-character
+ *      into unreadable slivers. Keeping code on one line and letting the table
+ *      scroll horizontally when it cannot fit is far more legible.
+ */
+
+.content table {
+    width: 100%;
+    table-layout: auto;
+    border-collapse: collapse;
+    margin: 1rem 0;
+}
+
+.content table th,
+.content table td {
+    padding: 0.45em 0.7em;
+    vertical-align: top;
+    text-align: left;
+    line-height: 1.45;
+}
+
+.content table thead th {
+    border-bottom: 2px solid var(--table-border-color);
+}
+
+/* Keep inline code in cells on a single line (no character-by-character
+ * wrapping) and a touch smaller so long config keys still fit. When a row is
+ * genuinely too wide, the surrounding .table-wrapper scrolls horizontally. */
+.content table td code,
+.content table th code {
+    white-space: nowrap;
+    font-size: 0.82em;
+}
+
+/* mdBook wraps every table in .table-wrapper; make sure it scrolls rather than
+ * overflowing the page when a dense table is wider than the text column. */
+.content .table-wrapper {
+    overflow-x: auto;
+}
+
+/* Zebra striping makes the wide rows easier to follow across the page. */
+.content table tbody tr:nth-child(even) {
+    background: var(--quote-bg);
+}

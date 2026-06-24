@@ -37,7 +37,7 @@ purely by config + which plugins are loaded:
 | Crate                | Role |
 | -------------------- | ---- |
 | `tunnelbana-core`    | Framework: `Context`, `InternalData`, encrypted state cookie, plugin traits + registry, router, proxy orchestrator, TOML config, attribute mapping, key loading (PEM **and** JWK), TTL/disk cache. |
-| `tunnelbana-oidc`    | Reusable OAuth2 / OIDC / **OpenID Federation 1.0** protocol library on `jose-rs` — OP engine, RP flow, stateless tokens, PKCE, `private_key_jwt`, entity statements, trust-chain resolution, metadata policies. Independent of the proxy and of any web runtime. |
+| `tunnelbana-oidc`    | Reusable OAuth2 / OIDC / **OpenID Federation 1.1** protocol library on `jose-rs` — OP engine, RP flow, stateless tokens, PKCE, `private_key_jwt`, entity statements, trust-chain resolution, metadata policies. Independent of the proxy and of any web runtime. |
 | `tunnelbana-plugins` | Concrete plugins: `oidc` frontend (OP), `oidc` backend (RP), `oidc_federation` frontend, `saml2` frontend (IdP) and backend (SP) via gamlastan, and micro-services (`static_attributes`, `filter_attributes`, `custom_routing`). |
 | `tunnelbana`         | The actix-web binary: config loading, plugin instantiation, `reqwest`-backed HTTP client, request/response glue. |
 
