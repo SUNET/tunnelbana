@@ -1,0 +1,17 @@
+# Keep the Docker build context small and reproducible. The build compiles
+# from source inside the image, so host build artifacts must never be shipped.
+target/
+.build-cache/
+.git/
+.gitignore
+
+# Prebuilt binaries / secrets from the deploy dirs.
+**/bin/
+**/keys/
+**/.env
+.env
+
+# Rendered docs and local scratch — not needed to build the binary.
+docs/book/
+*.md
+!README.md
