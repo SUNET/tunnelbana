@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/SUNET/tunnelbana/main/assets/tunnelbana.png" alt="tunnelbana logo" width="200">
+</p>
+
 # tunnelbana
 
 A high-performance, SATOSA-like **identity proxy** in Rust. It translates between
@@ -137,6 +141,10 @@ A single `proxy.toml` with `[[frontend]]` / `[[backend]]` / `[[microservice]]`
 tables, `${ENV}` interpolation, and an `include` directive per plugin. See
 [`config/proxy.toml`](config/proxy.toml) and
 [`config/attributes.toml`](config/attributes.toml).
+
+## License
+
+BSD-2-Clause
 
 ## Roadmap
 
