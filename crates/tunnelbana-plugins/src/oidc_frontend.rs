@@ -91,7 +91,8 @@ impl OidcFrontend {
 
         let mut metadata = ProviderMetadata::new(issuer.clone(), &module_base);
         // Advertise the signing alg actually in use.
-        metadata.id_token_signing_alg_values_supported = vec![signing_key.alg.as_str().to_string()];
+        metadata.id_token_signing_alg_values_supported =
+            vec![signing_key.alg().as_str().to_string()];
         // When DPoP is enabled, advertise it (RFC 9449 §5.1).
         if dpop.is_some() {
             metadata.dpop_signing_alg_values_supported = vec!["ES256".to_string()];

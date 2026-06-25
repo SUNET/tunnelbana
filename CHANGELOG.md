@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.0 [2026-06-25]
+
+- **Dependencies:** bumped `grindvakt` 0.4 → 0.5 and `jose-rs` 0.3.1 → 0.5.0
+  (shared type universe). grindvakt 0.5 encapsulates `SigningKey` (private key
+  material is no longer a public field; signing goes through the `signer()` /
+  `alg()` / `public_jwk()` accessors). tunnelbana does **not** enable
+  grindvakt's optional `pkcs11` feature, so no HSM/`cryptoki` code is compiled.
+
 - **Landing page:** the binary now serves a static page at `/` (logo, tagline,
   and project link) plus the logo at `/assets/tunnelbana.png`. A new top-level
   config key `index_html` lets an operator point at their own HTML file to

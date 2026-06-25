@@ -44,9 +44,18 @@ impl Default for NetworkConfig {
 }
 
 fn ec_key(kid: &str) -> SigningKey {
+    signing_key_from_jwk_json(&ec_jwk(kid).to_string(), Some("ES256"), None).unwrap()
+}
+
+/// A freshly generated P-256 **private** JWK (with `alg`/`kid` stamped),
+/// suitable for a plugin's `signing_jwk` config. grindvakt 0.5's `SigningKey`
+/// no longer exposes private material, so tests that need the private JWK keep
+/// it here and build the `SigningKey` from it via [`ec_key`].
+fn ec_jwk(kid: &str) -> serde_json::Value {
     let mut jwk = jose_rs::jwk::generate_ec("P-256").unwrap();
     jwk.alg = Some("ES256".into());
-    signing_key_from_jwk_json(&jwk.to_json().unwrap(), Some("ES256"), Some(kid)).unwrap()
+    jwk.kid = Some(kid.into());
+    serde_json::from_str(&jwk.to_json().unwrap()).unwrap()
 }
 
 /// Mocks the federation network: the trust anchor (entity configuration +
@@ -441,20 +450,25 @@ fn location(resp: &Response) -> String {
         .expect("location")
 }
 
-fn network(rp_fed_key: &SigningKey) -> (Arc<MockNetwork>, serde_json::Value, serde_json::Value) {
-    network_with(rp_fed_key, NetworkConfig::default())
+fn network(
+    rp_fed_jwk: &serde_json::Value,
+) -> (Arc<MockNetwork>, serde_json::Value, serde_json::Value) {
+    network_with(rp_fed_jwk, NetworkConfig::default())
 }
 
 fn network_with(
-    rp_fed_key: &SigningKey,
+    rp_fed_jwk: &serde_json::Value,
     config: NetworkConfig,
 ) -> (Arc<MockNetwork>, serde_json::Value, serde_json::Value) {
     let ta_key = ec_key("ta-1");
     let op_key = ec_key("op-1");
     let ta_pub: serde_json::Value =
         serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
-    let fed_jwk: serde_json::Value =
-        serde_json::from_str(&rp_fed_key.jwk.to_json().unwrap()).unwrap();
+    // The RP's federation private signing JWK is fed to the backend as config;
+    // the network serves its public companion.
+    let rp_fed_key =
+        signing_key_from_jwk_json(&rp_fed_jwk.to_string(), Some("ES256"), None).unwrap();
+    let fed_jwk = rp_fed_jwk.clone();
     let net = Arc::new(MockNetwork {
         ta_key,
         op_key,
@@ -468,8 +482,8 @@ fn network_with(
 
 #[tokio::test]
 async fn rp_entity_configuration_is_served_and_self_signed() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let backend = build_backend(net, fed_jwk, ta_pub);
 
     let action = backend
@@ -505,8 +519,8 @@ async fn rp_entity_configuration_is_served_and_self_signed() {
 
 #[tokio::test]
 async fn full_code_flow_via_resolved_op() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net.clone();
     let backend = build_backend(http, fed_jwk, ta_pub);
 
@@ -573,8 +587,8 @@ async fn full_code_flow_via_resolved_op() {
 
 #[tokio::test]
 async fn callback_rejects_state_mismatch_and_wrong_nonce() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net.clone();
     let backend = build_backend(http, fed_jwk, ta_pub);
 
@@ -603,9 +617,7 @@ async fn callback_rejects_state_mismatch_and_wrong_nonce() {
 
 #[tokio::test]
 async fn build_requires_trust_anchor() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let fed_jwk: serde_json::Value =
-        serde_json::from_str(&rp_fed_key.jwk.to_json().unwrap()).unwrap();
+    let fed_jwk: serde_json::Value = ec_jwk("rp-fed-1");
     let config = serde_json::json!({
         "op_entity_id": OP_ID,
         "federation": {
@@ -628,8 +640,8 @@ async fn build_requires_trust_anchor() {
 
 #[tokio::test]
 async fn discovery_redirects_to_service_then_initiate_completes_flow() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net.clone();
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
@@ -681,8 +693,8 @@ async fn discovery_redirects_to_service_then_initiate_completes_flow() {
 
 #[tokio::test]
 async fn discovery_forwards_target_entityid_decoration_as_hint() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net;
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
@@ -716,8 +728,8 @@ async fn discovery_forwards_target_entityid_decoration_as_hint() {
 
 #[tokio::test]
 async fn initiate_rejects_unsolicited_missing_and_untrusted_iss() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net.clone();
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
@@ -754,8 +766,8 @@ async fn initiate_rejects_unsolicited_missing_and_untrusted_iss() {
 
 #[tokio::test]
 async fn initiate_requires_expected_target_link_uri() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net;
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
@@ -802,8 +814,8 @@ async fn initiate_requires_expected_target_link_uri() {
 
 #[tokio::test]
 async fn discovery_entity_configuration_publishes_initiate_login_uri() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let (net, fed_jwk, ta_pub) = network(&rp_fed_key);
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
     let http: Arc<dyn HttpClient> = net;
     let backend = build_discovery_backend(http, fed_jwk, ta_pub);
 
@@ -827,9 +839,7 @@ async fn discovery_entity_configuration_publishes_initiate_login_uri() {
 
 #[tokio::test]
 async fn build_rejects_op_entity_id_and_discovery_together() {
-    let rp_fed_key = ec_key("rp-fed-1");
-    let fed_jwk: serde_json::Value =
-        serde_json::from_str(&rp_fed_key.jwk.to_json().unwrap()).unwrap();
+    let fed_jwk: serde_json::Value = ec_jwk("rp-fed-1");
     let ta_pub: serde_json::Value = fed_jwk.clone();
     let bx = |config| BuildContext {
         name: "OIDFedRP".to_string(),
@@ -881,9 +891,9 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
 
 #[tokio::test]
 async fn start_auth_rejects_wrong_resolve_response_issuer() {
-    let rp_fed_key = ec_key("rp-fed-1");
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network_with(
-        &rp_fed_key,
+        &rp_fed_jwk,
         NetworkConfig {
             resolve_issuer: "https://resolver.example.org",
             ..Default::default()
@@ -900,9 +910,9 @@ async fn start_auth_rejects_wrong_resolve_response_issuer() {
 
 #[tokio::test]
 async fn start_auth_rejects_non_self_issued_trust_anchor_configuration() {
-    let rp_fed_key = ec_key("rp-fed-1");
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network_with(
-        &rp_fed_key,
+        &rp_fed_jwk,
         NetworkConfig {
             ta_ec_subject: "https://wrong-ta.example.org",
             ..Default::default()
@@ -922,9 +932,9 @@ async fn start_auth_rejects_non_self_issued_trust_anchor_configuration() {
 
 #[tokio::test]
 async fn full_code_flow_via_signed_jwks_uri() {
-    let rp_fed_key = ec_key("rp-fed-1");
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network_with(
-        &rp_fed_key,
+        &rp_fed_jwk,
         NetworkConfig {
             key_distribution: KeyDistribution::SignedJwksUri,
             ..Default::default()
@@ -954,9 +964,9 @@ async fn full_code_flow_via_signed_jwks_uri() {
 
 #[tokio::test]
 async fn malformed_inline_jwks_does_not_fall_back_to_jwks_uri() {
-    let rp_fed_key = ec_key("rp-fed-1");
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network_with(
-        &rp_fed_key,
+        &rp_fed_jwk,
         NetworkConfig {
             key_distribution: KeyDistribution::BadInlineWithJwksUri,
             ..Default::default()
