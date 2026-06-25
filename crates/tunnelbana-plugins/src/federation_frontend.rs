@@ -166,7 +166,7 @@ impl FederationFrontend {
         )?;
 
         let mut metadata = ProviderMetadata::new(issuer.clone(), &module_base);
-        metadata.id_token_signing_alg_values_supported = vec![op_key.alg.as_str().to_string()];
+        metadata.id_token_signing_alg_values_supported = vec![op_key.alg().as_str().to_string()];
         // Federation OP advertises automatic registration + request objects.
         metadata.extra.insert(
             "client_registration_types_supported".into(),

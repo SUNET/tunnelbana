@@ -23,9 +23,18 @@ const RP_ID: &str = "https://rp.fed.example.com";
 const RP_REDIRECT: &str = "https://rp.fed.example.com/callback";
 
 fn ec_key(kid: &str) -> SigningKey {
+    signing_key_from_jwk_json(&ec_jwk(kid).to_string(), Some("ES256"), None).unwrap()
+}
+
+/// A freshly generated P-256 **private** JWK (with `alg`/`kid` stamped),
+/// suitable for a plugin's `signing_jwk` config. grindvakt 0.5's `SigningKey`
+/// no longer exposes private material, so tests that need the private JWK keep
+/// it here and build the `SigningKey` from it via [`ec_key`].
+fn ec_jwk(kid: &str) -> serde_json::Value {
     let mut jwk = jose_rs::jwk::generate_ec("P-256").unwrap();
     jwk.alg = Some("ES256".into());
-    signing_key_from_jwk_json(&jwk.to_json().unwrap(), Some("ES256"), Some(kid)).unwrap()
+    jwk.kid = Some(kid.into());
+    serde_json::from_str(&jwk.to_json().unwrap()).unwrap()
 }
 
 /// Mock the federation network: the trust anchor's entity config and resolve
@@ -263,8 +272,7 @@ async fn entity_configuration_is_served_and_self_signed() {
         ta_key: ta_key.clone(),
         rp_key: rp_key.clone(),
     });
-    let op_jwk: serde_json::Value =
-        serde_json::from_str(&ec_key("op-1").jwk.to_json().unwrap()).unwrap();
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
     let ta_pub: serde_json::Value =
         serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
     let proxy = build_proxy(http, op_jwk, ta_pub);
@@ -291,8 +299,7 @@ async fn auto_registration_and_private_key_jwt_flow() {
         ta_key: ta_key.clone(),
         rp_key: rp_key.clone(),
     });
-    let op_jwk: serde_json::Value =
-        serde_json::from_str(&ec_key("op-1").jwk.to_json().unwrap()).unwrap();
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
     let ta_pub: serde_json::Value =
         serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
     let proxy = build_proxy(http, op_jwk, ta_pub);
@@ -364,8 +371,7 @@ fn build_frontend_with_clients(
     clients: serde_json::Value,
     clients_file: Option<&str>,
 ) -> CoreResult<Box<dyn Frontend>> {
-    let op_jwk: serde_json::Value =
-        serde_json::from_str(&ec_key("op-1").jwk.to_json().unwrap()).unwrap();
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
     let ta_pub: serde_json::Value =
         serde_json::from_str(&ec_key("ta-1").public_jwk().to_json().unwrap()).unwrap();
     let mut config = serde_json::json!({

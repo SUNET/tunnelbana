@@ -5,8 +5,10 @@ identity protocols (OpenID Connect, OAuth 2.0, OpenID Federation, and — planne
 SAML 2.0) using a plugin architecture: a **frontend** speaks to downstream
 relying parties / service providers, a **backend** speaks to upstream identity
 / OpenID providers, and the two are decoupled by a protocol-agnostic
-`InternalData` model. Built on [`actix-web`](https://actix.rs), the local
-[`jose-rs`](https://github.com/kushaldas/jose-rs) JOSE library, and (for SAML) the local
+`InternalData` model. Built on [`actix-web`](https://actix.rs), the
+[`grindvakt`](https://github.com/kushaldas/grindvakt) OAuth2 / OIDC / Federation
+library (itself on the [`jose-rs`](https://github.com/kushaldas/jose-rs) JOSE
+library), and (for SAML) the local
 [`gamlastan`](https://github.com/kushaldas/gamlastan) library.
 
 > tunnelbana = like the Stockholm metro - it carries identities between providers, connecting them with performance and ease of use.
@@ -37,7 +39,7 @@ purely by config + which plugins are loaded:
 | Crate                | Role |
 | -------------------- | ---- |
 | `tunnelbana-core`    | Framework: `Context`, `InternalData`, encrypted state cookie, plugin traits + registry, router, proxy orchestrator, TOML config, attribute mapping, key loading (PEM **and** JWK), TTL/disk cache. |
-| `tunnelbana-oidc`    | Reusable OAuth2 / OIDC / **OpenID Federation 1.1** protocol library on `jose-rs` — OP engine, RP flow, stateless tokens, PKCE, `private_key_jwt`, entity statements, trust-chain resolution, metadata policies. Independent of the proxy and of any web runtime. |
+| `tunnelbana-oidc`    | Thin compatibility **shim** re-exporting the [`grindvakt`](https://github.com/kushaldas/grindvakt) protocol surface (OAuth2 / OIDC / **OpenID Federation 1.1** — OP engine, RP flow, stateless tokens, PKCE, `private_key_jwt`, entity statements, trust-chain resolution, metadata policies) so plugins keep using `tunnelbana_oidc::*` paths. New code should depend on `grindvakt` directly. |
 | `tunnelbana-plugins` | Concrete plugins: `oidc` frontend (OP), `oidc` backend (RP), `oidc_federation` frontend, `saml2` frontend (IdP) and backend (SP) via gamlastan, and micro-services (`static_attributes`, `filter_attributes`, `custom_routing`). |
 | `tunnelbana`         | The actix-web binary: config loading, plugin instantiation, `reqwest`-backed HTTP client, request/response glue. |
 
@@ -138,10 +140,13 @@ tables, `${ENV}` interpolation, and an `include` directive per plugin. See
 
 ## Roadmap
 
-- HSM support
-- **OpenID Federation backend** (RP): discovery page, trust-chain resolve of the
-  upstream OP, signed request object, `private_key_jwt` token exchange (the OIDC
-  RP backend already does the non-federation parts).
+- HSM-backed signing keys: grindvakt provides this via its optional `pkcs11`
+  feature; tunnelbana currently does **not** enable it (software keys only).
+- OpenID Federation **RP backend** follow-ups: explicit trust-chain walking
+  (it currently delegates to the trust anchor's resolve endpoint) and RP-side
+  metadata policy. The backend itself — discovery via an external service,
+  signed request objects, and `private_key_jwt` token exchange — already
+  landed (ADR 0024/0025).
 - More micro-services: consent (with UI), account linking, LDAP attribute store.
 - Social OAuth2 backends (GitHub/Google/…).
 - `tera`-rendered discovery/consent pages; disk-backed metadata cache with
