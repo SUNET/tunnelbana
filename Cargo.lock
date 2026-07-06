@@ -3789,6 +3789,7 @@ dependencies = [
  "gamlastan",
  "gamlastan-mdq",
  "jose-rs",
+ "md-5",
  "regex",
  "serde",
  "serde_ignored",

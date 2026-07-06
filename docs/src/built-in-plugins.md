@@ -56,6 +56,7 @@ once the backend has produced attributes. See
 | `attribute_generation` | response | Synthesize attributes from Tera templates. |
 | `attribute_authorization` | response | Reject flows whose attributes fail regex allow/deny rules. |
 | `hasher` | response | Salted-hash the subject id / attributes per requester. |
+| `legacy_eptid` | response | Generate guarded PySAML2-compatible MD5 EPTID values for migration. |
 | `primary_identifier` | response | Construct a primary id from ordered candidates. |
 | `custom_logging` | response | Append a per-flow JSON audit record to a file. |
 | `pairwiseid` | response | Derive a privacy-preserving per-SP `pairwise-id` from `subject-id`. |
@@ -770,7 +771,8 @@ name = "rename"
 ```toml
 # Per-attribute processor chains, run in order. Processors:
 #   regex_sub       match_pattern + replace_pattern ($1/${1} or SATOSA \1)
-#   hash            salt (recommended) + hash_algo ("sha256" default, "sha512")
+#   hash            salt (recommended) + hash_algo ("sha256" default, "sha512";
+#                   "md5" only with allow_legacy_md5 = true)
 #   scope           scope - appends "@scope" to every value
 #   scope_extractor mapped_attribute - copies the @domain into that attribute
 #   scope_remover   strips "@domain" from every value
@@ -851,6 +853,31 @@ name = "pseudonymize"
 
   [microservice.config."https://legacy-sp.example.org"]
   alg = "sha256"          # this SP keeps its historical sha256 pseudonyms
+
+  # MD5 is migration-only and requires an explicit guard:
+  # [microservice.config."https://md5-sp.example.org"]
+  # alg = "md5"
+  # allow_legacy_md5 = true
+```
+
+### `legacy_eptid` - PySAML2 MD5 EPTID compatibility
+
+```toml
+# PySAML2 stock EPTID:
+# idp!sp!md5(user_id || sp || secret). Use only for SPs that already store
+# this value as eduPersonTargetedID or persistent NameID.
+[[microservice]]
+type = "legacy_eptid"
+name = "legacy-eptid"
+  [microservice.config]
+  idp_entity_id = "https://old-idp.example.org/idp.xml"
+  secret = "${LEGACY_PYSAML2_EPTID_SECRET}"
+  allow_legacy_md5 = true
+  source_attribute = "subject-id"       # default; or source_subject_id = true
+  requesters = ["https://legacy-sp.example.org/metadata"]
+  target_attribute = "edupersontargetedid"
+  release_attribute = true              # emit eduPersonTargetedID attribute
+  set_subject_id = false                # true only for legacy persistent NameID
 ```
 
 ### `primary_identifier` - ordered identifier candidates (ADR 0022)

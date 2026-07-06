@@ -53,6 +53,7 @@ pub fn register_all(registry: &mut Registry) {
         microservices::AttributeGeneration::build,
     );
     registry.register_microservice("hasher", microservices::Hasher::build);
+    registry.register_microservice("legacy_eptid", microservices::LegacyEptid::build);
     registry.register_microservice(
         "primary_identifier",
         microservices::PrimaryIdentifier::build,

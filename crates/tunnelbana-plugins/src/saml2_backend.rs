@@ -12,6 +12,8 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use gamlastan::core::assertion::attribute::AttributeValue;
+#[cfg(test)]
+use gamlastan::core::assertion::name_id::NameId;
 use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
 use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
@@ -1118,6 +1120,7 @@ fn attribute_string_values(values: &[AttributeValue]) -> Vec<String> {
             AttributeValue::Integer(i) => Some(i.to_string()),
             AttributeValue::Boolean(b) => Some(b.to_string()),
             AttributeValue::DateTime(s) => Some(s.clone()),
+            AttributeValue::NameId(n) => Some(n.value.clone()),
             _ => None,
         })
         .collect()
@@ -1202,6 +1205,19 @@ mod tests {
             subject_type_from_name_id_format(None),
             SubjectType::Persistent
         );
+    }
+
+    #[test]
+    fn attribute_string_values_preserves_nameid_text() {
+        let values = attribute_string_values(&[AttributeValue::NameId(NameId {
+            value: "idp!sp!legacy".to_string(),
+            format: Some(constants::NAMEID_PERSISTENT.to_string()),
+            name_qualifier: Some("idp".to_string()),
+            sp_name_qualifier: Some("sp".to_string()),
+            sp_provided_id: None,
+        })]);
+
+        assert_eq!(values, vec!["idp!sp!legacy".to_string()]);
     }
 
     #[test]

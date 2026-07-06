@@ -743,11 +743,32 @@ impl Frontend for Saml2Frontend {
                 } else {
                     (basic_name.clone(), constants::ATTRNAME_FORMAT_BASIC, None)
                 };
+                let is_eptid = internal_name.eq_ignore_ascii_case("edupersontargetedid")
+                    || basic_name == "eduPersonTargetedID"
+                    || mapping.oid.as_deref() == Some(gamlastan::attribute_map::EPTID_OID)
+                    || mapping.friendly_name.as_deref() == Some("eduPersonTargetedID");
+                let attribute_values = if is_eptid {
+                    values
+                        .iter()
+                        .cloned()
+                        .map(|value| {
+                            AttributeValue::NameId(NameId {
+                                value,
+                                format: Some(constants::NAMEID_PERSISTENT.to_string()),
+                                name_qualifier: Some(self.idp_entity_id.clone()),
+                                sp_name_qualifier: Some(sp_entity_id.clone()),
+                                sp_provided_id: None,
+                            })
+                        })
+                        .collect()
+                } else {
+                    values.iter().cloned().map(AttributeValue::String).collect()
+                };
                 Some(Attribute {
                     name,
                     name_format: Some(name_format.to_string()),
                     friendly_name,
-                    values: values.iter().cloned().map(AttributeValue::String).collect(),
+                    values: attribute_values,
                 })
             })
             .collect();

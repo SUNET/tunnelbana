@@ -43,6 +43,7 @@ pem = "3"
 sec1 = "0.7"
 base64 = "0.22"
 sha2 = "0.10"
+md-5 = "0.10"
 hkdf = "0.12"
 rand = "0.8"
 
@@ -59,4 +60,3 @@ percent-encoding = "2"
 form_urlencoded = "1"
 regex = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
-
