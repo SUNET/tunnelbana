@@ -23,7 +23,7 @@ use gamlastan::metadata::types::entity_descriptor::{
 };
 use gamlastan::metadata::types::sp::SpSsoDescriptor;
 use gamlastan::profiles::sso::idp as idp_profile;
-use gamlastan::profiles::sso::web_browser::ResponseOptions;
+use gamlastan::profiles::sso::web_browser::{ResponseOptions, ResponseTimes};
 use gamlastan::xml::serialize::SamlSerialize;
 use gamlastan_mdq::{MdqClient, MdqError};
 
@@ -819,7 +819,8 @@ impl Frontend for Saml2Frontend {
             attributes,
         };
 
-        let saml_response = idp_profile::create_response(&options, &name_id, now);
+        let saml_response =
+            idp_profile::create_response(&options, &name_id, ResponseTimes::at(now));
         let xml = saml_response
             .to_xml_string()
             .map_err(|e| Error::Internal(format!("serializing Response: {e}")))?;

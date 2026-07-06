@@ -232,7 +232,11 @@ fn signed_idp_response(req_id: &str) -> String {
         sp_name_qualifier: Some(SP_ENTITY.to_string()),
         sp_provided_id: None,
     };
-    let response = idp_profile::create_response(&options, &name_id, now);
+    let response = idp_profile::create_response(
+        &options,
+        &name_id,
+        gamlastan::profiles::sso::web_browser::ResponseTimes::at(now),
+    );
     let xml = response.to_xml_string().unwrap();
     let assertion_id = response.assertions[0].id.clone();
 

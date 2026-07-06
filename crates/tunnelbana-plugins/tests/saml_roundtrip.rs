@@ -1029,7 +1029,11 @@ fn build_response(
         sp_name_qualifier: Some(SP_ENTITY.to_string()),
         sp_provided_id: None,
     };
-    idp_profile::create_response(&options, &name_id, now)
+    idp_profile::create_response(
+        &options,
+        &name_id,
+        gamlastan::profiles::sso::web_browser::ResponseTimes::at(now),
+    )
 }
 
 fn idp_signer_and_cert() -> (gamlastan::crypto::SamlSigner, String) {

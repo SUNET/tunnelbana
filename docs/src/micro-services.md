@@ -194,7 +194,7 @@ This table is the quick reference for which services can be scoped and how:
 | `primary_identifier` | requester or provider | none (exact) | IdP override first, **SP override wins** | `override."<entity id>"` |
 | `custom_routing` | requester and/or target issuer | (rule list) | first matching rule, else `default_backend` | `rule` / `issuer_rule` |
 | `static_attributes`, `rename_attributes`, `attribute_processor`, `custom_logging`, `idp_hinting` | - | - | apply uniformly to every flow | - |
-| `legacy_eptid` | - | `requesters` allowlist | apply to every flow unless allowlisted | - |
+| `legacy_eptid` | - | `requesters` allowlist | apply to all flows when allowlist is empty; otherwise only allowlisted requesters | - |
 
 Note the **order of the two keys flips** between families: the authorization and
 generation services nest *requester then provider*, while
