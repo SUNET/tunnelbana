@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use md5::Md5;
 use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256, Sha512};
@@ -28,6 +29,9 @@ struct ProcessorSpec {
     /// `hash`: digest algorithm, `sha256` (default) or `sha512`.
     #[serde(default)]
     hash_algo: Option<String>,
+    /// `hash`: explicit guard required when `hash_algo = "md5"`.
+    #[serde(default)]
+    allow_legacy_md5: bool,
     /// `hash`: salt appended to the value before hashing.
     #[serde(default)]
     salt: Option<String>,
@@ -55,13 +59,18 @@ struct AttributeProcessorConfig {
 
 #[derive(Clone, Copy)]
 enum HashAlgo {
+    Md5,
     Sha256,
     Sha512,
 }
 
 impl HashAlgo {
-    fn parse(s: &str, plugin_name: &str) -> Result<Self> {
+    fn parse(s: &str, plugin_name: &str, allow_legacy_md5: bool) -> Result<Self> {
         match s {
+            "md5" if allow_legacy_md5 => Ok(HashAlgo::Md5),
+            "md5" => Err(Error::Config(format!(
+                "attribute_processor {plugin_name}: hash_algo=md5 requires allow_legacy_md5 = true"
+            ))),
             "sha256" => Ok(HashAlgo::Sha256),
             "sha512" => Ok(HashAlgo::Sha512),
             other => Err(Error::Config(format!(
@@ -72,6 +81,12 @@ impl HashAlgo {
 
     fn digest(&self, value: &str, salt: &str) -> String {
         match self {
+            HashAlgo::Md5 => {
+                let mut h = Md5::new();
+                h.update(value.as_bytes());
+                h.update(salt.as_bytes());
+                format!("{:x}", h.finalize())
+            }
             HashAlgo::Sha256 => {
                 let mut h = Sha256::new();
                 h.update(value.as_bytes());
@@ -245,7 +260,15 @@ impl AttributeProcessor {
                         let algo = HashAlgo::parse(
                             spec.hash_algo.as_deref().unwrap_or("sha256"),
                             &bx.name,
+                            spec.allow_legacy_md5,
                         )?;
+                        if matches!(algo, HashAlgo::Md5) {
+                            tracing::warn!(
+                                "attribute_processor {}: legacy MD5 compatibility enabled for attribute {}",
+                                bx.name,
+                                rule.attribute
+                            );
+                        }
                         processors.push(Processor::Hash {
                             algo,
                             salt: spec.salt.clone().unwrap_or_default(),
@@ -375,6 +398,42 @@ mod tests {
         let data = proc.process_response(&mut ctx(), data).await.unwrap();
         // sha256("anna" || "pepper")
         let mut h = Sha256::new();
+        h.update(b"annapepper");
+        assert_eq!(
+            data.attr_first("uid"),
+            Some(format!("{:x}", h.finalize()).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_processor_legacy_md5_requires_guard_and_hashes() {
+        assert!(AttributeProcessor::build(&bx(
+            "proc",
+            serde_json::json!({
+                "process": [{
+                    "attribute": "uid",
+                    "processors": [{ "name": "hash", "hash_algo": "md5", "salt": "pepper" }]
+                }]
+            }),
+        ))
+        .is_err());
+
+        let proc = build(serde_json::json!({
+            "process": [{
+                "attribute": "uid",
+                "processors": [{
+                    "name": "hash",
+                    "hash_algo": "md5",
+                    "allow_legacy_md5": true,
+                    "salt": "pepper"
+                }]
+            }]
+        }));
+
+        let mut data = InternalData::default();
+        data.set_attr("uid", "anna");
+        let data = proc.process_response(&mut ctx(), data).await.unwrap();
+        let mut h = Md5::new();
         h.update(b"annapepper");
         assert_eq!(
             data.attr_first("uid"),

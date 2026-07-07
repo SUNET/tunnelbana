@@ -16,6 +16,8 @@
 //!   Mustache).
 //! - `hasher` — salted-hash the subject id and/or selected attributes per
 //!   requester (SATOSA: `Hasher`).
+//! - `legacy_eptid` — generate PySAML2-compatible MD5
+//!   `eduPersonTargetedID` values behind an explicit migration guard.
 //! - `primary_identifier` — construct a primary identifier from an ordered
 //!   candidate list (SATOSA: `PrimaryIdentifier`).
 //! - `attribute_authorization` — regex-based allow/deny authorization
@@ -44,6 +46,7 @@ mod accr;
 mod authorization;
 mod generation;
 mod hasher;
+mod legacy_eptid;
 mod logging;
 mod nameid;
 mod pairwiseid;
@@ -58,6 +61,7 @@ pub use accr::Accr;
 pub use authorization::AttributeAuthorization;
 pub use generation::AttributeGeneration;
 pub use hasher::Hasher;
+pub use legacy_eptid::LegacyEptid;
 pub use logging::CustomLogging;
 pub use nameid::NameId;
 pub use pairwiseid::PairwiseId;

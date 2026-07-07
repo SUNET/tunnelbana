@@ -37,6 +37,31 @@ fn ec_jwk(kid: &str) -> serde_json::Value {
     serde_json::from_str(&jwk.to_json().unwrap()).unwrap()
 }
 
+fn subordinate_statement(
+    key: &SigningKey,
+    issuer: &str,
+    subject: &str,
+    subject_jwks: &jose_rs::jwk::JwkSet,
+) -> String {
+    let now = tunnelbana_core::util::now_secs();
+    let mut claims = jose_rs::jwt::Claims {
+        iss: Some(issuer.to_string()),
+        sub: Some(subject.to_string()),
+        iat: Some(now),
+        exp: Some(now + 3600),
+        ..Default::default()
+    };
+    claims
+        .extra
+        .insert("jwks".into(), serde_json::to_value(subject_jwks).unwrap());
+    tunnelbana_oidc::jwt::sign(
+        key,
+        &claims,
+        Some(tunnelbana_oidc::federation::ENTITY_STATEMENT_TYP),
+    )
+    .unwrap()
+}
+
 /// Mock the federation network: the trust anchor's entity config and resolve
 /// endpoint, both signed by the TA key.
 struct MockFederation {
@@ -98,6 +123,15 @@ impl HttpClient for MockFederation {
                         3600,
                     )
                     .unwrap(),
+                    // TA-issued subordinate statement for the RP. grindvakt
+                    // 0.6 validates each link in the chain, not just the
+                    // endpoints.
+                    subordinate_statement(
+                        &self.ta_key,
+                        TA_ID,
+                        RP_ID,
+                        &self.rp_key.to_public_jwks()
+                    ),
                     // Chain tail: the trust anchor's entity configuration.
                     tunnelbana_oidc::federation::build_entity_configuration(
                         &self.ta_key,

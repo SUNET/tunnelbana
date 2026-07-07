@@ -126,6 +126,7 @@ and worth reading as templates. Full config examples are in the
 | `attribute_generation` | response | Synthesizes attributes from Tera templates over the existing set. See [below](#attribute_generation-synthesized-attributes). |
 | `attribute_authorization` | response | Rejects the authentication unless response attributes satisfy regex allow/deny rules. See [below](#attribute_authorization-regex-allowdeny-rules). |
 | `hasher` | response | Salted-hashes the subject id and/or selected attributes per requester. See [below](#hasher-pseudonymizing-subject-ids-and-attributes). |
+| `legacy_eptid` | response | Generates guarded PySAML2-compatible MD5 EPTID values for migration. See [below](#legacy_eptid-pysaml2-md5-eptid-compatibility). |
 | `primary_identifier` | response | Builds a primary identifier from an ordered candidate list. See [below](#primary_identifier-ordered-identifier-candidates). |
 | `custom_logging` | response | Appends a JSON audit record per completed authentication. See [below](#custom_logging-audit-records). |
 | `pairwiseid` | response | Derives a per-SP `pairwise-id` from `subject-id`. See [below](#pairwiseid-per-sp-pairwise-identifiers). |
@@ -193,6 +194,7 @@ This table is the quick reference for which services can be scoped and how:
 | `primary_identifier` | requester or provider | none (exact) | IdP override first, **SP override wins** | `override."<entity id>"` |
 | `custom_routing` | requester and/or target issuer | (rule list) | first matching rule, else `default_backend` | `rule` / `issuer_rule` |
 | `static_attributes`, `rename_attributes`, `attribute_processor`, `custom_logging`, `idp_hinting` | - | - | apply uniformly to every flow | - |
+| `legacy_eptid` | - | `requesters` allowlist | apply to all flows when allowlist is empty; otherwise only allowlisted requesters | - |
 
 Note the **order of the two keys flips** between families: the authorization and
 generation services nest *requester then provider*, while
@@ -332,8 +334,10 @@ Behavior notes:
 - **`hash`** hashes *every* value as `hex(hash(value || salt))` (SATOSA's
   upstream `HashProcessor` reads the salt from the wrong config key and only
   hashes the first value - neither bug is reproduced, so hashes can differ
-  from a buggy SATOSA deployment; see ADR 0020). Only `sha256`/`sha512` are
-  accepted; `md5`/`sha1` are startup errors.
+  from a buggy SATOSA deployment; see ADR 0020). `sha256`/`sha512` are the
+  normal algorithms. `md5` is accepted only with `allow_legacy_md5 = true` on
+  that processor, for migration of already-issued pseudonyms; `sha1` remains a
+  startup error.
 - **`scope_extractor`** takes the domain of the **first** scoped value and
   *overwrites* `mapped_attribute` with it; if no value contains `@` it does
   nothing.
@@ -544,11 +548,52 @@ name = "pseudonymize"
 - Use **different salts per SP** when pseudonyms must not be correlatable
   across SPs; the same salt everywhere yields the same pseudonym everywhere.
 - `sha256`/`sha512` only; a missing default section or missing salt fails at
-  startup. Remember plain salted hashing of low-entropy inputs (emails) is
+  startup unless `alg = "md5"` is paired with `allow_legacy_md5 = true`.
+  MD5 is a migration-only compatibility mode for already-issued SATOSA
+  pseudonyms. Remember plain salted hashing of low-entropy inputs (emails) is
   enumerable by an adversary who knows the salt - treat the salt as a secret
   (`${ENV}` interpolation, not a literal in a committed config).
 - For hashing a single attribute mid-chain without touching `subject_id`,
   the `hash` *processor* in `attribute_processor` is the lighter tool.
+
+## `legacy_eptid`: PySAML2 MD5 EPTID compatibility
+
+Generates the stock PySAML2 `saml2.eptid.Eptid` value:
+`idp!sp!md5(user_id || sp || secret)`. Response path. This is for SPs that
+already store that legacy value as `eduPersonTargetedID` or persistent NameID.
+It is not a new-deployment identifier profile.
+
+```toml
+[[microservice]]
+type = "legacy_eptid"
+name = "legacy-eptid"
+  [microservice.config]
+  idp_entity_id = "https://old-idp.example.org/idp.xml"
+  secret = "${LEGACY_PYSAML2_EPTID_SECRET}"
+  allow_legacy_md5 = true
+  source_attribute = "subject-id"      # default
+  requesters = ["https://legacy-sp.example.org/metadata"]
+  target_attribute = "edupersontargetedid"
+  release_attribute = true
+  set_subject_id = false
+```
+
+- `allow_legacy_md5 = true` is required; without it startup fails.
+- `source_attribute` supplies PySAML2's `user_id` argument. Set
+  `source_subject_id = true` to use `InternalData.subject_id` instead.
+- The SP entityID defaults to `InternalData.requester`; use `sp_entity_id` only
+  for a fixed override.
+- `requesters` is an optional allowlist. Leave it empty only when every SP on
+  the flow has been audited for legacy EPTID behavior.
+- `release_attribute = true` writes the value to `target_attribute`. When that
+  attribute maps to `eduPersonTargetedID`, the SAML frontend emits it as a
+  NameID-valued attribute.
+- `set_subject_id = true` replaces the downstream subject id and marks it
+  persistent; use this only when the SP's account key is the legacy persistent
+  NameID.
+
+See [Legacy identifier compatibility](legacy-identifiers.md) for migration
+examples and how this differs from `pairwiseid` + `nameid`.
 
 ## `primary_identifier`: ordered identifier candidates
 

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use md5::Md5;
 use serde::Deserialize;
 use sha2::{Digest, Sha256, Sha512};
 use tunnelbana_core::context::Context;
@@ -16,6 +17,8 @@ struct RawEntry {
     salt: Option<String>,
     #[serde(default)]
     alg: Option<String>,
+    #[serde(default)]
+    allow_legacy_md5: Option<bool>,
     #[serde(default)]
     subject_id: Option<bool>,
     #[serde(default)]
@@ -32,13 +35,18 @@ struct HasherEntry {
 
 #[derive(Clone, Copy)]
 enum HashAlg {
+    Md5,
     Sha256,
     Sha512,
 }
 
 impl HashAlg {
-    fn parse(s: &str, name: &str) -> Result<Self> {
+    fn parse(s: &str, name: &str, allow_legacy_md5: bool) -> Result<Self> {
         match s {
+            "md5" if allow_legacy_md5 => Ok(HashAlg::Md5),
+            "md5" => Err(Error::Config(format!(
+                "hasher {name}: alg=md5 requires allow_legacy_md5 = true"
+            ))),
             "sha256" => Ok(HashAlg::Sha256),
             "sha512" => Ok(HashAlg::Sha512),
             other => Err(Error::Config(format!(
@@ -51,6 +59,12 @@ impl HashAlg {
 /// SATOSA's `util.hash_data`: `hex(hash(value || salt))`.
 fn hash_data(alg: HashAlg, salt: &str, value: &str) -> String {
     match alg {
+        HashAlg::Md5 => {
+            let mut h = Md5::new();
+            h.update(value.as_bytes());
+            h.update(salt.as_bytes());
+            format!("{:x}", h.finalize())
+        }
         HashAlg::Sha256 => {
             let mut h = Sha256::new();
             h.update(value.as_bytes());
@@ -92,16 +106,27 @@ impl Hasher {
             .ok_or_else(|| {
                 Error::Config(format!("hasher {}: default section needs a salt", bx.name))
             })?;
-        let default_alg = HashAlg::parse(defaults.alg.as_deref().unwrap_or("sha512"), &bx.name)?;
+        let default_alg_name = defaults.alg.as_deref().unwrap_or("sha512");
+        let default_allow_legacy_md5 = defaults.allow_legacy_md5.unwrap_or(false);
+        HashAlg::parse(default_alg_name, &bx.name, default_allow_legacy_md5)?;
         let default_subject_id = defaults.subject_id.unwrap_or(true);
         let default_attributes = defaults.attributes.clone().unwrap_or_default();
 
         let mut entries = BTreeMap::new();
         for (requester, entry) in &raw {
-            let alg = match &entry.alg {
-                Some(a) => HashAlg::parse(a, &bx.name)?,
-                None => default_alg,
-            };
+            let allow_legacy_md5 = entry.allow_legacy_md5.unwrap_or(default_allow_legacy_md5);
+            let alg = HashAlg::parse(
+                entry.alg.as_deref().unwrap_or(default_alg_name),
+                &bx.name,
+                allow_legacy_md5,
+            )?;
+            if matches!(alg, HashAlg::Md5) {
+                tracing::warn!(
+                    "hasher {}: legacy MD5 compatibility enabled for requester {:?}",
+                    bx.name,
+                    requester
+                );
+            }
             entries.insert(
                 requester.clone(),
                 HasherEntry {
@@ -173,6 +198,12 @@ mod tests {
         format!("{:x}", h.finalize())
     }
 
+    fn md5_hex(input: &str) -> String {
+        let mut h = Md5::new();
+        h.update(input.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
     #[tokio::test]
     async fn hashes_subject_id_and_listed_attributes_with_defaults() {
         let hasher = Hasher::build(&bx(
@@ -236,5 +267,35 @@ mod tests {
             serde_json::json!({ "": { "salt": "x", "alg": "md5" } })
         ))
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_md5_requires_guard_and_hashes_when_enabled() {
+        let hasher = Hasher::build(&bx(
+            "hasher",
+            serde_json::json!({
+                "": {
+                    "salt": "abcdef",
+                    "alg": "md5",
+                    "allow_legacy_md5": true,
+                    "attributes": ["edupersontargetedid"]
+                }
+            }),
+        ))
+        .unwrap();
+
+        let mut data = response_from("https://sp.example");
+        data.subject_id = Some("anna".into());
+        data.set_attr("edupersontargetedid", "tid");
+        let data = hasher.process_response(&mut ctx(), data).await.unwrap();
+
+        assert_eq!(
+            data.subject_id.as_deref(),
+            Some(md5_hex("annaabcdef").as_str())
+        );
+        assert_eq!(
+            data.attr_first("edupersontargetedid"),
+            Some(md5_hex("tidabcdef").as_str())
+        );
     }
 }

@@ -168,7 +168,11 @@ fn make_response(name_id: Option<NameIdOrEncryptedId>) -> SamlResponse {
         sp_name_qualifier: Some(SP_ENTITY.to_string()),
         sp_provided_id: None,
     };
-    let mut response = idp_profile::create_response(&options, &plain_name_id, chrono::Utc::now());
+    let mut response = idp_profile::create_response(
+        &options,
+        &plain_name_id,
+        gamlastan::profiles::sso::web_browser::ResponseTimes::at(chrono::Utc::now()),
+    );
     if let Some(replacement) = name_id {
         response.assertions[0].subject.as_mut().unwrap().name_id = Some(replacement);
     }
