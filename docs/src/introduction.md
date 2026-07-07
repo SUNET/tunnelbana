@@ -1,5 +1,7 @@
 # Introduction
 
+<img class="intro-logo" src="assets/tunnelbana.png" alt="tunnelbana logo">
+
 **tunnelbana** is a high-performance identity proxy written in Rust. Like
 [SATOSA](https://github.com/IdentityPython/SATOSA), it sits between identity
 protocols and translates between them: a **frontend** speaks to downstream
