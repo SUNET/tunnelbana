@@ -17,7 +17,9 @@ use gamlastan::core::assertion::name_id::NameId;
 use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
 use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
-use gamlastan::crypto::{KeyUsage, KeysManager, SamlDecryptor, SamlSigner, SamlVerifier};
+use gamlastan::crypto::{
+    KeyUsage, KeysManager, SamlDecryptor, SamlSigner, SamlVerifier, VerifyResult,
+};
 use gamlastan::metadata::EntityDescriptor;
 use gamlastan::profiles::sso::sp as sp_profile;
 use gamlastan::profiles::sso::web_browser::{self, AuthnRequestOptions};
@@ -522,30 +524,38 @@ impl Saml2Backend {
         let cleartext_assertions_xml =
             cleartext_assertion_sources(&doc, response.assertions.len())?;
 
-        // 2) Signature acceptance rule, spanning the encryption boundary
-        //    (supersedes plain want_assertions_or_response_signed): either the
-        //    Response envelope is protected and verifies — by an XML signature
-        //    on the Response element or by a valid Redirect-binding detached
-        //    signature over the whole message, both of which cover any
-        //    EncryptedAssertion ciphertext too — or *every* assertion
-        //    (cleartext and decrypted alike) carries its own signature that
-        //    verifies on the XML it travelled in: the original subtree for
-        //    cleartext assertions, the decrypted plaintext for encrypted ones.
-        let envelope_verified = if response.base.has_signature {
-            match verifier
-                .verify_enveloped(&xml)
-                .map_err(|e| Error::Authn(format!("signature verification failed: {e}")))?
-            {
-                gamlastan::crypto::VerifyResult::Invalid { reason } => {
-                    return Err(Error::Authn(format!(
-                        "SAML Response signature is not valid: {reason}"
-                    )));
-                }
-                _ => true,
-            }
-        } else {
-            binding_signature_verified
-        };
+        // 2) Signature acceptance rule, spanning the encryption boundary.
+        //
+        //    The Response envelope is protected when either the Response XML
+        //    signature verifies or the HTTP-Redirect binding signature verifies.
+        //    That is enough for response-envelope integrity, but gamlastan 0.7's
+        //    direct assertion-signature policy also requires every consumed
+        //    Assertion that carries `<ds:Signature>` markup to have its own
+        //    verified reference ID. `verify_all_enveloped` is therefore used for
+        //    all cleartext XML signatures; `verify_enveloped` only reports the
+        //    first signature and would miss a following Assertion signature.
+        let mut verified_signed_ids = Vec::new();
+        if response.base.has_signature || response.assertions.iter().any(|a| a.has_signature) {
+            extend_verified_xml_signature_ids(
+                &mut verified_signed_ids,
+                verifier,
+                &xml,
+                &response.base.id,
+            )?;
+        }
+        if binding_signature_verified {
+            // The detached Redirect signature covers the SAMLResponse query
+            // parameter bytes, so treat it as proof for the Response object.
+            // It is not proof of a direct Assertion XML signature.
+            add_verified_signed_id(&mut verified_signed_ids, &response.base.id);
+        }
+
+        // Only an XML signature whose reference targets the Response ID
+        // satisfies gamlastan's response-signature validation check. A detached
+        // Redirect signature is tracked separately through `envelope_verified`.
+        let response_xml_signature_verified =
+            response.base.has_signature && verified_signed_ids.contains(&response.base.id);
+        let envelope_verified = binding_signature_verified || response_xml_signature_verified;
 
         if !envelope_verified {
             // Cleartext assertions must each be signed and verified against the
@@ -558,7 +568,7 @@ impl Saml2Backend {
                 ));
             }
             for (index, assertion_xml) in cleartext_assertions_xml.iter().enumerate() {
-                if let gamlastan::crypto::VerifyResult::Invalid { reason } = verifier
+                if let VerifyResult::Invalid { reason } = verifier
                     .verify_enveloped(&standalone_assertion_document(assertion_xml))
                     .map_err(|e| Error::Authn(format!("signature verification failed: {e}")))?
                 {
@@ -570,10 +580,11 @@ impl Saml2Backend {
             }
         }
 
-        // Decrypt EncryptedAssertions and splice them into the assertion
-        // list. When neither an XML Response signature nor a Redirect-binding
-        // signature verified, each decrypted assertion must carry a signature
-        // that verifies on its decrypted plaintext.
+        // Decrypt EncryptedAssertions and splice them into the assertion list.
+        // A decrypted assertion with signature markup is verified on its
+        // plaintext and contributes its own reference ID. When neither an XML
+        // Response signature nor a Redirect-binding signature verified, every
+        // decrypted assertion must carry such a verified signature.
         let encrypted = std::mem::take(&mut response.encrypted_assertions);
         if !encrypted.is_empty() && self.decryptors.is_empty() {
             return Err(Error::Authn(
@@ -594,20 +605,17 @@ impl Saml2Backend {
             .map_err(|e| Error::Authn(format!("parsing decrypted assertion: {e}")))?
             .to_owned();
 
-            if !envelope_verified {
-                if !assertion.has_signature {
-                    return Err(Error::Authn(
-                        "SAML Response is unsigned and a decrypted assertion is unsigned".into(),
-                    ));
-                }
-                if let gamlastan::crypto::VerifyResult::Invalid { reason } = verifier
-                    .verify_enveloped(&plaintext)
-                    .map_err(|e| Error::Authn(format!("signature verification failed: {e}")))?
-                {
-                    return Err(Error::Authn(format!(
-                        "decrypted assertion signature is not valid: {reason}"
-                    )));
-                }
+            if assertion.has_signature {
+                extend_verified_xml_signature_ids(
+                    &mut verified_signed_ids,
+                    verifier,
+                    &plaintext,
+                    &assertion.id,
+                )?;
+            } else if !envelope_verified {
+                return Err(Error::Authn(
+                    "SAML Response is unsigned and a decrypted assertion is unsigned".into(),
+                ));
             }
             response.assertions.push(assertion);
         }
@@ -657,22 +665,12 @@ impl Saml2Backend {
             }
         };
         let response_signature_verified = if response.base.has_signature {
-            Some(true)
+            Some(response_xml_signature_verified)
         } else {
             None
         };
         // Tell the validator (check 6) exactly which IDs we cryptographically
         // verified above, so it accepts only signatures we actually proved.
-        // When the envelope verified (Response XML signature or Redirect-binding
-        // detached signature over the whole message), the Response ID covers
-        // every contained assertion. Otherwise each assertion — cleartext and
-        // decrypted alike — was individually verified against the XML it
-        // travelled in, so list each assertion ID.
-        let verified_signed_ids: Vec<String> = if envelope_verified {
-            vec![response.base.id.clone()]
-        } else {
-            response.assertions.iter().map(|a| a.id.clone()).collect()
-        };
         let verified_signed_id_refs: Vec<&str> =
             verified_signed_ids.iter().map(String::as_str).collect();
         let params = ValidationParams {
@@ -1046,6 +1044,63 @@ fn decode_acs_response(
     } else {
         Err(Error::BadRequest("missing SAMLResponse".into()))
     }
+}
+
+/// Add a verified SAML object ID once.
+///
+/// The validator receives an unordered set-like list of IDs whose signatures
+/// were already verified. Keep first-seen order for predictable diagnostics,
+/// while avoiding duplicates when a Response has both XML and Redirect-binding
+/// proof for the same target.
+fn add_verified_signed_id(ids: &mut Vec<String>, id: &str) {
+    if !ids.iter().any(|existing| existing == id) {
+        ids.push(id.to_string());
+    }
+}
+
+/// Verify every enveloped XML signature in `xml` and append referenced IDs.
+///
+/// `verify_enveloped` reports only the first signature in document order. ACS
+/// validation needs all reference targets so gamlastan can distinguish "the
+/// Response was signed" from "this exact Assertion was signed". The
+/// `empty_uri_target_id` parameter handles the XML-DSig empty-reference case,
+/// where the root element of the supplied document is the signed object.
+fn extend_verified_xml_signature_ids(
+    ids: &mut Vec<String>,
+    verifier: &SamlVerifier,
+    xml: &str,
+    empty_uri_target_id: &str,
+) -> Result<()> {
+    let verify_results = verifier
+        .verify_all_enveloped(xml)
+        .map_err(|e| Error::Authn(format!("signature verification failed: {e}")))?;
+
+    for verify_result in verify_results {
+        let VerifyResult::Valid { references, .. } = verify_result else {
+            let reason = match verify_result {
+                VerifyResult::Invalid { reason } => reason,
+                VerifyResult::Valid { .. } => unreachable!(),
+            };
+            return Err(Error::Authn(format!(
+                "SAML XML signature is not valid: {reason}"
+            )));
+        };
+
+        for reference in references {
+            // Same-document references are normally "#ID". An empty URI signs
+            // the root of `xml`, supplied by the caller as `empty_uri_target_id`.
+            let id = if reference.uri.is_empty() {
+                Some(empty_uri_target_id)
+            } else {
+                reference.uri.strip_prefix('#')
+            };
+            if let Some(id) = id {
+                add_verified_signed_id(ids, id);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cleartext_assertion_sources<'xml>(
