@@ -2,6 +2,98 @@
 
 ## Unreleased
 
+## 0.2.0 [2026-07-07]
+
+- **Security / SAML dependency stack:** bumped `gamlastan` and `gamlastan-mdq`
+  from 0.5.x to 0.7.x, which brings in `bergshamra` 0.7.0 and `uppsala`
+  0.9.0. This is the main security update in this release.
+
+- **Uppsala 0.9.0 hardening:** the XML parser now fuses after direct pull-parser
+  errors, validates computed XSLT element/attribute names as QNames, rejects
+  trailing XPath tokens and depth-bypassing flat operator chains, indexes XSD
+  identity constraints to avoid quadratic duplicate/keyref scans, rejects
+  duplicate top-level `xs:group` / `xs:attributeGroup` definitions, exposes
+  opt-in XSLT result-tree/output byte caps, normalizes retained XML declaration
+  encodings from `parse_bytes()` to UTF-8, and includes the 0.8 reserved
+  `xml`/`xmlns` namespace-binding rejection.
+
+- **Bergshamra 0.7.0 hardening:** XML Encryption PBKDF2 iteration counts are
+  capped before key derivation, malformed RSA `KeyValue` CryptoBinary values
+  return errors instead of panicking, XML-DSig verification requires local
+  Reference digest coverage by default, unsafe local Reference URI fallback
+  values are rejected, detached reference debug output is redacted, raw inline
+  `KeyValue` / `DEREncodedKeyValue` keys are rejected when trust anchors are
+  configured, and duplicate XML ID values fail closed instead of overwriting
+  earlier entries.
+
+- **Gamlastan 0.7.0 SAML hardening:** ACS, MDQ, Sweden Connect, SPID and
+  example flows now bind verified XML-DSig reference IDs to the exact SAML
+  Response or Assertion being consumed. Solicited response processors require
+  present and matching `InResponseTo` values and reject dangling `InResponseTo`
+  on otherwise unsolicited flows. Trusted-SP metadata boundaries are enforced
+  before issuing assertions or accepting dynamic entities. Metadata key
+  extraction fails closed for malformed trust-anchor fragments and X.509
+  lookalikes. Attribute release matches trusted SAML `Name` values, not
+  SP-supplied `FriendlyName`, unless PySAML2 compatibility is explicitly
+  enabled. Direct assertion-signature policies now require the consumed
+  Assertion's own verified signature; a verified Response signature no longer
+  satisfies `WantAssertionsSigned` / `require_signed_assertions`.
+
+- **SAML backend signature validation:** the ACS path now collects all verified
+  XML signature references with `verify_all_enveloped`, adds detached
+  Redirect-binding proof for the Response ID, and verifies decrypted assertion
+  signatures after decryption. This preserves valid double-signed responses
+  while preventing signature markup or a signature over a different object from
+  satisfying gamlastan's 0.7 validation checks.
+
+- **OpenID / federation hardening:** bumped `grindvakt` to 0.6.0. Public
+  authorization-code clients must use PKCE S256, authorization-code and refresh
+  token use is protected by a `TokenUseStore`, token-use store errors are
+  hidden from OAuth clients, and OpenID Federation resolve-response trust
+  chains are validated end to end, including statement claims, timestamps,
+  issuer/subject linkage, trust-anchor self-signature, and superior-key
+  signatures.
+
+- **Lockfile security update:** bumped `crossbeam-epoch` 0.9.18 to 0.9.20,
+  clearing RUSTSEC-2026-0204 from the `tera` / `globwalk` / `ignore`
+  dependency chain.
+
+- **Audit note:** `cargo audit --deny warnings` still reports RUSTSEC-2023-0071
+  for `rsa` 0.9.10. RustSec lists no fixed upgrade at release time; the crate is
+  pulled in through the XML/OIDC crypto stack (`bergshamra`, `grindvakt`,
+  `jose-rs`, and `kryptering`).
+
+- **Legacy identifier compatibility:** added guarded PySAML2 MD5 compatibility
+  for migrations from SATOSA / PySAML2 deployments. The new `legacy_eptid`
+  response micro-service can emit PySAML2-compatible MD5
+  `eduPersonTargetedID` values and, when explicitly requested, set the SAML
+  subject id for SPs that historically stored that value as their persistent
+  NameID. MD5 remains opt-in only: `allow_legacy_md5 = true` is required, and
+  `requesters` can scope the legacy value to known SP entity IDs. The
+  `hasher` and `attribute_processor` services also require the same guard
+  before accepting `md5`.
+
+- **SAML frontend compatibility:** `eduPersonTargetedID` is emitted as a
+  NameID-valued SAML attribute when the attribute map identifies it by
+  `eduPersonTargetedID` or OID `urn:oid:1.3.6.1.4.1.5923.1.1.1.10`. The value
+  uses persistent NameID format with `NameQualifier` set to the proxy IdP
+  entity ID and `SPNameQualifier` set to the requester SP entity ID. Transient
+  NameIDs remain fresh opaque values per response, matching SATOSA-style
+  pass-through deployments that rely on attributes rather than durable
+  transient subjects.
+
+- **Pairwise identifiers:** documented the preferred non-legacy path for new
+  SPs: `pairwiseid` derives a per-SP `pairwise-id` with
+  `HMAC-SHA256(pairwise_salt, "{requester}-{subject-id}")@scope`, and `nameid`
+  consumes the hash part for persistent SAML NameIDs. This avoids cross-SP
+  correlation while keeping legacy MD5 support isolated to migration flows.
+
+- **Docs:** added the "Legacy identifier compatibility" chapter and expanded
+  the built-in plugin and micro-service reference with PySAML2 compatibility,
+  `legacy_eptid`, guarded MD5 usage, `eduPersonTargetedID` wire shape,
+  pairwise identifier behavior, NameID selection, and scoping semantics.
+  Added ADR 0032 for the legacy identifier compatibility decision.
+
 ## 0.1.0 [2026-06-25]
 
 - **Dependencies:** bumped `grindvakt` 0.4 → 0.5 and `jose-rs` 0.3.1 → 0.5.0

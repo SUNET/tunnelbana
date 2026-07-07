@@ -11,7 +11,7 @@ pub struct ReqwestClient {
 impl ReqwestClient {
     pub fn new() -> Self {
         let inner = reqwest::Client::builder()
-            .user_agent("tunnelbana/0.1")
+            .user_agent(concat!("tunnelbana/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("failed to build reqwest client");
         Self { inner }
