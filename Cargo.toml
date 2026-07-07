@@ -14,8 +14,8 @@ license = "BSD-2-Clause"
 rust-version = "1.88"
 
 [workspace.dependencies]
-grindvakt = "0.6"
-jose-rs = { version = "0.5.0", default-features = false }
+grindvakt = "0.6.1"
+jose-rs = { version = "0.5.1", default-features = false }
 gamlastan = "0.7"
 gamlastan-mdq = "0.7"
 
@@ -33,7 +33,7 @@ toml = "0.8"
 tera = "1"
 
 # Crypto helpers for PEM key loading (PEM -> SoftwareKey -> jose Jwk)
-kryptering = { version = "0.3", default-features = false }
+kryptering = { version = "0.4.1", default-features = false }
 rsa = "0.9"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }

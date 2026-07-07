@@ -17,6 +17,13 @@
     margin: 1rem 0;
 }
 
+.intro-logo {
+    display: block;
+    width: min(180px, 45vw);
+    height: auto;
+    margin: 0 auto 1.5rem;
+}
+
 .content table th,
 .content table td {
     padding: 0.45em 0.7em;
