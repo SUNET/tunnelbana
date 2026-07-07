@@ -806,6 +806,7 @@ fn saml_frontend_rejects_both_name_id_config_forms() {
 const MAIL_OID: &str = "urn:oid:0.9.2342.19200300.100.1.3";
 
 fn oid_mapper() -> Arc<AttributeMapper> {
+    let eptid_oid = gamlastan::attribute_map::EPTID_OID;
     Arc::new(
         AttributeMapper::from_toml(&format!(
             r#"
@@ -813,6 +814,8 @@ fn oid_mapper() -> Arc<AttributeMapper> {
             saml = {{ names = ["mail"], oid = "{MAIL_OID}", friendly_name = "mail" }}
             [attributes.givenname]
             saml = ["givenName"]
+            [attributes.edupersontargetedid]
+            saml = {{ names = ["eduPersonTargetedID"], oid = "{eptid_oid}", friendly_name = "eduPersonTargetedID" }}
         "#
         ))
         .unwrap(),
@@ -909,6 +912,85 @@ async fn saml_frontend_uri_mode_emits_oid_attributes_and_backend_maps_back() {
     };
     assert_eq!(internal.attr_first("mail"), Some("anna@example.com"));
     assert_eq!(internal.attr_first("givenname"), Some("Anna"));
+}
+
+#[tokio::test]
+async fn saml_frontend_uri_mode_emits_eptid_as_persistent_nameid_attribute() {
+    let config = serde_json::json!({
+        "idp_key_path": testdata("idp-key.pem"),
+        "idp_cert_path": testdata("idp-cert.pem"),
+        "sign_assertions": true,
+        "attribute_name_format": "uri",
+        "metadata": { "local": [testdata("sp-metadata.xml")] }
+    });
+    let bx = BuildContext {
+        name: "IdP".to_string(),
+        base_url: BASE.to_string(),
+        config,
+        attribute_mapper: oid_mapper(),
+        http_client: Arc::new(NullHttpClient),
+        secret: "saml-test-secret".to_string(),
+        previous_secrets: Vec::new(),
+    };
+    let idp = tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&bx).unwrap();
+
+    let (_, authn_b64) = downstream_authn_request();
+    let mut idp_ctx = post_sso_ctx(authn_b64);
+    idp.handle_endpoint(&mut idp_ctx, "sso").await.unwrap();
+
+    let eptid_value = "https://proxy.example.com/IdP!https://proxy.example.com/SP!opaque";
+    let mut authenticated = InternalData {
+        subject_id: Some("anna".to_string()),
+        ..Default::default()
+    };
+    authenticated
+        .attributes
+        .insert("edupersontargetedid".into(), vec![eptid_value.to_string()]);
+
+    let resp = idp
+        .handle_authn_response(&mut idp_ctx, authenticated)
+        .await
+        .unwrap();
+    let html = String::from_utf8(resp.body).unwrap();
+    let xml = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(extract_saml_response(&html))
+            .unwrap(),
+    )
+    .unwrap();
+    let doc = gamlastan::xml::uppsala::parse(&xml).unwrap();
+    let response = gamlastan::xml::deserialize::parse_saml::<
+        gamlastan::core::protocol::response::ResponseRef<'_>,
+    >(&doc)
+    .unwrap()
+    .to_owned();
+    let attribute = response.assertions[0]
+        .attribute_statements
+        .iter()
+        .flat_map(|statement| statement.attributes.iter())
+        .find(|attribute| attribute.friendly_name.as_deref() == Some("eduPersonTargetedID"))
+        .expect("eduPersonTargetedID attribute");
+
+    assert_eq!(attribute.name, gamlastan::attribute_map::EPTID_OID);
+    assert_eq!(
+        attribute.name_format.as_deref(),
+        Some(gamlastan::core::constants::ATTRNAME_FORMAT_URI)
+    );
+    assert_eq!(attribute.values.len(), 1);
+
+    let gamlastan::core::assertion::attribute::AttributeValue::NameId(name_id) =
+        &attribute.values[0]
+    else {
+        panic!("expected eduPersonTargetedID to carry a NameID value");
+    };
+    assert_eq!(name_id.value, eptid_value);
+    assert_eq!(
+        name_id.format.as_deref(),
+        Some(gamlastan::core::constants::NAMEID_PERSISTENT)
+    );
+    assert_eq!(name_id.name_qualifier.as_deref(), Some(IDP_ENTITY));
+    assert_eq!(name_id.sp_name_qualifier.as_deref(), Some(SP_ENTITY));
+    assert_eq!(name_id.sp_provided_id, None);
 }
 
 // ---------------------------------------------------------------------------

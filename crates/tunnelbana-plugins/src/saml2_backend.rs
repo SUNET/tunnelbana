@@ -1076,14 +1076,13 @@ fn extend_verified_xml_signature_ids(
         .map_err(|e| Error::Authn(format!("signature verification failed: {e}")))?;
 
     for verify_result in verify_results {
-        let VerifyResult::Valid { references, .. } = verify_result else {
-            let reason = match verify_result {
-                VerifyResult::Invalid { reason } => reason,
-                VerifyResult::Valid { .. } => unreachable!(),
-            };
-            return Err(Error::Authn(format!(
-                "SAML XML signature is not valid: {reason}"
-            )));
+        let references = match verify_result {
+            VerifyResult::Valid { references, .. } => references,
+            VerifyResult::Invalid { reason } => {
+                return Err(Error::Authn(format!(
+                    "SAML XML signature is not valid: {reason}"
+                )));
+            }
         };
 
         for reference in references {

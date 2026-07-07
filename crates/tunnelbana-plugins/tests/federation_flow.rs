@@ -43,11 +43,12 @@ fn subordinate_statement(
     subject: &str,
     subject_jwks: &jose_rs::jwk::JwkSet,
 ) -> String {
+    let now = tunnelbana_core::util::now_secs();
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(issuer.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(now),
+        exp: Some(now + 3600),
         ..Default::default()
     };
     claims
