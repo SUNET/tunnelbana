@@ -8,7 +8,9 @@
 //! and forwards the result to the backend via the
 //! [`KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`] decoration. On the **response** path
 //! it reverses the rewrite and validates the IdP-returned ACCR against what was
-//! requested, falling back to the highest-priority requested value.
+//! requested. Mismatches fail closed by default; deployments that need eduID's
+//! compatibility normalization can explicitly allow a stronger upstream ACCR
+//! to be mapped down to a requested level.
 //!
 //! Divergence from SATOSA recorded for parity: when the per-virtual-IdP minimum
 //! is enforced, the forwarded list is the raw supported range (the
@@ -30,7 +32,7 @@ use tunnelbana_core::plugin::{BuildContext, MicroService};
 
 #[derive(Debug, Default, Deserialize)]
 struct AccrConfig {
-    /// ACCRs this proxy can satisfy, highest priority first.
+    /// ACCRs this proxy can satisfy, ordered from strongest to weakest.
     #[serde(default)]
     supported_accr_sorted_by_prio: Vec<String>,
     /// Per-virtual-IdP (frontend) minimum acceptable ACCR.
@@ -43,6 +45,11 @@ struct AccrConfig {
     /// (`exact`/`minimum`/`maximum`/`better`).
     #[serde(default)]
     default_comparison: Option<String>,
+    /// Permit an unrequested upstream ACCR to be normalized down to a weaker
+    /// level that the SP requested. Missing or weaker responses are never
+    /// accepted, even when this compatibility option is enabled.
+    #[serde(default)]
+    allow_stronger_accr_fallback: bool,
 }
 
 /// Negotiates AuthnContextClassRef between the SP request and the upstream IdP
@@ -55,6 +62,7 @@ pub struct Accr {
     /// Inverse of `rewrite`, applied on the response path.
     reverse_rewrite: BTreeMap<String, String>,
     default_comparison: Option<String>,
+    allow_stronger_accr_fallback: bool,
 }
 
 impl Accr {
@@ -98,7 +106,22 @@ impl Accr {
             rewrite: cfg.internal_accr_rewrite_map,
             reverse_rewrite,
             default_comparison: cfg.default_comparison,
+            allow_stronger_accr_fallback: cfg.allow_stronger_accr_fallback,
         }))
+    }
+
+    /// Selects the strongest SP-requested level that does not exceed the
+    /// assurance actually asserted upstream.
+    ///
+    /// `supported` is an operator-defined strongest-to-weakest ordering. By
+    /// searching only at or below `received`, this helper can normalize a
+    /// stronger response down for compatibility but can never inflate it.
+    fn safe_fallback(&self, requested: &[String], received: &str) -> Option<String> {
+        let received_index = self.supported.iter().position(|value| value == received)?;
+        self.supported[received_index..]
+            .iter()
+            .find(|candidate| requested.contains(candidate))
+            .cloned()
     }
 }
 
@@ -240,16 +263,34 @@ impl MicroService for Accr {
             .as_deref()
             .is_some_and(|r| requested.iter().any(|x| x == r))
         {
+            // Exact matches are always safe: the IdP asserted a value the SP
+            // asked for, after applying the configured vocabulary rewrite.
             data.auth_info.auth_class_ref = received;
         } else {
-            // Received is unrequested/missing: fall back to the highest-priority
-            // requested value.
-            let fallback = self
-                .supported
-                .iter()
-                .find(|s| requested.contains(s))
-                .cloned();
-            data.auth_info.auth_class_ref = fallback.or(received);
+            // An arbitrary mismatch is an assurance boundary, not a vocabulary
+            // preference: substituting the strongest requested value could
+            // claim MFA when the IdP established only a password session.
+            let fallback = received.as_deref().and_then(|asserted| {
+                self.allow_stronger_accr_fallback
+                    .then(|| self.safe_fallback(&requested, asserted))
+                    .flatten()
+            });
+
+            if let Some(fallback) = fallback {
+                tracing::info!(
+                    microservice = %self.name,
+                    asserted_accr = received.as_deref().unwrap_or_default(),
+                    returned_accr = %fallback,
+                    "normalizing stronger upstream AuthnContextClassRef to an SP-requested level"
+                );
+                data.auth_info.auth_class_ref = Some(fallback);
+            } else {
+                let asserted = received.as_deref().unwrap_or("<missing>");
+                return Err(Error::Authn(format!(
+                    "accr {}: upstream AuthnContextClassRef {asserted} does not satisfy the SP request",
+                    self.name
+                )));
+            }
         }
 
         ctx.state.clear_namespace(&self.name);
@@ -333,11 +374,13 @@ mod tests {
         // the forwarded request; the saved `requested_accr` stays the SP's
         // filtered request. So even though the IdP returns a value inside the
         // enforced range (MFA), the response leg validates against [PWD] and
-        // downgrades to it. This is intentional and documented (ADR 0030, F2);
-        // the test locks it in so the behavior is not "fixed" by accident.
+        // can downgrade to it. The explicit compatibility switch makes that
+        // normalization intentional while the strongest-to-weakest check
+        // proves the output cannot exceed the IdP's assertion.
         let accr = build_accr(serde_json::json!({
             "supported_accr_sorted_by_prio": [MFA, SFA, PWD],
-            "lowest_accepted_accr_for_virtual_idp": { "SunetIDP": SFA }
+            "lowest_accepted_accr_for_virtual_idp": { "SunetIDP": SFA },
+            "allow_stronger_accr_fallback": true
         }));
         let mut c = ctx();
         c.target_frontend = Some("SunetIDP".into());
@@ -404,7 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_falls_back_to_highest_requested_when_unmatched() {
+    async fn response_rejects_weaker_unrequested_accr_by_default() {
         let accr = build_accr(default_cfg());
         let mut c = ctx();
         c.decorate(KEY_REQUESTED_ACCR, json_strings(&[MFA.into(), SFA.into()]));
@@ -414,10 +457,87 @@ mod tests {
             .unwrap();
 
         let mut data = response_from("sp");
-        // IdP returned something not requested.
+        // The IdP established only PWD, so returning requested MFA would
+        // inflate assurance. The secure default rejects the response.
         data.auth_info.auth_class_ref = Some(PWD.into());
+        let err = accr.process_response(&mut c, data).await.unwrap_err();
+        assert!(matches!(err, Error::Authn(_)));
+    }
+
+    #[tokio::test]
+    async fn response_rejects_missing_accr_by_default() {
+        let accr = build_accr(default_cfg());
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json_strings(&[MFA.into()]));
+        let _ = accr
+            .process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        let err = accr
+            .process_response(&mut c, response_from("sp"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Authn(_)));
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_maps_stronger_response_down() {
+        let accr = build_accr(serde_json::json!({
+            "supported_accr_sorted_by_prio": [MFA, SFA, PWD],
+            "allow_stronger_accr_fallback": true
+        }));
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json_strings(&[PWD.into()]));
+        let _ = accr
+            .process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        let mut data = response_from("sp");
+        data.auth_info.auth_class_ref = Some(MFA.into());
         let data = accr.process_response(&mut c, data).await.unwrap();
-        assert_eq!(data.auth_info.auth_class_ref.as_deref(), Some(MFA));
+        assert_eq!(data.auth_info.auth_class_ref.as_deref(), Some(PWD));
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_never_maps_weaker_response_up() {
+        let accr = build_accr(serde_json::json!({
+            "supported_accr_sorted_by_prio": [MFA, SFA, PWD],
+            "allow_stronger_accr_fallback": true
+        }));
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json_strings(&[MFA.into()]));
+        let _ = accr
+            .process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        let mut data = response_from("sp");
+        data.auth_info.auth_class_ref = Some(PWD.into());
+        let err = accr.process_response(&mut c, data).await.unwrap_err();
+        assert!(matches!(err, Error::Authn(_)));
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_selects_only_a_requested_level_not_above_asserted() {
+        let accr = build_accr(serde_json::json!({
+            "supported_accr_sorted_by_prio": [MFA, SFA, PWD],
+            "allow_stronger_accr_fallback": true
+        }));
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json_strings(&[MFA.into(), PWD.into()]));
+        let _ = accr
+            .process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        // SFA cannot safely be promoted to the requested MFA value. PWD is
+        // also acceptable to the SP and is weaker than the asserted SFA.
+        let mut data = response_from("sp");
+        data.auth_info.auth_class_ref = Some(SFA.into());
+        let data = accr.process_response(&mut c, data).await.unwrap();
+        assert_eq!(data.auth_info.auth_class_ref.as_deref(), Some(PWD));
     }
 
     #[tokio::test]

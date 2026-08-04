@@ -982,18 +982,20 @@ name = "nameid"
 # Request path: keep only supported ACCRs the SP requested, enforce a per
 # virtual-IdP minimum (the supported range from strongest down to the minimum),
 # rewrite for the upstream IdP, and forward into the outgoing AuthnRequest.
-# Response path: reverse the rewrite and, if the IdP returned an unrequested
-# value, fall back to the highest-priority requested ACCR.
+# Response path: when the SP requested an ACCR, reverse the rewrite and reject
+# missing or unrequested values by default. An explicit compatibility option
+# can normalize stronger assertions down, but never promote a weaker assertion.
 [[microservice]]
 type = "accr"
 name = "accr"
   [microservice.config]
-  supported_accr_sorted_by_prio = [        # highest priority first; required
+  supported_accr_sorted_by_prio = [        # strongest to weakest; required
     "https://refeds.org/profile/mfa",
     "https://refeds.org/profile/sfa",
     "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
   ]
   # default_comparison = "exact"           # forwarded when the SP omits one
+  # allow_stronger_accr_fallback = true    # default false; see security note below
 
   # Per virtual-IdP (frontend name) minimum acceptable ACCR (must be in the
   # supported list).
@@ -1004,6 +1006,13 @@ name = "accr"
   [microservice.config.internal_accr_rewrite_map]
   "http://id.swedenconnect.se/loa/1.0/uncertified-loa2" = "http://id.elegnamnden.se/loa/1.0/loa2"
 ```
+
+`allow_stronger_accr_fallback` is intended for eduID-compatible deployments
+where the proxy asks upstream for a stronger level than the SP listed. It maps
+only a supported, stronger assertion down to a requested level. Missing,
+unknown, or weaker assertions still fail the authentication flow. Because this
+check uses `supported_accr_sorted_by_prio` as an assurance ordering, keep that
+list ordered from strongest to weakest.
 
 ### `custom_routing` - backend selection (request path, ADR 0015)
 
