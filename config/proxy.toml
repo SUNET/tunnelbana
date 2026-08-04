@@ -16,6 +16,7 @@ state_encryption_key = "change-me-to-a-long-random-secret"
 # Optional: previous secrets retained for decryption only, to allow zero-downtime
 # key rotation. Move the old key here when you change state_encryption_key, then
 # drop it once all in-flight cookies have expired (see state_cookie_max_age).
+# Every previous key must also contain at least 32 bytes.
 # previous_state_encryption_keys = ["${TUNNELBANA_STATE_KEY_OLD}"]
 
 cookie_name = "TUNNELBANA_STATE"
@@ -25,8 +26,16 @@ cookie_secure = true
 # SameSite attribute: "None" (cross-site SSO POST-back), "Lax", or "Strict".
 cookie_same_site = "None"
 # Maximum lifetime of the sealed state cookie, in seconds (default 1800 = 30 min).
-# Enforced both as the cookie Max-Age and as a server-side freshness check.
+# Enforced as an absolute lifetime: resealing never resets the original issue
+# time, and the cookie receives only the remaining Max-Age.
 state_cookie_max_age = 1800
+
+# Shared outbound HTTP safety limits for discovery, federation metadata, JWKS,
+# token and UserInfo calls. All values must be greater than zero.
+http_connect_timeout_seconds = 10
+http_read_timeout_seconds = 15
+http_request_timeout_seconds = 30
+http_max_response_bytes = 8388608
 
 attributes = "config/attributes.toml"
 
@@ -49,7 +58,8 @@ name = "OIDC"
   # Optional: DPoP (RFC 9449) sender-constrained tokens. Disabled by default.
   # When enabled, a `DPoP` proof header on the token request binds the issued
   # access token to the proof key (token_type "DPoP", cnf.jkt). Replay of a
-  # proof's jti is rejected within proof_max_age_secs (single-process TTL cache).
+  # proof's jti is rejected within proof_max_age_secs (single-process TTL cache;
+  # do not enable DPoP on multiple replicas without a shared replay store).
   # The nonce HMAC key is derived from state_encryption_key — not configured here.
   # [frontend.config.dpop]
   # enabled = true

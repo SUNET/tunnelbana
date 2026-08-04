@@ -481,6 +481,51 @@ fn signed_redirect_url() -> String {
     .unwrap()
 }
 
+/// Build a POST-binding request whose Signature either covers the consumed
+/// AuthnRequest or a harmless sibling element. The latter is the XML signature
+/// wrapping regression: the cryptography is valid, but not for trusted fields.
+fn signed_post_authn_request(cover_request: bool) -> String {
+    use gamlastan::crypto::keys::loader;
+    use gamlastan::crypto::{KeyUsage, KeysManager, SamlSigner};
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: SP_ENTITY.to_string(),
+        acs_url: Some(ACS_URL.to_string()),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: Some("urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST".to_string()),
+        allow_create: true,
+        ..Default::default()
+    };
+    let request = sp::create_authn_request(&opts).unwrap();
+    let mut xml = request.to_xml_string().unwrap();
+    let reference_id = if cover_request {
+        request.base.id.as_str()
+    } else {
+        xml = xml.replacen(
+            "</samlp:AuthnRequest>",
+            r#"<samlp:Extensions ID="signed-sibling"/></samlp:AuthnRequest>"#,
+            1,
+        );
+        "signed-sibling"
+    };
+    let signature = format!(
+        r##"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="#{reference_id}"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue/></ds:Reference></ds:SignedInfo><ds:SignatureValue/></ds:Signature>"##
+    );
+    let open_end = xml.find('>').unwrap();
+    xml.insert_str(open_end + 1, &signature);
+
+    let key_pem = std::fs::read(testdata("sp-key.pem")).unwrap();
+    let mut key = loader::load_pem_auto(&key_pem, None).unwrap();
+    key.usage = KeyUsage::Sign;
+    let mut manager = KeysManager::new();
+    manager.add_key(key);
+    let signed = SamlSigner::new(manager).sign_enveloped(&xml).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(signed.as_bytes())
+}
+
 fn redirect_sso_ctx(url: &str) -> Context {
     let query: BTreeMap<String, String> =
         form_urlencoded::parse(url.split_once('?').map(|(_, q)| q).unwrap_or("").as_bytes())
@@ -514,6 +559,28 @@ async fn saml_frontend_accepts_signed_redirect_request() {
         matches!(action, FrontendAction::StartAuth { .. }),
         "validly signed redirect AuthnRequest must start authentication"
     );
+}
+
+#[tokio::test]
+async fn saml_frontend_post_signature_must_cover_consumed_request() {
+    let idp = frontend_with(
+        serde_json::json!({ "want_authn_requests_signed": true })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+
+    let mut valid = post_sso_ctx(signed_post_authn_request(true));
+    assert!(matches!(
+        idp.handle_endpoint(&mut valid, "sso").await.unwrap(),
+        FrontendAction::StartAuth { .. }
+    ));
+
+    let mut sibling = post_sso_ctx(signed_post_authn_request(false));
+    match idp.handle_endpoint(&mut sibling, "sso").await.unwrap() {
+        FrontendAction::Respond(response) => assert_eq!(response.status, 403),
+        _ => panic!("a signature over a sibling must not authenticate the AuthnRequest"),
+    }
 }
 
 #[tokio::test]
@@ -1549,5 +1616,23 @@ fn saml_frontend_rejects_required_signatures_without_sp_metadata() {
     assert!(
         result.is_err(),
         "required AuthnRequest signatures must fail closed without SP metadata"
+    );
+}
+
+#[test]
+fn saml_frontend_rejects_completely_unsigned_output() {
+    let config = serde_json::json!({
+        "idp_key_path": testdata("idp-key.pem"),
+        "idp_cert_path": testdata("idp-cert.pem"),
+        "sign_assertions": false,
+        "sign_responses": false,
+        "metadata": { "local": [testdata("sp-metadata.xml")] }
+    });
+
+    let result =
+        tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", config));
+    assert!(
+        result.is_err(),
+        "a SAML IdP must authenticate at least the assertion or response"
     );
 }

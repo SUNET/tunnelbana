@@ -8,11 +8,11 @@ on:
       - ".github/workflows/mdbook.yml"
   workflow_dispatch:
 
-# Allow GITHUB_TOKEN to deploy to Pages.
+# The build job only needs repository read access. Deployment credentials are
+# scoped separately below so downloaded build tools cannot publish pages or
+# request a GitHub OIDC identity.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Allow one concurrent deployment; don't cancel an in-progress production deploy.
 concurrency:
@@ -27,13 +27,19 @@ jobs:
       # mdBook 0.5.4 and warns (or may break) when paired with another release.
       MDBOOK_VERSION: "0.5.4"
       MDBOOK_MERMAID_VERSION: "0.17.0"
+      MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
     steps:
-      - uses: actions/checkout@v4
+      # Pin actions to immutable commits; comments retain the readable release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install mdBook
         run: |
-          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz --directory="$HOME/.cargo/bin"
+          archive="${RUNNER_TEMP}/mdbook.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "${archive}"
+          echo "${MDBOOK_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" --directory="$HOME/.cargo/bin"
 
       - name: Install Mermaid preprocessor
         run: cargo install mdbook-mermaid --version "${MDBOOK_MERMAID_VERSION}" --locked
@@ -41,22 +47,21 @@ jobs:
       - name: Build
         run: mdbook build docs
 
-      - name: Setup Pages
-        id: pages
-        uses: actions/configure-pages@v5
-
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: docs/book
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

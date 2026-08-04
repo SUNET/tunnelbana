@@ -20,6 +20,9 @@ struct RoutingRule {
 #[derive(Debug, Deserialize)]
 struct IssuerRule {
     issuer: String,
+    /// Requesters authorized to select this issuer. A query-carried IdP hint
+    /// is routing input, not authorization, so this allowlist is mandatory.
+    requesters: Vec<String>,
     backend: String,
 }
 
@@ -41,7 +44,7 @@ struct CustomRoutingConfig {
 pub struct CustomRouting {
     name: String,
     rules: BTreeMap<String, String>,
-    issuer_rules: BTreeMap<String, String>,
+    issuer_rules: BTreeMap<(String, String), String>,
     default_backend: Option<String>,
 }
 
@@ -53,11 +56,18 @@ impl CustomRouting {
             .into_iter()
             .map(|r| (r.requester, r.backend))
             .collect();
-        let issuer_rules = cfg
-            .issuer_rule
-            .into_iter()
-            .map(|r| (r.issuer, r.backend))
-            .collect();
+        let mut issuer_rules = BTreeMap::new();
+        for rule in cfg.issuer_rule {
+            if rule.requesters.is_empty() {
+                return Err(Error::Config(format!(
+                    "custom_routing {}: issuer_rule for {} must list authorized requesters",
+                    bx.name, rule.issuer
+                )));
+            }
+            for requester in rule.requesters {
+                issuer_rules.insert((rule.issuer.clone(), requester), rule.backend.clone());
+            }
+        }
         Ok(Box::new(CustomRouting {
             name: bx.name.clone(),
             rules,
@@ -78,7 +88,13 @@ impl MicroService for CustomRouting {
             .decoration(KEY_TARGET_ENTITYID)
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let by_issuer = issuer.as_deref().and_then(|i| self.issuer_rules.get(i));
+        // The requester is part of an issuer rule's key. This prevents an IdP
+        // hint controlled by one RP from crossing another RP's backend policy.
+        let by_issuer = issuer.as_deref().and_then(|issuer| {
+            data.requester
+                .as_deref()
+                .and_then(|requester| self.issuer_rules.get(&(issuer.into(), requester.into())))
+        });
         let by_requester = data.requester.as_deref().and_then(|r| self.rules.get(r));
 
         if let Some(backend) = by_issuer.or(by_requester) {
@@ -182,7 +198,11 @@ mod tests {
             "route",
             serde_json::json!({
                 "rule": [{ "requester": "sp-a", "backend": "Oidc" }],
-                "issuer_rule": [{ "issuer": "https://idp.example", "backend": "Saml2" }]
+                "issuer_rule": [{
+                    "issuer": "https://idp.example",
+                    "requesters": ["sp-a"],
+                    "backend": "Saml2"
+                }]
             }),
         ))
         .unwrap();
@@ -209,6 +229,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(c.target_backend.as_deref(), Some("Oidc"));
+
+        // The same requester-controlled hint cannot route an unlisted RP.
+        let mut c = ctx();
+        c.decorate(
+            KEY_TARGET_ENTITYID,
+            serde_json::Value::String("https://idp.example".into()),
+        );
+        let _ = routing
+            .process_request(&mut c, InternalData::request("sp-b"))
+            .await
+            .unwrap();
+        assert_eq!(c.target_backend, None);
+    }
+
+    #[test]
+    fn issuer_rules_require_authorized_requesters() {
+        assert!(CustomRouting::build(&bx(
+            "route",
+            serde_json::json!({
+                "issuer_rule": [{ "issuer": "https://idp.example", "backend": "Saml2" }]
+            }),
+        ))
+        .is_err());
     }
 
     #[tokio::test]

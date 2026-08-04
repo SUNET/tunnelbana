@@ -282,18 +282,25 @@ async fn handle_authn_response(&self, ctx: &mut Context, response: InternalData)
 
 ### 6. `handle_backend_error` - render failures
 
-If the backend fails (including an upstream IdP saying "access denied" or the
-user cancelling), the frontend turns it into a protocol-appropriate error -
-here, an OAuth `access_denied` redirect to the RP:
+If the backend fails, the frontend turns it into a protocol-appropriate error.
+An authentication denial becomes OAuth `access_denied`; internal failures use
+the generic `server_error` code and never expose diagnostics to the RP:
 
 ```rust
 async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result<Response> {
+    // Keep diagnostic detail in trusted server logs; OAuth responses cross a
+    // trust boundary and use stable, non-sensitive descriptions.
+    tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
     if let Some(req) = self.load_authz_request(ctx) {
-        let oerr = OAuthError::new(OAuthErrorCode::AccessDenied, error.to_string())
+        let (code, description) = match error {
+            Error::Authn(_) => (OAuthErrorCode::AccessDenied, "authentication was denied"),
+            _ => (OAuthErrorCode::ServerError, "authentication could not be completed"),
+        };
+        let oerr = OAuthError::new(code, description)
             .with_state(req.state.clone());
         return Ok(oerr.to_redirect(&req.redirect_uri));
     }
-    Ok(Response::text(500, format!("{error}")))
+    Ok(Response::text(500, "authentication could not be completed"))
 }
 ```
 

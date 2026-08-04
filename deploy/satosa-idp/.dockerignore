@@ -1,0 +1,7 @@
+# Private keys and local environment values must never enter the build context.
+keys/
+.env
+
+# Binaries are supplied through the read-only compose mount, not image layers.
+bin/
+.build-cache/

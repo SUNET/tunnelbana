@@ -301,6 +301,12 @@ pub struct Saml2Frontend {
 impl Saml2Frontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
         let cfg: Saml2FrontendConfig = bx.parse_config()?;
+        if !cfg.sign_assertions && !cfg.sign_responses {
+            return Err(Error::Config(format!(
+                "saml2 frontend {} must sign assertions, responses, or both",
+                bx.name
+            )));
+        }
         let module_base = bx.module_base();
         let idp_entity_id = cfg
             .idp_entity_id
@@ -709,7 +715,20 @@ fn verify_authn_request_signature(
                 return Err("AuthnRequest must be signed (POST binding)".into());
             }
             match verifier.verify_enveloped(xml) {
-                Ok(gamlastan::crypto::VerifyResult::Valid { .. }) => Ok(()),
+                Ok(gamlastan::crypto::VerifyResult::Valid { references, .. }) => {
+                    let expected_uri = format!("#{}", authn_request.base.id);
+                    // A valid SignatureValue only authenticates SignedInfo. The
+                    // request fields are trusted only when a locally verified
+                    // Reference digest covers this exact AuthnRequest ID.
+                    if references
+                        .iter()
+                        .any(|reference| reference.digest_verified && reference.uri == expected_uri)
+                    {
+                        Ok(())
+                    } else {
+                        Err("AuthnRequest signature does not cover the consumed request".into())
+                    }
+                }
                 Ok(gamlastan::crypto::VerifyResult::Invalid { reason }) => {
                     Err(format!("AuthnRequest signature is not valid: {reason}"))
                 }
@@ -922,10 +941,8 @@ impl Frontend for Saml2Frontend {
     }
 
     async fn handle_backend_error(&self, _ctx: &mut Context, error: &Error) -> Result<Response> {
-        Ok(Response::text(
-            500,
-            format!("authentication failed: {error}"),
-        ))
+        tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
+        Ok(Response::text(500, "authentication could not be completed"))
     }
 }
 

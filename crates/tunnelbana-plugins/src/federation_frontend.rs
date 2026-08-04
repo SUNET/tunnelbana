@@ -56,6 +56,10 @@ struct FederationConfig {
     entity_configuration_lifetime: u64,
     #[serde(default = "default_rp_cache_ttl")]
     rp_cache_ttl: u64,
+    /// Maximum accepted request-object age. Request objects must carry both
+    /// `iat` and `exp`; the default matches grindvakt's five-minute lifetime.
+    #[serde(default = "default_request_object_max_age")]
+    request_object_max_age: u64,
     #[serde(default)]
     organization_name: Option<String>,
     #[serde(default)]
@@ -69,6 +73,9 @@ fn default_ec_lifetime() -> u64 {
 }
 fn default_rp_cache_ttl() -> u64 {
     3600
+}
+fn default_request_object_max_age() -> u64 {
+    300
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +139,7 @@ pub struct FederationFrontend {
     trust_anchors: TrustAnchors,
     ec_lifetime: u64,
     rp_cache_ttl: u64,
+    request_object_max_age: u64,
     organization_name: Option<String>,
     organization_uri: Option<String>,
     trust_marks: Vec<Value>,
@@ -214,6 +222,7 @@ impl FederationFrontend {
             trust_anchors,
             ec_lifetime: fed.entity_configuration_lifetime,
             rp_cache_ttl: fed.rp_cache_ttl,
+            request_object_max_age: fed.request_object_max_age,
             organization_name: fed.organization_name.clone(),
             organization_uri: fed.organization_uri.clone(),
             trust_marks: fed.trust_marks.clone(),
@@ -305,9 +314,9 @@ impl FederationFrontend {
                 .to_string(),
             client_name,
         };
-        self.clients
-            .put_with_ttl(client.clone(), self.rp_cache_ttl)
-            .await;
+        let cache_ttl =
+            cache_ttl_bounded_by_trust(self.rp_cache_ttl, resolved.exp, "resolved federation RP")?;
+        self.clients.put_with_ttl(client.clone(), cache_ttl).await;
         tracing::info!(client_id = %client_id, "auto-registered federation RP");
         Ok(client)
     }
@@ -326,14 +335,36 @@ impl FederationFrontend {
             .jwks
             .as_ref()
             .ok_or_else(|| Error::Authn("client has no keys to verify request object".into()))?;
-        let validation = jose_rs::jwt::Validation::new();
+        let validation = jose_rs::jwt::Validation::new()
+            .with_issuer(&client.client_id)
+            .with_audience(&self.issuer)
+            .with_max_age(self.request_object_max_age)
+            .require_exp();
         let claims = tunnelbana_oidc::jwt::verify_with_jwks(jwks, &request_jwt, &validation)?;
 
-        // Merge the request object's parameters as plain values.
+        let inner_client_id = claims
+            .extra
+            .get("client_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Authn("request object missing client_id".into()))?;
+        if inner_client_id != client.client_id {
+            return Err(Error::Authn(
+                "request object client_id does not match outer client_id".into(),
+            ));
+        }
+
+        // Outer parameters are often duplicated inside JAR. They may agree,
+        // but a signed claim must never silently overwrite a different outer
+        // value because that would split client lookup from request handling.
         let merged = serde_json::to_value(&claims.extra).unwrap_or_default();
         if let Some(obj) = merged.as_object() {
             for (k, v) in obj {
                 if let Some(s) = v.as_str() {
+                    if params.get(k).is_some_and(|outer| outer != s) {
+                        return Err(Error::Authn(format!(
+                            "request object parameter {k} conflicts with outer request"
+                        )));
+                    }
                     params.insert(k.clone(), s.to_string());
                 }
             }
@@ -368,10 +399,14 @@ impl FederationFrontend {
             None => match self.auto_register(&client_id).await {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::warn!(frontend = %self.name, client_id = %client_id, error = %e, "federation RP resolution failed");
                     return Ok(FrontendAction::Respond(
-                        OAuthError::new(OAuthErrorCode::InvalidRequest, e.to_string())
-                            .to_response(),
-                    ))
+                        OAuthError::new(
+                            OAuthErrorCode::InvalidRequest,
+                            "client could not be resolved",
+                        )
+                        .to_response(),
+                    ));
                 }
             },
         };
@@ -379,8 +414,10 @@ impl FederationFrontend {
         // Unpack a request object if present.
         if params.contains_key("request") {
             if let Err(e) = self.unpack_request_object(&mut params, &client).await {
+                tracing::warn!(frontend = %self.name, client_id = %client_id, error = %e, "request object validation failed");
                 return Ok(FrontendAction::Respond(
-                    OAuthError::new(OAuthErrorCode::InvalidRequest, e.to_string()).to_response(),
+                    OAuthError::new(OAuthErrorCode::InvalidRequest, "request object is invalid")
+                        .to_response(),
                 ));
             }
         }
@@ -418,7 +455,9 @@ impl FederationFrontend {
             Ok(resp) => Response::json(&resp)
                 .map(|r| r.with_header("cache-control", "no-store"))
                 .unwrap_or_else(|e| {
-                    OAuthError::new(OAuthErrorCode::ServerError, e.to_string()).to_response()
+                    tracing::error!(frontend = %self.name, error = %e, "token response serialization failed");
+                    OAuthError::new(OAuthErrorCode::ServerError, "response could not be created")
+                        .to_response()
                 }),
             Err(e) => e.to_response(),
         }
@@ -433,11 +472,36 @@ impl FederationFrontend {
         // a DPoP-bound token reaching here is rejected by the provider.
         match self.provider.userinfo(token, None).await {
             Ok(claims) => Response::json(&claims).unwrap_or_else(|e| {
-                OAuthError::new(OAuthErrorCode::ServerError, e.to_string()).to_response()
+                tracing::error!(frontend = %self.name, error = %e, "UserInfo serialization failed");
+                OAuthError::new(OAuthErrorCode::ServerError, "response could not be created")
+                    .to_response()
             }),
             Err(e) => e.to_response(),
         }
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn cache_ttl_bounded_by_trust(
+    configured_ttl: u64,
+    trust_expiry: Option<u64>,
+    object: &str,
+) -> Result<u64> {
+    let expiry =
+        trust_expiry.ok_or_else(|| Error::Authn(format!("{object} has no trust-anchor expiry")))?;
+    let remaining = expiry
+        .checked_sub(now_secs())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| Error::Authn(format!("{object} trust decision is expired")))?;
+    // Never retain metadata after the trust anchor stops vouching for it,
+    // even when an operator configured a longer performance cache.
+    Ok(configured_ttl.min(remaining))
 }
 
 #[async_trait]
@@ -508,11 +572,32 @@ impl Frontend for FederationFrontend {
     }
 
     async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result<Response> {
+        tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
         if let Some(req) = self.load_authz_request(ctx) {
-            let oerr = OAuthError::new(OAuthErrorCode::AccessDenied, error.to_string())
-                .with_state(req.state.clone());
+            let (code, description) = match error {
+                Error::Authn(_) => (OAuthErrorCode::AccessDenied, "authentication was denied"),
+                _ => (
+                    OAuthErrorCode::ServerError,
+                    "authentication could not be completed",
+                ),
+            };
+            let oerr = OAuthError::new(code, description).with_state(req.state.clone());
             return Ok(oerr.to_redirect(&req.redirect_uri));
         }
-        Ok(Response::text(500, format!("{error}")))
+        Ok(Response::text(500, "authentication could not be completed"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn federation_cache_never_outlives_signed_trust() {
+        let now = now_secs();
+        let ttl = cache_ttl_bounded_by_trust(3600, Some(now + 10), "test entity").unwrap();
+        assert!(ttl <= 10);
+        assert!(cache_ttl_bounded_by_trust(3600, Some(now), "test entity").is_err());
+        assert!(cache_ttl_bounded_by_trust(3600, None, "test entity").is_err());
     }
 }

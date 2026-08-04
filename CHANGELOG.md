@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 [2026-08-04]
+
+- **Repository-wide security hardening:** state cookies now retain their
+  original issue time across resealing; every rotation key must satisfy the
+  32-byte strength floor; outbound HTTP has configurable connect/read/total
+  deadlines and an 8 MiB default streamed-body cap; deployment keys are
+  runtime-only mounts; and the Pages workflow verifies mdBook's SHA-256 while
+  keeping publish credentials out of the build job.
+
+- **Protocol trust binding:** POST AuthnRequest signatures must cover the exact
+  parsed request and SAML IdP configurations must sign the response, assertion,
+  or both. Federation request objects require matching issuer, audience,
+  client id, issued-at and expiry claims and cannot conflict with outer
+  parameters. Federation metadata caches cannot outlive the trust anchor's
+  signed expiry, and OIDC UserInfo subjects must match the ID Token subject.
+
+- **Release-policy hardening:** attribute filtering is fail-closed unless
+  `passthrough_unmatched` is explicitly enabled; primary identifiers use
+  versioned, component-counted, length-prefixed framing; issuer routing is scoped to authorized
+  requesters; hash processors require a non-empty salt; audit logs are created
+  owner-only on Unix; and public OAuth/SAML errors no longer disclose internal details.
+  These configuration and identifier-format changes require an operator review
+  when upgrading from 0.2.x.
+
+- **Dependency-audit status:** `cargo audit --deny warnings` still reports
+  RUSTSEC-2023-0071 for transitive `rsa` 0.9.10, for which RustSec has no fixed
+  release. RSA-1.5 XML key transport remains rejected, but that does not resolve
+  the crate-wide timing advisory: SAML RSA-OAEP private-key decryption is
+  network-reachable when encrypted assertions are enabled. Deployments that
+  cannot accept this residual risk must not enable SAML assertion decryption;
+  remove this exception when the ecosystem publishes a compatible fix.
 
 - **ACCR assurance validation:** when an SP requests an AuthnContextClassRef,
   missing or unrequested IdP responses now fail closed instead of being
@@ -21,6 +51,11 @@
 - **Protocol-library releases:** upgraded to released `grindvakt` 0.6.2 and
   `jose-rs` 0.6.0 from crates.io, removing the temporary sibling-worktree
   patch used during integration.
+
+- **Architecture record:** ADR 0033 is the authoritative record for the 0.3.0
+  fail-closed security boundaries. Earlier ADR files remain unchanged as
+  historical records, and the ADR index marks their conflicting portions as
+  superseded.
 
 ## 0.2.0 [2026-07-07]
 

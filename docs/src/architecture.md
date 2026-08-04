@@ -94,10 +94,14 @@ full narrative, including the response-path transform pipeline.
 
 In-flight flow state (the pending authorization request, PKCE verifier, the SAML
 request id, …) is sealed into a cookie as a JWE (`dir` + `A256GCM`) under a key
-derived from `state_encryption_key`. There is **no server-side session store**,
-so the proxy scales horizontally for free. The cookie is attacker-reachable data;
+derived from `state_encryption_key`. There is **no server-side session store**
+for this flow state. The cookie is attacker-reachable data;
 see [Security: the state cookie](security-state-cookie.md) for the AEAD
 construction, freshness, key rotation, and the threat model.
+
+This does not make every plugin shared-nothing. The built-in DPoP frontend and
+SAML backend replay caches are process-local, so their replay-sensitive modes
+must run as a single process unless a shared replay store is implemented.
 
 Plugins read and write their own namespace of this state through the request
 [`Context`](writing-a-plugin.md#the-context):

@@ -196,13 +196,20 @@ impl Frontend for OidcFrontend {
     }
 
     async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result<Response> {
+        tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
         // If we have the in-flight request, redirect the error to the RP.
         if let Some(req) = self.load_authz_request(ctx) {
-            let oerr = OAuthError::new(OAuthErrorCode::AccessDenied, error.to_string())
-                .with_state(req.state.clone());
+            let (code, description) = match error {
+                Error::Authn(_) => (OAuthErrorCode::AccessDenied, "authentication was denied"),
+                _ => (
+                    OAuthErrorCode::ServerError,
+                    "authentication could not be completed",
+                ),
+            };
+            let oerr = OAuthError::new(code, description).with_state(req.state.clone());
             return Ok(oerr.to_redirect(&req.redirect_uri));
         }
-        Ok(Response::text(500, format!("{error}")))
+        Ok(Response::text(500, "authentication could not be completed"))
     }
 }
 
@@ -259,7 +266,11 @@ impl OidcFrontend {
         {
             Ok(resp) => match Response::json(&resp) {
                 Ok(r) => r.with_header("cache-control", "no-store"),
-                Err(e) => OAuthError::new(OAuthErrorCode::ServerError, e.to_string()).to_response(),
+                Err(e) => {
+                    tracing::error!(frontend = %self.name, error = %e, "token response serialization failed");
+                    OAuthError::new(OAuthErrorCode::ServerError, "response could not be created")
+                        .to_response()
+                }
             },
             Err(e) => e.to_response(),
         }
@@ -345,9 +356,16 @@ impl OidcFrontend {
                 Err(resp)
             }
             Err(DpopError::Server(m)) => {
-                Err(OAuthError::new(OAuthErrorCode::ServerError, m).to_response())
+                tracing::error!(frontend = %self.name, error = %m, "DPoP validation failed internally");
+                Err(
+                    OAuthError::new(OAuthErrorCode::ServerError, "DPoP validation failed")
+                        .to_response(),
+                )
             }
-            Err(e) => Err(OAuthError::invalid_dpop_proof(e.to_string()).to_response()),
+            Err(e) => {
+                tracing::debug!(frontend = %self.name, error = %e, "invalid DPoP proof");
+                Err(OAuthError::invalid_dpop_proof("DPoP proof is invalid").to_response())
+            }
         }
     }
 
@@ -375,7 +393,9 @@ impl OidcFrontend {
 
         match self.provider.userinfo(&token, presented_jkt).await {
             Ok(claims) => Response::json(&claims).unwrap_or_else(|e| {
-                OAuthError::new(OAuthErrorCode::ServerError, e.to_string()).to_response()
+                tracing::error!(frontend = %self.name, error = %e, "UserInfo serialization failed");
+                OAuthError::new(OAuthErrorCode::ServerError, "response could not be created")
+                    .to_response()
             }),
             Err(e) => e.to_response(),
         }

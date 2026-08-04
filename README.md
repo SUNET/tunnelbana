@@ -22,7 +22,7 @@ library), and (for SAML) the local
 [SATOSA](github.com/IdentityPython/SATOSA/) is a Python proxy that bridges
 SAML2 ⇄ OIDC ⇄ OAuth2. This is a from-scratch Rust reimplementation aimed at
 best performance, with TOML configuration, a **stateless** encrypted-cookie
-session model (no shared store → trivial horizontal scaling), and first-class
+session model, and first-class
 **OpenID Federation 1.1** support so it can run the
 [`satosa-federation`](https://github.com/SUNET/satosa-federation) deployment.
 
@@ -60,6 +60,10 @@ purely by config + which plugins are loaded:
 - **Async actix + `reqwest`**; synchronous JOSE/crypto called inline.
 - **Keys** may be PEM/DER files **or** inline/file JWK(s); everything is
   normalized to a `jose_rs::Jwk` internally.
+
+The main login state is shared-nothing, but the built-in DPoP frontend and SAML
+backend replay caches are process-local. Deploy those replay-sensitive modes as
+a single process unless a shared replay-store implementation is added.
 
 ## What works today (not fully tested)
 

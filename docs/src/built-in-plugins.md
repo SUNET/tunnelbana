@@ -211,6 +211,7 @@ name = "OIDFed"
   organization_uri              = "https://example.com"
   entity_configuration_lifetime = 86400   # seconds (default 86400)
   rp_cache_ttl                  = 3600    # auto-registered RP cache TTL (default 3600)
+  request_object_max_age       = 300     # required iat/exp replay bound
   trust_marks                   = []      # optional array of trust-mark JWTs
 
   # One table per trust anchor; `keys` are the anchor's pinned JWKS.
@@ -225,6 +226,13 @@ The entity configuration is served at `…/OIDFed/.well-known/openid-federation`
 (see the [reverse-proxy note](configuration.md#mount-points) for exposing it on
 the bare host). The OIDC endpoints mirror the plain `oidc` frontend, under
 `…/OIDFed/`.
+
+Automatic-registration entries are cached for the shorter of
+`rp_cache_ttl` and the trust anchor's signed resolve-response expiry. A missing
+or expired trust bound is rejected. Signed request objects must have
+`iss = client_id`, `aud =` this OP, matching inner/outer `client_id`, `iat`, and
+`exp`; their age is capped by `request_object_max_age`, and conflicting outer
+and signed parameters are rejected instead of overwritten.
 
 ### `saml2` frontend - Identity Provider
 
@@ -302,7 +310,8 @@ name = "Saml2IDP"
 > is required (SP metadata or
 > `want_authn_requests_signed`), redirect-binding signatures are verified over
 > the raw query string and POST-binding requests via their enveloped XML
-> signature, against the SP's metadata-registered signing certs. See ADR 0006.
+> signature, against the SP's metadata-registered signing certs. See ADR 0033
+> (superseding the relevant part of ADR 0006).
 
 The startup policy for metadata and request signatures is:
 
@@ -322,7 +331,11 @@ eligible alongside a metadata store.
 > common interoperable pattern: an SP that verifies the single assertion
 > signature is satisfied. Set `sign_responses = true` to also sign the Response
 > envelope. (Conversely, the [SAML SP backend](#saml2-backend---service-provider)
-> accepts either a signed assertion **or** a signed Response.)
+> accepts either a signed assertion **or** a signed Response.) Setting both
+> signing flags to `false` is rejected at startup. For POST AuthnRequests, a
+> valid XML signature is accepted only when its verified Reference covers the
+> exact parsed AuthnRequest ID; a signature over a sibling/wrapped element does
+> not authenticate the request.
 
 The IdP serves `…/Saml2IDP/sso` (Redirect + POST) and `…/Saml2IDP/metadata`.
 When `idp_entity_id` is itself a URL under the module base (the common
@@ -364,10 +377,12 @@ name = "Upstream"
 ```
 
 Always uses PKCE (S256). The callback is served at `…/Upstream/`.
+When UserInfo is advertised, its response must contain a `sub` exactly equal to
+the verified ID Token subject before any UserInfo attributes are merged.
 
 ### `oidc_federation` backend - Federation Relying Party
 
-The federation-aware RP (ADR 0024): no pre-registered client, no
+The federation-aware RP (ADR 0033, superseding parts of ADR 0024): no pre-registered client, no
 `.well-known` discovery. The proxy publishes its own signed RP entity
 configuration, resolves the upstream OP through the configured trust
 anchors, and authenticates with `private_key_jwt` using its **entity id as
@@ -425,9 +440,10 @@ How a flow works:
 1. `start_auth` picks the OP. With a fixed `op_entity_id` it resolves that OP
    through a trust anchor's `federation_resolve_endpoint` (the response is a
    `resolve-response+jwt` verified against the pinned anchor keys) and caches
-   the result for `op_cache_ttl` seconds. With **discovery** enabled it
-   instead redirects the browser to the external discovery service (see
-   below).
+   the result for the shorter of `op_cache_ttl` and the trust anchor's signed
+   resolve-response expiry. A missing or expired trust bound is rejected. With
+   **discovery** enabled it instead redirects the browser to the external
+   discovery service (see below).
 2. The user is redirected to the resolved `authorization_endpoint` with
    `client_id = <entity_id>`, PKCE (S256), a **signed request object**
    (RFC 9101, signed with the `private_key_jwt` key - federation OPs doing
@@ -439,8 +455,10 @@ How a flow works:
    verifies the id_token (issuer, audience, nonce) against the OP keys that
    arrived **inline in the resolved metadata**; `jwks_uri` is only fetched
    when no inline keys exist.
-4. id_token claims (merged with userinfo when advertised) map through the
-   `openid` attribute profile; the subject is reported as `pairwise`.
+4. id_token claims (merged with UserInfo when advertised) map through the
+   `openid` attribute profile; the subject is reported as `pairwise`. UserInfo
+   is accepted only when its required `sub` exactly matches the verified ID
+   Token subject.
 
 The RP entity configuration is served at
 `…/OIDFedRP/.well-known/openid-federation` and publishes exactly what a
@@ -637,7 +655,8 @@ name = "Saml2"
   #### Encrypted assertions
 
   With `[[backend.config.encryption_keypairs]]` configured, the ACS decrypts
-  `<EncryptedAssertion>` elements (RSA-OAEP / RSA-1.5 key transport,
+  `<EncryptedAssertion>` elements (RSA-OAEP key transport;
+  vulnerable RSA PKCS#1 v1.5 key transport is rejected,
   AES-CBC/GCM data encryption) and `<EncryptedID>` subjects. Each keypair gets
   its own decryptor and all are tried in turn, so rotation is: add the new
   pair, keep the old key (without `cert_path`) until drained, then drop it.
@@ -648,7 +667,8 @@ name = "Saml2"
   cleartext and decrypted alike - carries a signature that verifies on the XML
   it travelled in (the decrypted plaintext for encrypted assertions). A
   Response carrying encrypted assertions with no `encryption_keypairs`
-  configured is rejected. See ADR 0009.
+  configured is rejected. See ADR 0033 (superseding the relevant part of
+  ADR 0009).
 
   #### MDQ options
 
@@ -694,6 +714,13 @@ name = "Saml2"
   Response is rejected, unless it is truly unsolicited (no `InResponseTo`) and
   `allow_unsolicited = true` (see ADR 0010).
 
+  Assertion IDs are recorded in an atomic in-memory replay cache for their
+  validity window. That cache is process-local: the built-in SAML backend and
+  DPoP frontend are supported as a **single process only**. Do not run either
+  replay-sensitive feature across multiple replicas until tunnelbana gains a
+  shared atomic replay-store backend; sticky sessions alone do not make a
+  captured assertion or proof single-use across nodes.
+
   In MDQ mode, downstream subject selection follows the SATOSA-style
   primary-identifier pattern:
 
@@ -728,16 +755,17 @@ name = "static"
   affiliation = ["member", "staff"]
 ```
 
-### `filter_attributes` - attribute allow-list (ADR 0014)
+### `filter_attributes` - attribute allow-list (ADR 0033; original ADR 0014)
 
 ```toml
 [[microservice]]
 type = "filter_attributes"
 name = "filter"
   [microservice.config]
-  # Global allowlist. OMITTED entirely => attributes pass through untouched
-  # (unless a policy entry below matches). An explicit empty list drops all.
+  # Global allowlist. Omitted with no matching policy => drop all. Set
+  # passthrough_unmatched = true only for explicit legacy pass-through.
   allowed = ["mail", "givenname", "surname", "edupersonprincipalname"]
+  passthrough_unmatched = false
 
   # Optional per-requester overrides (SATOSA: AttributePolicy). A matching
   # entry REPLACES the global list (no merge). Lookup: exact requester,
@@ -790,7 +818,7 @@ name = "rename"
 ```toml
 # Per-attribute processor chains, run in order. Processors:
 #   regex_sub       match_pattern + replace_pattern ($1/${1} or SATOSA \1)
-#   hash            salt (recommended) + hash_algo ("sha256" default, "sha512";
+#   hash            salt (required, non-empty) + hash_algo ("sha256" default, "sha512";
 #                   "md5" only with allow_legacy_md5 = true)
 #   scope           scope - appends "@scope" to every value
 #   scope_extractor mapped_attribute - copies the @domain into that attribute
@@ -899,11 +927,12 @@ name = "legacy-eptid"
   set_subject_id = false                # true only for legacy persistent NameID
 ```
 
-### `primary_identifier` - ordered identifier candidates (ADR 0022)
+### `primary_identifier` - ordered identifier candidates (ADR 0033; original ADR 0022)
 
 ```toml
 # First candidate whose attributes are all present wins; first values are
-# concatenated. "name_id" pulls in the subject id when name_id_format matches
+# encoded as tbpid-v1:<count>:<length>:<value>... so candidate tuples cannot
+# collide. "name_id" pulls in the subject id when name_id_format matches
 # the response's subject type (URN or short name). add_scope appends a
 # literal, or the asserting IdP's entity id with "issuer_entityid".
 [[microservice]]
@@ -934,7 +963,7 @@ name = "primary-id"
   ignore = true
 ```
 
-### `custom_logging` - JSON audit records (ADR 0023)
+### `custom_logging` - JSON audit records (ADR 0033; original ADR 0023)
 
 ```toml
 # One JSON object per completed authentication, appended as a line:
@@ -995,7 +1024,7 @@ type = "nameid"
 name = "nameid"
 ```
 
-### `accr` - AuthnContextClassRef negotiation (request + response, ADR 0030)
+### `accr` - AuthnContextClassRef negotiation (request + response, ADR 0033; original ADR 0030)
 
 ```toml
 # Request path: keep only supported ACCRs the SP requested, enforce a per
@@ -1033,7 +1062,7 @@ unknown, or weaker assertions still fail the authentication flow. Because this
 check uses `supported_accr_sorted_by_prio` as an assurance ordering, keep that
 list ordered from strongest to weakest.
 
-### `custom_routing` - backend selection (request path, ADR 0015)
+### `custom_routing` - backend selection (request path, ADR 0033; original ADR 0015)
 
 ```toml
 # Precedence inside the service: issuer rule -> requester rule ->
@@ -1049,6 +1078,7 @@ name = "routing"
   # discovery flow (SATOSA: DecideBackendByTargetIssuer).
   [[microservice.config.issuer_rule]]
   issuer  = "https://legacy-idp.example.org"
+  requesters = ["https://sp-a.example.com"]
   backend = "LegacySaml"
 
   [microservice.config]
