@@ -24,6 +24,7 @@ use gamlastan::metadata::EntityDescriptor;
 use gamlastan::profiles::sso::sp as sp_profile;
 use gamlastan::profiles::sso::web_browser::{self, AuthnRequestOptions};
 use gamlastan::security::config::SecurityConfig;
+use gamlastan::security::replay::InMemoryReplayCache;
 use gamlastan::security::validation::{AssertionValidator, ValidationParams};
 use gamlastan::xml::serialize::SamlSerialize;
 use gamlastan_mdq::MdqClient;
@@ -206,6 +207,12 @@ pub struct Saml2Backend {
     accepted_time_diff_secs: Option<u64>,
     passthrough_unmapped_attributes: bool,
     allow_unsolicited: bool,
+    /// Assertion IDs accepted by this backend, retained until their SAML
+    /// validity deadline. gamlastan 0.8 fails closed when validation has no
+    /// replay cache, so every backend owns one for its full process lifetime.
+    /// This protects one tunnelbana process; a future clustered deployment
+    /// must replace it with a shared [`gamlastan::security::ReplayCache`].
+    replay_cache: InMemoryReplayCache,
     organization: Option<gamlastan::metadata::types::organization::Organization>,
     contact_persons: Vec<gamlastan::metadata::types::contact::ContactPerson>,
     /// One decryptor per configured encryption key (bergshamra only uses the
@@ -325,6 +332,7 @@ impl Saml2Backend {
             accepted_time_diff_secs: cfg.accepted_time_diff_secs,
             passthrough_unmapped_attributes: cfg.passthrough_unmapped_attributes,
             allow_unsolicited: cfg.allow_unsolicited,
+            replay_cache: InMemoryReplayCache::new(),
             organization: cfg.organization.as_ref().map(|o| o.to_organization()),
             contact_persons: crate::saml_metadata::contact_persons(&cfg.contact_person)?,
             decryptors,
@@ -688,7 +696,14 @@ impl Saml2Backend {
             now: Utc::now(),
         };
         let cfg = self.security_config();
-        let validation = AssertionValidator::new(&cfg).validate_response(&response, &params);
+        // Replay insertion is part of the same validation pass as audience,
+        // time, recipient, request-correlation, and signature-provenance
+        // checks. Keeping the cache on `self` (rather than constructing one
+        // per request) makes a previously accepted assertion ID fail check 20
+        // for the rest of its validity window.
+        let validation = AssertionValidator::new(&cfg)
+            .with_replay_cache(&self.replay_cache)
+            .validate_response(&response, &params);
         if !validation.is_valid() {
             let errors = validation
                 .failures()

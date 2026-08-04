@@ -320,7 +320,10 @@ async fn discovery_flow_through_proxy() {
     let rp_redirect = location(&r3);
     assert!(rp_redirect.starts_with("https://rp.example.com/cb?"));
     assert_eq!(query_param(&rp_redirect, "state").as_deref(), Some("st-1"));
-    assert!(query_param(&rp_redirect, "code").is_some());
+    assert!(
+        query_param(&rp_redirect, "code").is_some(),
+        "authorization response did not contain a code: {rp_redirect}"
+    );
 }
 
 #[tokio::test]

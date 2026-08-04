@@ -56,17 +56,20 @@ Port all four, matching eduID's config shape and internal attribute names
   `KEY_TARGET_AUTHN_CONTEXT_CLASS_REF` / `KEY_TARGET_ACCR_COMPARISON`
   decorations (**first writer wins**, mirroring `KEY_TARGET_ENTITYID`). The SAML
   backend reads those into `AuthnRequestOptions` (gamlastan already builds the
-  `RequestedAuthnContext`). On the response path it reverses the rewrite and, if
-  the IdP returned an unrequested value, falls back to the highest-priority
-  requested value. Deliberate divergence kept for parity: when the minimum is
-  enforced, the rewrite map is *not* applied to the forced range (matches eduID).
+  `RequestedAuthnContext`). On the response path it reverses the rewrite and
+  rejects an unrequested or missing value by default. Operators can set
+  `allow_stronger_accr_fallback = true` to map a stronger response down to a
+  requested level for eduID compatibility; the ordered supported list prevents
+  a weaker response from being promoted. Deliberate divergence kept for parity:
+  when the minimum is enforced, the rewrite map is *not* applied to the forced
+  range (matches eduID).
 
 ## Security boundaries
 
 | Threat | Control | Residual risk |
 |--------|---------|---------------|
 | Cross-SP user correlation via a shared identifier | `pairwiseid` HMACs the requester into the value, so each SP gets a distinct, non-reversible id | Salt compromise lets an attacker recompute ids for a known `(sp, subject-id)`; treat `pairwise_salt` as a secret |
-| LoA downgrade (IdP asserts weaker than required) | `accr` enforces a per-`virtual_idp` minimum range on the request path and validates the returned ACCR on the response path, falling back to the highest requested value | tunnelbana does not (yet) *reject* a too-weak response, matching eduID's lenient fallback; operators wanting hard rejection must add an `attribute_authorization`-style gate |
+| LoA downgrade (IdP asserts weaker than an SP-requested level) | `accr` rejects missing, unknown, or weaker responses when the SP supplied an ACCR request; the optional compatibility fallback only maps a stronger asserted level down to a requested one | Enabling the fallback trusts the operator-defined strongest-to-weakest ordering; a misordered list can misclassify assurance |
 | Third-party-initiated ACCR injection | The requested ACCR is taken only from the validated AuthnRequest the SAML frontend parsed; the forward decoration is first-writer-wins | An earlier request-path service may pin the forwarded ACCR; order config intentionally |
 | Static-attribute spoofing of assurance/affiliation | `static_attributes_for_virtual_idp` values come only from operator config, keyed by validated requester + frontend | Operator config errors release wrong values; covered by config review |
 
@@ -81,8 +84,10 @@ Port all four, matching eduID's config shape and internal attribute names
 
 **Negative / accepted trade-offs**
 
-- `accr` is lenient on a too-weak IdP response (fallback, not rejection), an
-  intentional eduID-faithful choice; hard enforcement is a separate decision.
+- Exact eduID mismatch fallback requires the explicit
+  `allow_stronger_accr_fallback` compatibility option. Even then, tunnelbana
+  diverges by rejecting weaker or missing IdP responses instead of synthesizing
+  an assurance level.
 - The minimum-enforced ACCR range bypasses the rewrite map (eduID parity), a
   latent surprise documented in code and here.
 - `nameid` depends on the SAML frontend publishing the resolved format; on an

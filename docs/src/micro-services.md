@@ -801,12 +801,16 @@ and the upstream IdP.
 type = "accr"
 name = "accr"
   [microservice.config]
-  supported_accr_sorted_by_prio = [        # highest priority first; required
+  supported_accr_sorted_by_prio = [        # strongest to weakest; required
     "https://refeds.org/profile/mfa",
     "https://refeds.org/profile/sfa",
     "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
   ]
   # default_comparison = "exact"           # forwarded when the SP omits one
+  # Optional eduID compatibility: permit a stronger, supported IdP response to
+  # be normalized down to a weaker level the SP requested. Default: false.
+  # Missing or weaker IdP responses are rejected even when this is true.
+  # allow_stronger_accr_fallback = true
 
   [microservice.config.lowest_accepted_accr_for_virtual_idp]
   SunetIDP = "https://refeds.org/profile/mfa"   # must be in the supported list
@@ -820,11 +824,29 @@ publishes them as the `requested_accr` decoration), drops unsupported values,
 enforces a per-`virtual_idp` minimum range, applies `internal_accr_rewrite_map`
 for the upstream IdP, and forwards the result into the outgoing
 `RequestedAuthnContext` (first writer wins). On the **response** path it reverses
-the rewrite and, if the IdP returned an unrequested value, falls back to the
-highest-priority requested ACCR. It is *lenient*: a too-weak response is
-downgraded-to-best-requested rather than rejected (eduID-faithful). When the
+the rewrite and requires the IdP-returned value to match one requested by the
+SP. Mismatches and missing values fail closed by default. With
+`allow_stronger_accr_fallback = true`, a supported, stronger IdP response may be
+normalized down to the strongest requested level it satisfies; a weaker value
+can never be promoted. This option depends on
+`supported_accr_sorted_by_prio` being ordered strongest to weakest. When the
 minimum is enforced, the rewrite map is intentionally not applied to the forced
 range.
+
+The response policy is:
+
+| IdP response after vocabulary rewrite | Default | With `allow_stronger_accr_fallback = true` |
+| --- | --- | --- |
+| Exactly requested by the SP | Return it | Return it |
+| Supported and stronger than a requested level | Reject | Map down to the strongest requested level it satisfies |
+| Weaker than every requested level | Reject | Reject |
+| Missing or absent from the supported ordering | Reject | Reject |
+
+Enabling the compatibility option makes the order of
+`supported_accr_sorted_by_prio` security-sensitive. Review the list as a strict
+strongest-to-weakest assurance ordering before enabling it. Existing
+deployments that relied on eduID's unconditional mismatch fallback must opt in;
+leaving the option unset is the recommended fail-closed configuration.
 
 ## Writing your own
 

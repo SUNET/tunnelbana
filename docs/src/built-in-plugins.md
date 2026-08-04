@@ -250,7 +250,8 @@ name = "Saml2IDP"
   # FriendlyName from the attribute map (SWAMID-style).
   attribute_name_format    = "basic"
   # Require signed AuthnRequests even when the SP's metadata does not say
-  # AuthnRequestsSigned="true". Also advertised in IdP metadata.
+  # AuthnRequestsSigned="true". Also advertised in IdP metadata. This requires
+  # registered SP metadata and cannot be used with metadata-free open mode.
   want_authn_requests_signed = false
   # Optional: pin every flow from this frontend to a named backend, overriding
   # custom_routing and the default backend (see Backend selection).
@@ -294,10 +295,28 @@ name = "Saml2IDP"
 > could exfiltrate signed assertions to an arbitrary ACS. The frontend
 > therefore **refuses to start** without a metadata source; the dev-only
 > escape hatch is `allow_unknown_sps = true` (logged loudly, never use it in
-> production). When a signature is required (SP metadata or
+> production). Open mode cannot be combined with
+> `want_authn_requests_signed = true`: without registered SP metadata there
+> are no trusted signing keys, so the frontend rejects that configuration at
+> startup instead of silently bypassing the signature policy. When a signature
+> is required (SP metadata or
 > `want_authn_requests_signed`), redirect-binding signatures are verified over
 > the raw query string and POST-binding requests via their enveloped XML
 > signature, against the SP's metadata-registered signing certs. See ADR 0006.
+
+The startup policy for metadata and request signatures is:
+
+| SP metadata | `allow_unknown_sps` | `want_authn_requests_signed` | Startup result |
+| --- | --- | --- | --- |
+| Configured | `false` | `false` | Valid; each SP follows its metadata `AuthnRequestsSigned` policy |
+| Configured | `false` | `true` | Valid; every AuthnRequest must verify against a registered SP key |
+| Missing | `false` | Either | Configuration error; registered SP metadata is required |
+| Missing | `true` | `false` | Allowed only as explicitly insecure local-testing mode |
+| Missing | `true` | `true` | Configuration error; there is no trusted SP key for verification |
+
+When metadata is configured, leave `allow_unknown_sps` unset. The flag is only
+an escape hatch for metadata-free local tests and does not make unknown SPs
+eligible alongside a metadata store.
 
 > **Signing.** By default tunnelbana signs the **assertion** only, which is the
 > common interoperable pattern: an SP that verifies the single assertion
@@ -982,18 +1001,20 @@ name = "nameid"
 # Request path: keep only supported ACCRs the SP requested, enforce a per
 # virtual-IdP minimum (the supported range from strongest down to the minimum),
 # rewrite for the upstream IdP, and forward into the outgoing AuthnRequest.
-# Response path: reverse the rewrite and, if the IdP returned an unrequested
-# value, fall back to the highest-priority requested ACCR.
+# Response path: when the SP requested an ACCR, reverse the rewrite and reject
+# missing or unrequested values by default. An explicit compatibility option
+# can normalize stronger assertions down, but never promote a weaker assertion.
 [[microservice]]
 type = "accr"
 name = "accr"
   [microservice.config]
-  supported_accr_sorted_by_prio = [        # highest priority first; required
+  supported_accr_sorted_by_prio = [        # strongest to weakest; required
     "https://refeds.org/profile/mfa",
     "https://refeds.org/profile/sfa",
     "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
   ]
   # default_comparison = "exact"           # forwarded when the SP omits one
+  # allow_stronger_accr_fallback = true    # default false; see security note below
 
   # Per virtual-IdP (frontend name) minimum acceptable ACCR (must be in the
   # supported list).
@@ -1004,6 +1025,13 @@ name = "accr"
   [microservice.config.internal_accr_rewrite_map]
   "http://id.swedenconnect.se/loa/1.0/uncertified-loa2" = "http://id.elegnamnden.se/loa/1.0/loa2"
 ```
+
+`allow_stronger_accr_fallback` is intended for eduID-compatible deployments
+where the proxy asks upstream for a stronger level than the SP listed. It maps
+only a supported, stronger assertion down to a requested level. Missing,
+unknown, or weaker assertions still fail the authentication flow. Because this
+check uses `supported_accr_sorted_by_prio` as an assurance ordering, keep that
+list ordered from strongest to weakest.
 
 ### `custom_routing` - backend selection (request path, ADR 0015)
 

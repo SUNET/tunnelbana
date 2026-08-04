@@ -1532,3 +1532,22 @@ fn saml_frontend_requires_metadata_or_explicit_open_mode() {
             .is_err()
     );
 }
+
+#[test]
+fn saml_frontend_rejects_required_signatures_without_sp_metadata() {
+    let config = serde_json::json!({
+        "idp_key_path": testdata("idp-key.pem"),
+        "idp_cert_path": testdata("idp-cert.pem"),
+        "allow_unknown_sps": true,
+        "want_authn_requests_signed": true,
+    });
+
+    // Open mode has no trusted SP signing keys. Accepting this combination
+    // would advertise and configure a requirement that cannot be enforced.
+    let result =
+        tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", config));
+    assert!(
+        result.is_err(),
+        "required AuthnRequest signatures must fail closed without SP metadata"
+    );
+}

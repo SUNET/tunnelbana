@@ -384,6 +384,18 @@ impl Saml2Frontend {
                 SpStore::Store { local, mdq }
             }
             (None, true) => {
+                // Open mode deliberately has no registered SP metadata, so it
+                // also has no trusted SP signing keys. Reject the contradictory
+                // policy at startup instead of silently treating every request
+                // as unverified while advertising that signatures are required.
+                if cfg.want_authn_requests_signed {
+                    return Err(Error::Config(
+                        "saml2 frontend cannot combine allow_unknown_sps=true with \
+                         want_authn_requests_signed=true: AuthnRequest signatures cannot be \
+                         verified without registered SP metadata"
+                            .into(),
+                    ));
+                }
                 tracing::warn!(
                     "saml2 frontend {}: allow_unknown_sps=true — accepting AuthnRequests \
                      from unregistered SPs and trusting the ACS URL in the request. \
@@ -476,10 +488,16 @@ impl Saml2Frontend {
 
         // Signature policy: required when the SP's metadata says
         // AuthnRequestsSigned="true" or the frontend is configured to insist.
-        if let Some(entry) = &entry {
+        // gamlastan 0.8 also requires proof for requests which carry signature
+        // markup, even when metadata does not require signed requests.
+        let request_signature_verified = if let Some(entry) = &entry {
             let must_sign =
                 entry.sp_sso.authn_requests_signed == Some(true) || self.want_authn_requests_signed;
-            if must_sign {
+            let carries_signature = authn_request.base.has_signature
+                || redirect_decoded
+                    .as_ref()
+                    .is_some_and(|decoded| decoded.signature.is_some());
+            if must_sign || carries_signature {
                 if let Err(reason) =
                     verify_authn_request_signature(entry, &redirect_decoded, &authn_request, &xml)
                 {
@@ -489,14 +507,74 @@ impl Saml2Frontend {
                     );
                     return Ok(FrontendAction::Respond(Response::text(403, reason)));
                 }
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
 
         // With SP metadata present this validates/resolves the ACS endpoint
         // against the registered AssertionConsumerServices.
-        let processed =
-            idp_profile::process_authn_request(&authn_request, entry.as_ref().map(|e| &e.sp_sso))
-                .map_err(|e| Error::BadRequest(format!("AuthnRequest validation: {e}")))?;
+        // The explicitly insecure allow_unknown_sps mode retains its legacy
+        // behavior and accepts only an ACS URL carried directly in the request.
+        // With no metadata there is neither a registered signing certificate
+        // nor an authoritative ACS list, so this branch cannot prove the
+        // requester's identity or destination; keeping it separate makes that
+        // trust-boundary exception visible during review.
+        let processed = match entry.as_ref() {
+            Some(entry) => idp_profile::process_authn_request(
+                &authn_request,
+                &entry.sp_sso,
+                request_signature_verified,
+            )
+            .map_err(|e| Error::BadRequest(format!("AuthnRequest validation: {e}")))?,
+            None => {
+                let acs_url = authn_request
+                    .assertion_consumer_service_url
+                    .clone()
+                    .ok_or_else(|| {
+                        Error::BadRequest(
+                            "AuthnRequest has no ACS URL and no SP metadata is available".into(),
+                        )
+                    })?;
+                let acs_binding = authn_request
+                    .protocol_binding
+                    .clone()
+                    .unwrap_or_else(|| constants::BINDING_HTTP_POST.to_string());
+                let (requested_name_id_format, allow_create) = authn_request
+                    .name_id_policy
+                    .as_ref()
+                    .map_or((None, false), |policy| {
+                        (policy.format.clone(), policy.allow_create)
+                    });
+                let (requested_authn_context_class_refs, authn_context_comparison) = authn_request
+                    .requested_authn_context
+                    .as_ref()
+                    .map_or((vec![], None), |context| {
+                        (
+                            context.authn_context_class_refs.clone(),
+                            Some(context.comparison),
+                        )
+                    });
+                gamlastan::profiles::sso::idp::ProcessedAuthnRequest {
+                    request_id: authn_request.base.id.clone(),
+                    sp_entity_id,
+                    acs_url,
+                    acs_binding,
+                    force_authn: authn_request.force_authn.unwrap_or(false),
+                    is_passive: authn_request.is_passive.unwrap_or(false),
+                    requested_name_id_format,
+                    allow_create,
+                    requested_authn_context_class_refs,
+                    authn_context_comparison,
+                    attribute_consuming_service_index: authn_request
+                        .attribute_consuming_service_index,
+                    extensions: authn_request.extensions.clone(),
+                }
+            }
+        };
 
         // Honor the NameIDPolicy: no (or unspecified) requested format gets
         // the first configured one; a format outside the configured list is

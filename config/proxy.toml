@@ -182,7 +182,9 @@ name = "Upstream"
 # ── Frontend: SAML2 IdP (the proxy faces downstream SAML SPs) ────────────────
 # Registered SP metadata is REQUIRED: the requester and its ACS URL are
 # validated against it (assertions are never sent to an ACS taken from the
-# request). Set allow_unknown_sps = true only for local testing.
+# request). Set allow_unknown_sps = true only for local testing; open mode
+# cannot be combined with want_authn_requests_signed because it has no trusted
+# SP metadata keys with which to verify request signatures.
 #
 # [[frontend]]
 # type = "saml2"
@@ -207,7 +209,9 @@ name = "Upstream"
 #   # SWAMID SPs expect; OIDs come from config/attributes.toml. Default "basic".
 #   # attribute_name_format = "uri"
 #
-#   # Require signed AuthnRequests even when SP metadata doesn't say so.
+#   # Require signed AuthnRequests even when SP metadata doesn't say so. This
+#   # requires registered SP metadata and cannot be combined with metadata-free
+#   # allow_unknown_sps mode.
 #   # want_authn_requests_signed = true
 #
 #   [frontend.config.metadata]

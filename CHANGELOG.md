@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **ACCR assurance validation:** when an SP requests an AuthnContextClassRef,
+  missing or unrequested IdP responses now fail closed instead of being
+  replaced with the strongest value requested by the SP. Controlled
+  eduID-compatible deployments can opt into `allow_stronger_accr_fallback`; it
+  only normalizes a stronger assertion down and never promotes a weaker one.
+
+- **SAML / JOSE dependency refresh:** upgraded `gamlastan` and
+  `gamlastan-mdq` to 0.8.0 and `jose-rs` to 0.6.0. The SAML frontend now passes
+  cryptographic AuthnRequest-signature proof into gamlastan's hardened IdP
+  validator, while the backend keeps an assertion replay cache for its full
+  process lifetime as required by gamlastan 0.8. The development-only
+  `allow_unknown_sps` mode retains its explicitly insecure, request-carried
+  ACS behavior, but it can no longer be combined with
+  `want_authn_requests_signed`: without registered SP metadata keys that policy
+  now fails configuration instead of being silently bypassed.
+
+- **Protocol-library releases:** upgraded to released `grindvakt` 0.6.2 and
+  `jose-rs` 0.6.0 from crates.io, removing the temporary sibling-worktree
+  patch used during integration.
+
 ## 0.2.0 [2026-07-07]
 
 - **Security / SAML dependency stack:** bumped `gamlastan` and `gamlastan-mdq`

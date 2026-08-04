@@ -32,7 +32,9 @@ The frontend **refuses to build** without a registered-SP metadata source.
   shared `MdqConfig`, with `require_role` forced to `"sp"`). No `[metadata]`
   block and no escape hatch ⇒ **config error** naming the flag.
   `allow_unknown_sps = true` restores the legacy open behavior with a startup
-  warning — explicitly insecure, testing only.
+  warning — explicitly insecure, testing only. Open mode combined with
+  `want_authn_requests_signed = true` is a config error because no registered
+  SP signing keys exist to enforce that policy.
 - **SP store.** `enum SpStore { AllowAll, Store { local, mdq } }`; local files
   are parsed and indexed at build time into `SpEntry { sp_sso,
   signing_certs_der, encryption_certs_der }`; entities not found locally are
@@ -61,6 +63,7 @@ The frontend **refuses to build** without a registered-SP metadata source.
 | Assertion exfiltration: attacker-chosen ACS URL | ACS resolved/validated against registered SP metadata; unknown SP ⇒ 403 | `allow_unknown_sps = true` reopens the hole (warned, testing only) |
 | SP impersonation (forged `Issuer`) | Without a signature requirement an attacker can still *start* a flow as a known SP, but assertions only ever go to that SP's registered ACS | Phishing-style flows land at the real SP; enable signing requirements where the federation supports it |
 | Forged signed requests | Signature verified against the SP's federation-registered certs (metadata signed/MDQ-verified per ADR 0005) | Compromised SP key — out of scope |
+| Signature policy bypass in open mode | Startup rejects `allow_unknown_sps = true` together with `want_authn_requests_signed = true`; open mode has no trusted SP keys | Open mode remains explicitly insecure when signatures are not required |
 | Redirect-signature malleability via re-encoding | Signature input taken verbatim from the raw query string, never re-encoded | None known |
 | Unparseable/missing KeyInfo in SP metadata | Empty cert list fails closed (`verifier_from_cert_ders` errors; request rejected when a signature is required) | — |
 
