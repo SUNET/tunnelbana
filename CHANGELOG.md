@@ -14,7 +14,9 @@
   validator, while the backend keeps an assertion replay cache for its full
   process lifetime as required by gamlastan 0.8. The development-only
   `allow_unknown_sps` mode retains its explicitly insecure, request-carried
-  ACS behavior.
+  ACS behavior, but it can no longer be combined with
+  `want_authn_requests_signed`: without registered SP metadata keys that policy
+  now fails configuration instead of being silently bypassed.
 
 - **Protocol-library releases:** upgraded to released `grindvakt` 0.6.2 and
   `jose-rs` 0.6.0 from crates.io, removing the temporary sibling-worktree

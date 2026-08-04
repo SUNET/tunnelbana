@@ -384,6 +384,18 @@ impl Saml2Frontend {
                 SpStore::Store { local, mdq }
             }
             (None, true) => {
+                // Open mode deliberately has no registered SP metadata, so it
+                // also has no trusted SP signing keys. Reject the contradictory
+                // policy at startup instead of silently treating every request
+                // as unverified while advertising that signatures are required.
+                if cfg.want_authn_requests_signed {
+                    return Err(Error::Config(
+                        "saml2 frontend cannot combine allow_unknown_sps=true with \
+                         want_authn_requests_signed=true: AuthnRequest signatures cannot be \
+                         verified without registered SP metadata"
+                            .into(),
+                    ));
+                }
                 tracing::warn!(
                     "saml2 frontend {}: allow_unknown_sps=true — accepting AuthnRequests \
                      from unregistered SPs and trusting the ACS URL in the request. \
