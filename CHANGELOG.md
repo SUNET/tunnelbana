@@ -18,8 +18,9 @@
 
 - **Release-policy hardening:** attribute filtering is fail-closed unless
   `passthrough_unmatched` is explicitly enabled; primary identifiers use
-  versioned, component-counted, length-prefixed framing; issuer routing is scoped to authorized
-  requesters; hash processors require a non-empty salt; audit logs are created
+  versioned, component-counted, length-prefixed framing; issuer routing is
+  scoped to authorized requesters and rejects duplicate policy pairs; hash
+  processors require a non-empty salt; audit logs are created
   owner-only on Unix; and public OAuth/SAML errors no longer disclose internal details.
   These configuration and identifier-format changes require an operator review
   when upgrading from 0.2.x.

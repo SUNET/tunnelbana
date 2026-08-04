@@ -700,7 +700,8 @@ hint can only choose among legitimate federation IdPs.
 Every `issuer_rule` must also list its authorized `requesters`. The hint is
 request-controlled routing input, not authorization: a requester absent from
 that list cannot use the issuer rule and falls through to its requester rule or
-the default backend.
+the default backend. Each `(issuer, requester)` pair may appear only once;
+duplicates are rejected at startup rather than resolved by configuration order.
 
 These services still run when a frontend has pinned a backend, but their backend
 selection loses to the frontend pin. A frontend with `backend = "<name>"` in its

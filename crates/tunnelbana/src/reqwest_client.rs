@@ -49,7 +49,9 @@ impl HttpClient for ReqwestClient {
             .send()
             .await
             .map_err(|e| Error::Internal(format!("GET {url}: {e}")))?;
-        into_fetch(resp, self.max_response_bytes).await
+        into_fetch(resp, self.max_response_bytes)
+            .await
+            .map_err(|error| request_error("GET", url, error))
     }
 
     async fn post_form(
@@ -66,8 +68,16 @@ impl HttpClient for ReqwestClient {
             .send()
             .await
             .map_err(|e| Error::Internal(format!("POST {url}: {e}")))?;
-        into_fetch(resp, self.max_response_bytes).await
+        into_fetch(resp, self.max_response_bytes)
+            .await
+            .map_err(|error| request_error("POST", url, error))
     }
+}
+
+/// Retain the originating operation when body streaming or size enforcement
+/// fails after the request itself was sent successfully.
+fn request_error(method: &str, url: &str, error: Error) -> Error {
+    Error::Internal(format!("{method} {url}: {error}"))
 }
 
 async fn into_fetch(
@@ -133,5 +143,22 @@ mod tests {
         let error = append_bounded(&mut body, b"7", 6).unwrap_err();
         assert!(error.to_string().contains("6 byte limit"));
         assert_eq!(body, b"123456", "oversized chunk must not be appended");
+    }
+
+    #[test]
+    fn body_processing_errors_retain_request_context() {
+        for (method, url) in [
+            ("GET", "https://issuer.example/jwks"),
+            ("POST", "https://issuer.example/token"),
+        ] {
+            let error = request_error(
+                method,
+                url,
+                Error::Internal("outbound response exceeds limit".into()),
+            );
+            let message = error.to_string();
+            assert!(message.contains(&format!("{method} {url}")));
+            assert!(message.contains("outbound response exceeds limit"));
+        }
     }
 }

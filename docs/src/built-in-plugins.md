@@ -1081,6 +1081,8 @@ name = "routing"
   requesters = ["https://sp-a.example.com"]
   backend = "LegacySaml"
 
+  # Each issuer/requester pair must be unique; duplicates fail startup.
+
   [microservice.config]
   default_backend = "Upstream"
 ```

@@ -116,7 +116,8 @@ ADR 0024.
   `passthrough_unmatched = true` option.
 - Every target-issuer routing rule has a mandatory requester allow-list. Both
   the requested issuer and the identified downstream requester must match
-  before the rule can select a backend.
+  before the rule can select a backend. Duplicate `(issuer, requester)` pairs
+  are rejected at startup so configuration order cannot change policy.
 - Hash processors require a non-empty salt at startup. Legacy MD5 remains
   separately guarded as defined by ADR 0032.
 - Every `primary_identifier` result uses versioned, component-counted,

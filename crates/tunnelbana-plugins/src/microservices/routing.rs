@@ -1,6 +1,6 @@
 //! `custom_routing` and `idp_hinting`.
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -65,7 +65,21 @@ impl CustomRouting {
                 )));
             }
             for requester in rule.requesters {
-                issuer_rules.insert((rule.issuer.clone(), requester), rule.backend.clone());
+                // Each issuer/requester pair must have exactly one backend.
+                // Reject ambiguity at startup instead of letting map insertion
+                // order decide which operator policy wins.
+                match issuer_rules.entry((rule.issuer.clone(), requester)) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(rule.backend.clone());
+                    }
+                    Entry::Occupied(entry) => {
+                        let (issuer, requester) = entry.key();
+                        return Err(Error::Config(format!(
+                            "custom_routing {}: duplicate issuer_rule for issuer {issuer} and requester {requester}",
+                            bx.name
+                        )));
+                    }
+                }
             }
         }
         Ok(Box::new(CustomRouting {
@@ -252,6 +266,36 @@ mod tests {
             }),
         ))
         .is_err());
+    }
+
+    #[test]
+    fn duplicate_issuer_requester_rules_are_rejected() {
+        let result = CustomRouting::build(&bx(
+            "route",
+            serde_json::json!({
+                "issuer_rule": [
+                    {
+                        "issuer": "https://idp.example",
+                        "requesters": ["sp-a"],
+                        "backend": "Saml2"
+                    },
+                    {
+                        "issuer": "https://idp.example",
+                        "requesters": ["sp-a"],
+                        "backend": "Oidc"
+                    }
+                ]
+            }),
+        ));
+
+        let error = match result {
+            Ok(_) => panic!("duplicate issuer/requester rule was accepted"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("duplicate issuer_rule"));
+        assert!(message.contains("https://idp.example"));
+        assert!(message.contains("sp-a"));
     }
 
     #[tokio::test]
