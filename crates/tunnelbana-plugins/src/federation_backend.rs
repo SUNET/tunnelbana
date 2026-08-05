@@ -419,6 +419,16 @@ impl FederationBackend {
         let resolved =
             federation::resolve_via_trust_anchors(&self.http, op_entity_id, &self.trust_anchors)
                 .await?;
+        let trust_expiry = resolved.exp.ok_or_else(|| {
+            Error::Authn("resolved federation OP has no trust-anchor expiry".into())
+        })?;
+        let now = now_secs();
+        let trust_ttl = trust_expiry
+            .checked_sub(now)
+            .filter(|ttl| *ttl > 0)
+            .ok_or_else(|| {
+                Error::Authn("resolved federation OP trust decision is expired".into())
+            })?;
         let op_meta = resolved
             .metadata
             .get("openid_provider")
@@ -445,9 +455,11 @@ impl FederationBackend {
             federation_jwks: resolved.subject_jwks,
         };
 
+        // The local cache is an optimization, never an extension of the trust
+        // anchor's signed decision. Use whichever lifetime ends first.
         self.resolved.write().expect("lock").insert(
             op_entity_id.to_string(),
-            (now_secs() + self.op_cache_ttl, op.clone()),
+            (now + self.op_cache_ttl.min(trust_ttl), op.clone()),
         );
         tracing::info!(op = %op_entity_id, "resolved upstream OP via trust anchor");
         Ok(op)
@@ -788,9 +800,9 @@ impl FederationBackend {
         if let (Some(userinfo_ep), Some(access_token)) =
             (&op.provider.userinfo_endpoint, &tokens.access_token)
         {
-            if let Ok(userinfo) = rp::fetch_userinfo(&self.http, userinfo_ep, access_token).await {
-                merge_json(&mut merged, &userinfo);
-            }
+            let userinfo = rp::fetch_userinfo(&self.http, userinfo_ep, access_token).await?;
+            require_matching_userinfo_subject(&userinfo, &sub)?;
+            merge_json(&mut merged, &userinfo);
         }
 
         let external = rp::claims_to_attributes(&merged);
@@ -823,6 +835,39 @@ fn merge_json(base: &mut Value, extra: &Value) {
         for (k, v) in e {
             b.entry(k.clone()).or_insert_with(|| v.clone());
         }
+    }
+}
+
+fn require_matching_userinfo_subject(userinfo: &Value, id_token_sub: &str) -> Result<()> {
+    let userinfo_sub = userinfo
+        .as_object()
+        .and_then(|claims| claims.get("sub"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Authn("userinfo response missing sub".into()))?;
+    if userinfo_sub != id_token_sub {
+        return Err(Error::Authn(
+            "userinfo sub does not match id_token sub".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::*;
+
+    #[test]
+    fn federation_userinfo_subject_must_match() {
+        assert!(
+            require_matching_userinfo_subject(&serde_json::json!({ "sub": "alice" }), "alice")
+                .is_ok()
+        );
+        assert!(require_matching_userinfo_subject(
+            &serde_json::json!({ "sub": "mallory" }),
+            "alice"
+        )
+        .is_err());
+        assert!(require_matching_userinfo_subject(&serde_json::json!({}), "alice").is_err());
     }
 }
 

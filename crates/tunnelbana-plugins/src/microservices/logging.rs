@@ -1,8 +1,12 @@
 //! `custom_logging` — per-flow JSON audit records (SATOSA:
 //! `CustomLoggingService`).
 
+use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -34,16 +38,12 @@ impl CustomLogging {
         let cfg: CustomLoggingConfig = bx.parse_config()?;
         let log_target = PathBuf::from(&cfg.log_target);
         // Surface an unwritable target at startup, not mid-flow.
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_target)
-            .map_err(|e| {
-                Error::Config(format!(
-                    "custom_logging {}: cannot open log_target {}: {e}",
-                    bx.name, cfg.log_target
-                ))
-            })?;
+        open_private_log(&log_target).map_err(|e| {
+            Error::Config(format!(
+                "custom_logging {}: cannot open log_target {}: {e}",
+                bx.name, cfg.log_target
+            ))
+        })?;
         Ok(Box::new(CustomLogging {
             name: bx.name.clone(),
             log_target,
@@ -86,11 +86,8 @@ impl MicroService for CustomLogging {
             "attr": attrs,
         });
 
-        let written = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_target)
-            .and_then(|mut f| writeln!(f, "{record}"));
+        let written =
+            open_private_log(&self.log_target).and_then(|mut file| writeln!(file, "{record}"));
         if let Err(e) = written {
             tracing::error!(
                 microservice = %self.name,
@@ -101,6 +98,20 @@ impl MicroService for CustomLogging {
         }
         Ok(data)
     }
+}
+
+/// Open an audit log with owner-only permissions. On Unix, `mode` protects a
+/// newly created file and `set_permissions` also repairs a pre-existing target
+/// that was created under a permissive umask.
+fn open_private_log(path: &std::path::Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -159,5 +170,20 @@ mod tests {
             serde_json::json!({ "log_target": "/nonexistent-dir/audit.jsonl" })
         ))
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_is_owner_only() {
+        let path = temp_log("permissions");
+        let _ = std::fs::remove_file(&path);
+        CustomLogging::build(&bx(
+            "audit",
+            serde_json::json!({ "log_target": path.to_str().unwrap() }),
+        ))
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_file(&path);
     }
 }

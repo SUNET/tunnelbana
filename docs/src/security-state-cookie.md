@@ -7,14 +7,18 @@ target frontend/backend, SAML `relay_state` / `request_id`, and - most
 sensitively - the OIDC `state`, `nonce`, and PKCE `code_verifier` that tunnelbana
 holds as a relying party toward the upstream IdP.
 
-tunnelbana keeps **no server-side session store**. All of that state lives in a
-single cookie, so any worker can serve any request and the proxy scales
-horizontally with nothing shared. That makes the cookie **attacker-reachable
-data**: the client can read its bytes, replay it, drop it, or try to tamper with
-it. Everything below is how the cookie is hardened against that.
+tunnelbana keeps **no server-side session store for login-flow state**. All of
+that state lives in a single cookie, so any worker can serve the flow. This does
+not include the process-local DPoP and SAML assertion replay caches; deployments
+using those features must remain single-process unless a shared replay store is
+added. The cookie is **attacker-reachable data**: the client can read its bytes,
+replay it, drop it, or try to tamper with it. Everything below is how the cookie
+is hardened against that.
 
-> The design rationale and threat table are recorded in
+> The original design rationale is recorded in
 > [ADR 0001 - Stateless encrypted state cookie](https://github.com/SUNET/tunnelbana/blob/main/docs/adr/0001-state-cookie-encryption.md).
+> Its current lifetime and deployment boundaries are superseded by
+> [ADR 0033 - Fail-closed security boundaries for tunnelbana 0.3.0](https://github.com/SUNET/tunnelbana/blob/main/docs/adr/0033-security-audit-hardening.md).
 > This page is the operator-facing summary.
 
 ## Cryptographic construction
@@ -41,8 +45,9 @@ is a format version; `iat` is the issue time in Unix seconds.
 
 On every unseal, state older than `state_cookie_max_age` (default **1800 s /
 30 min**; `0` disables the check) is rejected and treated as a fresh, empty
-session. The same value is emitted as the cookie `Max-Age`, so client and server
-agree on the lifetime. This bounds the replay window on the single-use flow
+session. Resealing preserves the envelope's **original** `iat` and emits only
+the remaining lifetime as `Max-Age`; ordinary requests cannot turn expiry into
+a sliding window. This bounds the replay window on the single-use flow
 secrets (`state`, `nonce`, `code_verifier`) the cookie carries.
 
 ## Algorithm pinning and key rotation
@@ -56,6 +61,8 @@ secrets (`state`, `nonce`, `code_verifier`) the cookie carries.
   secret into `previous_state_encryption_keys` and set the new one as
   `state_encryption_key`; cookies sealed under the old key keep decrypting until
   they expire, after which the old secret can be dropped.
+  Previous keys have the same 32-byte minimum as the primary; startup fails
+  instead of accepting a weak alternate decryption key.
 
 ```toml
 # During a rotation window:
@@ -100,7 +107,7 @@ under a key only the server holds.
 |--------|---------|---------------|
 | Tampering / forging session state | AEAD (`A256GCM`) under a server-only key | None without the key |
 | Reading flow secrets (PKCE verifier, `state`, `nonce`) | Encryption | None without the key |
-| Unbounded replay of a captured cookie | `iat` + TTL + `Max-Age` | A **valid, unexpired** cookie is replayable within the TTL - stateless by design means no server-side revocation |
+| Unbounded replay of a captured cookie | Original `iat` retained on reseal + absolute TTL + remaining `Max-Age` | A **valid, unexpired** cookie is replayable within the absolute TTL - stateless by design means no server-side revocation |
 | Offline brute-force of a weak secret | HKDF-SHA256 + 32-byte minimum | A truly low-entropy 32-byte secret is still the operator's responsibility |
 | Algorithm substitution | `alg`/`enc` allow-list pinned to `dir`+`A256GCM` | None for this construction |
 | Cross-site / script exfiltration | `HttpOnly`, `Secure`, `__Host-`, `SameSite` | `SameSite=None` (needed for SSO) means CSRF protection rests on the per-flow `state`/`nonce`, not the cookie |

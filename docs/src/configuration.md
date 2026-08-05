@@ -19,6 +19,10 @@ cookie_name          = "TUNNELBANA_STATE"           # default
 cookie_secure        = true                          # default; set false for local http
 cookie_same_site     = "None"                        # default; None|Lax|Strict
 state_cookie_max_age = 1800                           # default, seconds (0 disables)
+http_connect_timeout_seconds = 10                    # outbound HTTP defaults
+http_read_timeout_seconds    = 15
+http_request_timeout_seconds = 30
+http_max_response_bytes      = 8388608               # 8 MiB
 attributes           = "config/attributes.toml"      # path, relative to this file
 cache_dir            = "/var/lib/tunnelbana/cache"    # optional, disk cache snapshots
 index_html           = "index.html"                  # optional, custom landing page at /
@@ -28,11 +32,15 @@ index_html           = "index.html"                  # optional, custom landing 
 | --- | --- | --- | --- |
 | `base_url` | ✅ | - | Public base URL. Each module is mounted under `<base_url>/<name>`. |
 | `state_encryption_key` | ✅ | - | Secret used to derive the state-cookie AEAD key and the OIDC token-codec key. Must be ≥ 32 bytes; see [Security](security-state-cookie.md). |
-| `previous_state_encryption_keys` | | `[]` | Old secrets kept for **decryption only**, to allow zero-downtime [key rotation](security-state-cookie.md#algorithm-pinning-and-key-rotation). |
+| `previous_state_encryption_keys` | | `[]` | Old secrets kept for **decryption only**, to allow zero-downtime [key rotation](security-state-cookie.md#algorithm-pinning-and-key-rotation). Every old key has the same 32-byte minimum as the primary key. |
 | `cookie_name` | | `TUNNELBANA_STATE` | Name of the encrypted state cookie. Carries a `__Host-` prefix when `cookie_secure` is on. |
 | `cookie_secure` | | `true` | Sets the cookie `Secure` flag. Set `false` only for local plain-HTTP testing. |
 | `cookie_same_site` | | `None` | The cookie `SameSite` attribute (`None`, `Lax`, or `Strict`). `None` is needed for cross-site SSO POST-back. |
 | `state_cookie_max_age` | | `1800` | Max lifetime of sealed state, in seconds; emitted as `Max-Age` and enforced on unseal. `0` disables the freshness check. |
+| `http_connect_timeout_seconds` | | `10` | Connection-establishment deadline for outbound metadata, discovery, JWKS, token and UserInfo requests. |
+| `http_read_timeout_seconds` | | `15` | Maximum idle time between chunks of an outbound response body. |
+| `http_request_timeout_seconds` | | `30` | Total deadline for one outbound request, including its response body. |
+| `http_max_response_bytes` | | `8388608` | Maximum outbound response body buffered by the shared client. Both `Content-Length` and streamed bytes are checked. |
 | `attributes` | | - | Path to the [attribute map](#the-attribute-map). Without it, no attribute translation happens. |
 | `cache_dir` | | - | Directory for cache persistence snapshots (e.g. federation metadata). |
 | `index_html` | | - | Path to a custom HTML file served verbatim at `/`. Without it, a [built-in landing page](#the-index-page) is served. |

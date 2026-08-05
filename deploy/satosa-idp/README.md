@@ -35,6 +35,11 @@ Published at **https://satosa.labb.sunet.se** (entity_id is the bare host).
 
 ### Keys (in `keys/`)
 
+The directory is mounted read-only at runtime and excluded from the Docker
+build context. Private keys must never be copied into the image: image layers,
+registry artifacts, and builder caches are not secret stores. Provision
+`keys/` on the host with owner-only permissions before starting compose.
+
 * `federation_ec.key` — EC P-256, signs the entity configuration (`kid federation-key-1`).
   **This is the key the realta TA pins** in its subordinate statement for
   `https://satosa.labb.sunet.se`, so the entity_id had to stay the bare host.
@@ -45,7 +50,8 @@ Published at **https://satosa.labb.sunet.se** (entity_id is the bare host).
 ## Build & deploy (fast path — no Rust on the remote)
 
 The binary is cross-built on the dev host inside a debian-13 (trixie) container
-so its glibc matches `debian:13-slim`; the remote only mounts it.
+so its glibc matches `debian:13-slim`; the image contains neither the binary nor
+private keys, and the remote mounts both at runtime.
 
 ```bash
 # 1. Build (cached target + host cargo registry):
@@ -82,4 +88,3 @@ ssh debian@realta.labb.sunet.se 'cd ~/tunnelbana-idp && ./register_sp.sh'
 * `GET /OIDFed/authorization` for federation RPs `satosarp` and `realrp`:
   auto-registers the RP via the TA, then **302 → `samlidp.labb.sunet.se/sso`**
   with a signed SAMLRequest.
-

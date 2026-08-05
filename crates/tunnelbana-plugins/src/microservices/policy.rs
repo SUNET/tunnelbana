@@ -74,15 +74,21 @@ struct FilterAttributesConfig {
     /// `"default"` act as wildcard keys.
     #[serde(default)]
     policy: BTreeMap<String, PolicyEntry>,
+    /// Explicit compatibility switch for deployments that intentionally want
+    /// unmatched requesters to receive every upstream attribute.
+    #[serde(default)]
+    passthrough_unmatched: bool,
 }
 
 /// Keeps only allow-listed internal attributes on the response path. A
-/// per-requester `policy` entry overrides the global `allowed` list; with
-/// neither, attributes pass through untouched.
+/// per-requester `policy` entry overrides the global `allowed` list. An
+/// unmatched requester receives no attributes unless the operator explicitly
+/// enables `passthrough_unmatched`.
 pub struct FilterAttributes {
     name: String,
     allowed: Option<Vec<String>>,
     policy: BTreeMap<String, PolicyEntry>,
+    passthrough_unmatched: bool,
 }
 
 impl FilterAttributes {
@@ -100,6 +106,7 @@ impl FilterAttributes {
             name: bx.name.clone(),
             allowed: cfg.allowed,
             policy: cfg.policy,
+            passthrough_unmatched: cfg.passthrough_unmatched,
         }))
     }
 }
@@ -120,8 +127,13 @@ impl MicroService for FilterAttributes {
             Some(policy) => policy.allowed.as_ref(),
             None => self.allowed.as_ref(),
         };
-        if let Some(allowed) = allowed {
-            data.attributes.retain(|k, _| allowed.contains(k));
+        match allowed {
+            Some(allowed) => data.attributes.retain(|k, _| allowed.contains(k)),
+            // Absence is no longer an implicit "allow all" rule. This catches
+            // empty configs and requester typos before attributes cross the
+            // proxy's release boundary.
+            None if !self.passthrough_unmatched => data.attributes.clear(),
+            None => {}
         }
         Ok(data)
     }
@@ -180,8 +192,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_config_passes_through() {
+    async fn no_config_drops_all_attributes() {
         let filter = FilterAttributes::build(&bx("filter", serde_json::json!({}))).unwrap();
+        let mut data = InternalData::default();
+        data.set_attr("mail", "a@x");
+        let data = filter.process_response(&mut ctx(), data).await.unwrap();
+        assert!(data.attributes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn passthrough_requires_explicit_acknowledgement() {
+        let filter = FilterAttributes::build(&bx(
+            "filter",
+            serde_json::json!({ "passthrough_unmatched": true }),
+        ))
+        .unwrap();
         let mut data = InternalData::default();
         data.set_attr("mail", "a@x");
         let data = filter.process_response(&mut ctx(), data).await.unwrap();

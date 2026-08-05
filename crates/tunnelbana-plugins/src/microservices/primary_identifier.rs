@@ -12,7 +12,7 @@ use tunnelbana_core::plugin::{BuildContext, MicroService};
 
 #[derive(Debug, Clone, Deserialize)]
 struct Candidate {
-    /// Attribute names whose first values are concatenated; the special name
+    /// Attribute names whose first values are combined; the special name
     /// `name_id` pulls in the subject id when `name_id_format` matches the
     /// response's subject type.
     attribute_names: Vec<String>,
@@ -66,8 +66,7 @@ struct PrimaryIdentifierConfig {
 }
 
 /// Constructs a primary identifier from the first candidate whose attributes
-/// are all present, concatenating their first values (plus the subject id for
-/// `name_id`, plus an optional scope).
+/// are all present. Every identifier uses injective, versioned framing.
 pub struct PrimaryIdentifier {
     name: String,
     config: PrimaryIdentifierConfig,
@@ -187,7 +186,15 @@ impl PrimaryIdentifier {
                 }
             }
             if !values.is_empty() {
-                return Some(values.concat());
+                // Include a format version and the component count as well as
+                // each value's length. Framing single-component identifiers too
+                // prevents a raw upstream value from colliding with the encoded
+                // form of a multi-component candidate.
+                let components: String = values
+                    .iter()
+                    .map(|value| format!("{}:{value}", value.len()))
+                    .collect();
+                return Some(format!("tbpid-v1:{}:{components}", values.len()));
             }
         }
         None
@@ -272,8 +279,14 @@ mod tests {
         let mut data = response_from("https://sp.example");
         data.set_attr("edupersonprincipalname", "anna@example.org");
         let data = pid.process_response(&mut ctx(), data).await.unwrap();
-        assert_eq!(data.attr_first("uid"), Some("anna@example.org"));
-        assert_eq!(data.subject_id.as_deref(), Some("anna@example.org"));
+        assert_eq!(
+            data.attr_first("uid"),
+            Some("tbpid-v1:1:16:anna@example.org")
+        );
+        assert_eq!(
+            data.subject_id.as_deref(),
+            Some("tbpid-v1:1:16:anna@example.org")
+        );
 
         // Only the composite candidate is satisfiable; the issuer scope lands last.
         let mut data = response_from("https://sp.example");
@@ -283,7 +296,41 @@ mod tests {
         let data = pid.process_response(&mut ctx(), data).await.unwrap();
         assert_eq!(
             data.attr_first("uid"),
-            Some("AnnaAnderssonhttps://idp.example")
+            Some("tbpid-v1:3:4:Anna9:Andersson19:https://idp.example")
+        );
+    }
+
+    #[test]
+    fn composite_framing_prevents_tuple_collisions() {
+        let mut left = InternalData::default();
+        left.set_attr("first", "ab");
+        left.set_attr("second", "c");
+        let mut right = InternalData::default();
+        right.set_attr("first", "a");
+        right.set_attr("second", "bc");
+        let candidates = vec![Candidate {
+            attribute_names: vec!["first".into(), "second".into()],
+            name_id_format: None,
+            add_scope: None,
+        }];
+
+        assert_ne!(
+            PrimaryIdentifier::construct(&candidates, &left),
+            PrimaryIdentifier::construct(&candidates, &right)
+        );
+
+        // A single raw value can equal the old multi-value encoding. Encoding
+        // the arity makes that cross-candidate collision impossible as well.
+        let mut single = InternalData::default();
+        single.set_attr("combined", "2:ab1:c");
+        let single_candidate = vec![Candidate {
+            attribute_names: vec!["combined".into()],
+            name_id_format: None,
+            add_scope: None,
+        }];
+        assert_ne!(
+            PrimaryIdentifier::construct(&candidates, &left),
+            PrimaryIdentifier::construct(&single_candidate, &single)
         );
     }
 
@@ -305,7 +352,7 @@ mod tests {
             .process_response(&mut ctx(), data.clone())
             .await
             .unwrap();
-        assert_eq!(out.attr_first("uid"), Some("stable-id"));
+        assert_eq!(out.attr_first("uid"), Some("tbpid-v1:1:9:stable-id"));
 
         // A transient subject doesn't satisfy a persistent candidate; with no
         // on_error the data passes through unchanged.
@@ -353,7 +400,10 @@ mod tests {
         data.set_attr("edupersonprincipalname", "anna@example.org");
         data.set_attr("mail", "anna@example.org");
         let data = pid.process_response(&mut ctx(), data).await.unwrap();
-        assert_eq!(data.attr_first("employeeid"), Some("anna@example.org"));
+        assert_eq!(
+            data.attr_first("employeeid"),
+            Some("tbpid-v1:1:16:anna@example.org")
+        );
         // clear_input_attributes from the defaults still applies.
         assert!(!data.attributes.contains_key("mail"));
 

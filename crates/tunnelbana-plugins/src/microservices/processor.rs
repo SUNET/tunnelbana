@@ -269,9 +269,13 @@ impl AttributeProcessor {
                                 rule.attribute
                             );
                         }
+                        // Fast hashes of predictable identifiers are enumerable
+                        // when unsalted. Require an explicit non-empty salt so a
+                        // missing environment variable fails during startup.
+                        let salt = required_field(spec.salt.as_deref(), &bx.name, "hash", "salt")?;
                         processors.push(Processor::Hash {
                             algo,
-                            salt: spec.salt.clone().unwrap_or_default(),
+                            salt: salt.to_string(),
                         });
                     }
                     "scope" => {
@@ -403,6 +407,23 @@ mod tests {
             data.attr_first("uid"),
             Some(format!("{:x}", h.finalize()).as_str())
         );
+    }
+
+    #[test]
+    fn hash_processor_requires_non_empty_salt() {
+        for salt in [None, Some("")] {
+            let mut processor = serde_json::json!({ "name": "hash" });
+            if let Some(salt) = salt {
+                processor["salt"] = serde_json::Value::String(salt.into());
+            }
+            let result = AttributeProcessor::build(&bx(
+                "proc",
+                serde_json::json!({
+                    "process": [{ "attribute": "mail", "processors": [processor] }]
+                }),
+            ));
+            assert!(result.is_err());
+        }
     }
 
     #[tokio::test]

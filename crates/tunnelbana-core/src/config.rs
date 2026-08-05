@@ -42,6 +42,18 @@ fn default_cookie_same_site() -> String {
 fn default_state_cookie_max_age() -> u64 {
     crate::state::DEFAULT_TTL_SECONDS
 }
+fn default_http_connect_timeout_seconds() -> u64 {
+    10
+}
+fn default_http_read_timeout_seconds() -> u64 {
+    15
+}
+fn default_http_request_timeout_seconds() -> u64 {
+    30
+}
+fn default_http_max_response_bytes() -> usize {
+    8 * 1024 * 1024
+}
 
 /// Minimum accepted length (in bytes) of `state_encryption_key`. A 32-byte
 /// high-entropy secret is required so the HKDF-derived AEAD key cannot be
@@ -100,6 +112,18 @@ pub struct ProxyConfig {
     /// `0` disables expiry (not recommended).
     #[serde(default = "default_state_cookie_max_age")]
     pub state_cookie_max_age: u64,
+    /// Outbound HTTP connection establishment timeout.
+    #[serde(default = "default_http_connect_timeout_seconds")]
+    pub http_connect_timeout_seconds: u64,
+    /// Maximum idle interval between chunks of an outbound response body.
+    #[serde(default = "default_http_read_timeout_seconds")]
+    pub http_read_timeout_seconds: u64,
+    /// Total deadline for each outbound HTTP request, including its body.
+    #[serde(default = "default_http_request_timeout_seconds")]
+    pub http_request_timeout_seconds: u64,
+    /// Maximum body buffered from metadata, JWKS, token and UserInfo endpoints.
+    #[serde(default = "default_http_max_response_bytes")]
+    pub http_max_response_bytes: usize,
     /// Path to the attribute map (relative to the config file).
     #[serde(default)]
     pub attributes: Option<String>,
@@ -189,6 +213,31 @@ impl ProxyConfig {
                  high-entropy secret (got {} bytes)",
                 self.state_encryption_key.len()
             )));
+        }
+        // Rotation keys authenticate old state and token material just like the
+        // primary key does. Applying a weaker rule here would turn rotation
+        // compatibility into an alternate, guessable authentication key.
+        for (index, key) in self.previous_state_encryption_keys.iter().enumerate() {
+            if key.len() < MIN_STATE_KEY_LEN {
+                return Err(Error::Config(format!(
+                    "previous_state_encryption_keys[{index}] must be at least \
+                     {MIN_STATE_KEY_LEN} bytes of high-entropy secret (got {} bytes)",
+                    key.len()
+                )));
+            }
+        }
+        if self.http_connect_timeout_seconds == 0
+            || self.http_read_timeout_seconds == 0
+            || self.http_request_timeout_seconds == 0
+        {
+            return Err(Error::Config(
+                "outbound HTTP timeouts must be greater than zero".into(),
+            ));
+        }
+        if self.http_max_response_bytes == 0 {
+            return Err(Error::Config(
+                "http_max_response_bytes must be greater than zero".into(),
+            ));
         }
         Ok(())
     }
@@ -287,6 +336,32 @@ mod tests {
     }
 
     #[test]
+    fn short_previous_state_key_is_rejected() {
+        let toml_str = r#"
+            base_url = "https://x"
+            state_encryption_key = "a-32-byte-or-longer-primary-secret"
+            previous_state_encryption_keys = ["weak"]
+        "#;
+        let err = ProxyConfig::from_str(toml_str).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("previous_state_encryption_keys[0]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn sufficiently_long_previous_state_key_is_accepted() {
+        let toml_str = r#"
+            base_url = "https://x"
+            state_encryption_key = "a-32-byte-or-longer-primary-secret"
+            previous_state_encryption_keys = ["a-32-byte-or-longer-previous-secret"]
+        "#;
+        let cfg = ProxyConfig::from_str(toml_str).unwrap();
+        assert_eq!(cfg.previous_state_encryption_keys.len(), 1);
+    }
+
+    #[test]
     fn cookie_defaults_are_applied() {
         let toml_str = r#"
             base_url = "https://x"
@@ -297,5 +372,19 @@ mod tests {
         assert_eq!(cfg.state_cookie_max_age, crate::state::DEFAULT_TTL_SECONDS);
         assert!(cfg.cookie_secure);
         assert!(cfg.previous_state_encryption_keys.is_empty());
+        assert_eq!(cfg.http_connect_timeout_seconds, 10);
+        assert_eq!(cfg.http_read_timeout_seconds, 15);
+        assert_eq!(cfg.http_request_timeout_seconds, 30);
+        assert_eq!(cfg.http_max_response_bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn zero_outbound_http_limits_are_rejected() {
+        let toml_str = r#"
+            base_url = "https://x"
+            state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+            http_max_response_bytes = 0
+        "#;
+        assert!(ProxyConfig::from_str(toml_str).is_err());
     }
 }

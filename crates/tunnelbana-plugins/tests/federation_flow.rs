@@ -394,6 +394,56 @@ async fn auto_registration_and_private_key_jwt_flow() {
     assert!(body.get("access_token").is_some());
 }
 
+#[tokio::test]
+async fn request_objects_bind_client_and_require_expiry() {
+    let ta_key = ec_key("ta-1");
+    let rp_key = ec_key("rp-1");
+    let http: Arc<dyn HttpClient> = Arc::new(MockFederation {
+        ta_key: ta_key.clone(),
+        rp_key: rp_key.clone(),
+    });
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
+    let ta_pub: serde_json::Value =
+        serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
+    let proxy = build_proxy(http, op_jwk, ta_pub);
+    let now = tunnelbana_core::util::now_secs();
+
+    for (inner_client_id, exp) in [
+        ("https://other-client.example", Some(now + 300)),
+        (RP_ID, None),
+    ] {
+        let mut claims = jose_rs::jwt::Claims {
+            iss: Some(RP_ID.into()),
+            aud: Some(jose_rs::jwt::Audience::Single(
+                "https://proxy.example.com/OIDFed".into(),
+            )),
+            iat: Some(now),
+            exp,
+            ..Default::default()
+        };
+        claims
+            .extra
+            .insert("client_id".into(), inner_client_id.into());
+        claims.extra.insert("response_type".into(), "code".into());
+        claims
+            .extra
+            .insert("redirect_uri".into(), RP_REDIRECT.into());
+        claims.extra.insert("scope".into(), "openid".into());
+        let jar = tunnelbana_oidc::jwt::sign(&rp_key, &claims, None).unwrap();
+        let authz = format!(
+            "OIDFed/authorization?client_id={}&request={}",
+            enc(RP_ID),
+            enc(&jar)
+        );
+
+        let response = proxy.run(req(&authz, "GET", None)).await;
+        assert_eq!(response.status, 400);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(body.contains("request object is invalid"));
+        assert!(!body.contains(inner_client_id));
+    }
+}
+
 fn enc(s: &str) -> String {
     form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }

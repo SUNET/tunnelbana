@@ -45,6 +45,10 @@ const HOST_PREFIX: &str = "__Host-";
 #[derive(Debug, Clone, Default)]
 pub struct State {
     data: Map<String, Value>,
+    /// Original issue time of an unsealed envelope. This is deliberately kept
+    /// out of the public state map so request handlers cannot extend a flow's
+    /// absolute lifetime by rewriting protocol data.
+    issued_at: Option<u64>,
     /// When true, the state cookie is cleared in the response.
     pub delete: bool,
 }
@@ -279,7 +283,7 @@ impl StateSealer {
 
         if let Some(ttl) = self.ttl_seconds {
             let age = now_unix().saturating_sub(envelope.iat);
-            if age > ttl {
+            if age >= ttl {
                 tracing::debug!(age, ttl, "state cookie expired; treating as fresh session");
                 return State::new();
             }
@@ -287,6 +291,7 @@ impl StateSealer {
 
         State {
             data: envelope.data,
+            issued_at: Some(envelope.iat),
             delete: false,
         }
     }
@@ -296,9 +301,14 @@ impl StateSealer {
         if state.delete {
             return Ok(self.clear_cookie());
         }
+        let now = now_unix();
+        // A response may update and reseal state many times during a login.
+        // Preserve the first envelope's timestamp so the configured TTL is an
+        // absolute bound, rather than a sliding window refreshed per request.
+        let issued_at = state.issued_at.unwrap_or(now);
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
-            iat: now_unix(),
+            iat: issued_at,
             data: state.data.clone(),
         };
         let plaintext = serde_json::to_vec(&envelope)?;
@@ -321,7 +331,11 @@ impl StateSealer {
             )));
         }
 
-        Ok(self.cookie_header(&token, self.ttl_seconds.map(|t| t as i64)))
+        let max_age = self.ttl_seconds.map(|ttl| {
+            let elapsed = now.saturating_sub(issued_at);
+            ttl.saturating_sub(elapsed) as i64
+        });
+        Ok(self.cookie_header(&token, max_age))
     }
 
     fn cookie_header(&self, value: &str, max_age: Option<i64>) -> String {
@@ -452,6 +466,31 @@ mod tests {
             .with_ttl_seconds(Some(900));
         let cookie = sealer.seal(&State::new()).unwrap();
         assert!(cookie.contains("Max-Age=900"), "cookie: {cookie}");
+    }
+
+    #[test]
+    fn resealing_preserves_absolute_expiry() {
+        let sealer = StateSealer::new("a-long-enough-test-secret-value", "TB_STATE")
+            .with_secure(false)
+            .with_ttl_seconds(Some(900));
+        let original_iat = now_unix().saturating_sub(300);
+        let state = State {
+            data: Map::new(),
+            issued_at: Some(original_iat),
+            delete: false,
+        };
+
+        let cookie = sealer.seal(&state).unwrap();
+        assert!(cookie.contains("Max-Age=600"), "cookie: {cookie}");
+
+        let token = cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("TB_STATE=")
+            .unwrap();
+        let restored = sealer.unseal(Some(token));
+        assert_eq!(restored.issued_at, Some(original_iat));
     }
 
     #[test]

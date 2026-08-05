@@ -229,9 +229,9 @@ impl Backend for OidcBackend {
         if let (Some(userinfo_ep), Some(access_token)) =
             (&provider.userinfo_endpoint, &tokens.access_token)
         {
-            if let Ok(userinfo) = rp::fetch_userinfo(&self.http, userinfo_ep, access_token).await {
-                merge_json(&mut merged, &userinfo);
-            }
+            let userinfo = rp::fetch_userinfo(&self.http, userinfo_ep, access_token).await?;
+            require_matching_userinfo_subject(&userinfo, &sub)?;
+            merge_json(&mut merged, &userinfo);
         }
 
         let external = rp::claims_to_attributes(&merged);
@@ -266,5 +266,41 @@ fn merge_json(base: &mut serde_json::Value, extra: &serde_json::Value) {
         for (k, v) in e {
             b.entry(k.clone()).or_insert_with(|| v.clone());
         }
+    }
+}
+
+fn require_matching_userinfo_subject(
+    userinfo: &serde_json::Value,
+    id_token_sub: &str,
+) -> Result<()> {
+    let userinfo_sub = userinfo
+        .as_object()
+        .and_then(|claims| claims.get("sub"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Error::Authn("userinfo response missing sub".into()))?;
+    if userinfo_sub != id_token_sub {
+        return Err(Error::Authn(
+            "userinfo sub does not match id_token sub".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::*;
+
+    #[test]
+    fn userinfo_subject_must_be_present_and_match() {
+        assert!(
+            require_matching_userinfo_subject(&serde_json::json!({ "sub": "alice" }), "alice")
+                .is_ok()
+        );
+        assert!(require_matching_userinfo_subject(
+            &serde_json::json!({ "sub": "mallory" }),
+            "alice"
+        )
+        .is_err());
+        assert!(require_matching_userinfo_subject(&serde_json::json!({}), "alice").is_err());
     }
 }

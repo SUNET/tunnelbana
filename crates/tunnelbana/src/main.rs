@@ -85,7 +85,12 @@ fn build_proxy(cfg: ProxyConfig) -> anyhow::Result<Proxy> {
     };
     let mapper = Arc::new(mapper);
 
-    let http: Arc<dyn HttpClient> = Arc::new(ReqwestClient::new());
+    let http: Arc<dyn HttpClient> = Arc::new(ReqwestClient::with_limits(
+        cfg.http_connect_timeout_seconds,
+        cfg.http_read_timeout_seconds,
+        cfg.http_request_timeout_seconds,
+        cfg.http_max_response_bytes,
+    ));
 
     let make_ctx = |name: &str, config: serde_json::Value| BuildContext {
         name: name.to_string(),
