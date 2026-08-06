@@ -7,9 +7,10 @@
 //! [`InMemoryClientStore::with_clients`](tunnelbana_oidc::client::InMemoryClientStore::with_clients)
 //! would otherwise silently keep only the last entry for a given id.
 //!
-//! Unlike serde's default, an **unknown field** in a file entry (e.g. a
+//! Unlike serde's default, an **unknown field** in any entry (e.g. a
 //! misspelled `redirect_uri` for `redirect_uris`) is rejected rather than
-//! silently dropped, so a typo cannot quietly produce a half-configured client.
+//! silently dropped, so a typo cannot quietly produce a half-configured
+//! client. This applies to inline entries exactly as to file entries.
 //! Unknown fields are detected via `serde_ignored` rather than
 //! `#[serde(deny_unknown_fields)]` so the check stays in sync with `Client`
 //! automatically as it gains fields (the type lives in `grindvakt`).
@@ -19,12 +20,23 @@ use std::collections::HashSet;
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_oidc::client::Client;
 
-/// Merge inline clients with an optional JSON file (a bare `[Client, …]` array,
-/// read as-given relative to the process working directory). Returns the merged
-/// list, or an error if the file is unreadable/malformed or any `client_id`
-/// appears more than once across the whole set.
-pub fn load_clients(inline: Vec<Client>, clients_file: Option<&str>) -> Result<Vec<Client>> {
-    let mut clients = inline;
+/// Merge inline clients (raw config values, checked for unknown fields) with
+/// an optional JSON file (a bare `[Client, …]` array, read as-given relative
+/// to the process working directory). Returns the merged list, or an error if
+/// any entry is malformed or carries an unknown field, the file is
+/// unreadable/malformed, or any `client_id` appears more than once across the
+/// whole set.
+pub fn load_clients(
+    inline: Vec<serde_json::Value>,
+    clients_file: Option<&str>,
+) -> Result<Vec<Client>> {
+    let mut clients = Vec::with_capacity(inline.len());
+    for (i, value) in inline.into_iter().enumerate() {
+        clients.push(
+            parse_client_strict(value)
+                .map_err(|e| Error::Config(format!("inline clients[{i}]: {e}")))?,
+        );
+    }
     if let Some(path) = clients_file {
         let json = std::fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("reading clients_file {path}: {e}")))?;
@@ -59,12 +71,27 @@ pub fn load_clients(inline: Vec<Client>, clients_file: Option<&str>) -> Result<V
     Ok(clients)
 }
 
+/// Deserialize a single inline client entry, rejecting unknown fields exactly
+/// like `clients_file` entries are.
+fn parse_client_strict(value: serde_json::Value) -> Result<Client> {
+    let mut unknown = Vec::new();
+    let client: Client = serde_ignored::deserialize(value, |p| unknown.push(p.to_string()))
+        .map_err(|e| Error::Config(format!("parsing client: {e}")))?;
+    if !unknown.is_empty() {
+        return Err(Error::Config(format!(
+            "unknown field(s): {}",
+            unknown.join(", ")
+        )));
+    }
+    Ok(client)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn client(id: &str) -> Client {
-        serde_json::from_value(serde_json::json!({ "client_id": id })).unwrap()
+    fn client(id: &str) -> serde_json::Value {
+        serde_json::json!({ "client_id": id })
     }
 
     /// Write `contents` to a unique temp file and return its path.
@@ -125,6 +152,28 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unknown field"), "got: {msg}");
         assert!(msg.contains("redirect_uri"), "got: {msg}");
+    }
+
+    #[test]
+    fn unknown_field_in_inline_client_is_error() {
+        // Inline entries get the same strictness as file entries: a typo'd key
+        // must not silently yield a client with empty redirect_uris.
+        let inline = vec![serde_json::json!({
+            "client_id": "x",
+            "redirect_uri": "https://typo.example/cb"
+        })];
+        let err = load_clients(inline, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field"), "got: {msg}");
+        assert!(msg.contains("redirect_uri"), "got: {msg}");
+        assert!(msg.contains("clients[0]"), "got: {msg}");
+    }
+
+    #[test]
+    fn malformed_inline_client_is_error() {
+        let inline = vec![serde_json::json!({ "redirect_uris": ["https://rp/cb"] })];
+        let err = load_clients(inline, None).unwrap_err();
+        assert!(err.to_string().contains("clients[0]"), "got: {err}");
     }
 
     #[test]

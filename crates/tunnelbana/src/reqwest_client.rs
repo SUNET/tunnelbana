@@ -25,6 +25,10 @@ impl ReqwestClient {
             .connect_timeout(std::time::Duration::from_secs(connect_timeout_seconds))
             .read_timeout(std::time::Duration::from_secs(read_timeout_seconds))
             .timeout(std::time::Duration::from_secs(request_timeout_seconds))
+            // Never follow redirects: a 307/308 would re-send token-endpoint
+            // form bodies (client_secret, authorization code) cross-origin.
+            // Call sites treat the resulting 3xx status as an error.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build reqwest client");
         Self {
@@ -133,6 +137,35 @@ fn append_bounded(body: &mut Vec<u8>, chunk: &[u8], max_response_bytes: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A server that answers every request with a 307. If the client
+        // followed it, the GET would fail connecting to port 1 instead of
+        // returning the 307 status.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 307 Temporary Redirect\r\n\
+                      Location: http://127.0.0.1:1/elsewhere\r\n\
+                      Content-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = ReqwestClient::new();
+        let resp = client.get(&format!("http://{addr}/start")).await.unwrap();
+        assert_eq!(resp.status, 307, "redirects must surface, not be followed");
+        server.await.unwrap();
+    }
 
     #[test]
     fn streamed_body_limit_is_enforced_before_extension() {

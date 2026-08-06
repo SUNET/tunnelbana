@@ -90,8 +90,11 @@ impl Proxy {
         };
 
         // Attach the (possibly cleared) state cookie.
-        if let Ok(cookie) = self.sealer.seal(&ctx.state) {
-            response.headers.push(("set-cookie".to_string(), cookie));
+        match self.sealer.seal(&ctx.state) {
+            Ok(cookie) => response.headers.push(("set-cookie".to_string(), cookie)),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to seal state cookie; state not persisted")
+            }
         }
         response
     }
@@ -232,6 +235,27 @@ impl Proxy {
             }
         }
         tracing::warn!(error = %error, "request failed");
-        Response::text(status, format!("{error}"))
+        // Internal error details stay in the server log; clients get a generic body.
+        Response::text(status, "request failed")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unhandled_error_returns_generic_body() {
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
+        let proxy = Proxy::new(vec![], vec![], vec![], sealer);
+        let request = HttpRequestData {
+            path: "no/such/route".to_string(),
+            ..Default::default()
+        };
+        let response = proxy.run(request).await;
+        let body = String::from_utf8(response.body).unwrap();
+        assert_eq!(body, "request failed");
+        // No internal error detail (e.g. the unbound path) leaks to the client.
+        assert!(!body.contains("no/such/route"));
     }
 }

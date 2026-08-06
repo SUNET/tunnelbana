@@ -404,12 +404,26 @@ fn post_sso_ctx(authn_b64: String) -> Context {
 #[tokio::test]
 async fn saml_frontend_rejects_unknown_sp() {
     let idp = frontend();
-    let authn_b64 = authn_request_from("https://evil.example.com", "https://evil.example.com/acs");
+    // Entity ids are attacker-controlled: the 403 body must be static text,
+    // never a reflection (log forging / response injection via newlines).
+    let evil = "https://evil.example.com\nforged-log-line";
+    let authn_b64 = authn_request_from(evil, "https://evil.example.com/acs");
     let mut ctx = post_sso_ctx(authn_b64);
 
     let action = idp.handle_endpoint(&mut ctx, "sso").await.unwrap();
     match action {
-        FrontendAction::Respond(resp) => assert_eq!(resp.status, 403),
+        FrontendAction::Respond(resp) => {
+            assert_eq!(resp.status, 403);
+            let body = String::from_utf8(resp.body).unwrap();
+            assert!(
+                !body.contains("evil.example.com"),
+                "403 body reflects the attacker entity id: {body:?}"
+            );
+            assert!(
+                !body.contains('\n'),
+                "403 body contains a newline: {body:?}"
+            );
+        }
         _ => panic!("unknown SP must get a 403, not start authentication"),
     }
 }
@@ -1635,4 +1649,218 @@ fn saml_frontend_rejects_completely_unsigned_output() {
         result.is_err(),
         "a SAML IdP must authenticate at least the assertion or response"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Audit regressions: passthrough name collisions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn saml_backend_passthrough_known_check_is_case_insensitive() {
+    use gamlastan::core::assertion::attribute::{Attribute, AttributeValue};
+
+    let sp = backend_with(
+        serde_json::json!({ "passthrough_unmapped_attributes": true })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    // "MAIL" differs only by case from the mapped "mail" external name: it
+    // must be treated as known and never merged into the internal attribute.
+    let attrs = vec![
+        Attribute {
+            name: "mail".to_string(),
+            name_format: None,
+            friendly_name: None,
+            values: vec![AttributeValue::String("anna@example.com".to_string())],
+        },
+        Attribute {
+            name: "MAIL".to_string(),
+            name_format: None,
+            friendly_name: None,
+            values: vec![AttributeValue::String("mallory@evil.example".to_string())],
+        },
+    ];
+    let req_id = "_pass_case";
+    let b64 = signed_response_with(Some(req_id), 0, attrs);
+    let internal = match acs_result(sp.as_ref(), b64, Some(req_id)).await.unwrap() {
+        BackendAction::AuthResponse(d) => d,
+        _ => panic!("expected AuthResponse"),
+    };
+    assert_eq!(
+        internal.attributes.get("mail"),
+        Some(&vec!["anna@example.com".to_string()]),
+        "a case-variant of a mapped attribute must not inject passthrough values"
+    );
+}
+
+#[tokio::test]
+async fn saml_backend_passthrough_cannot_fabricate_internal_attributes() {
+    use gamlastan::core::assertion::attribute::{Attribute, AttributeValue};
+
+    // An internal attribute mapped only for the openid profile: the SAML
+    // passthrough must not be able to fabricate it.
+    let mapper = Arc::new(
+        AttributeMapper::from_toml(
+            r#"
+            [attributes.mail]
+            saml = ["mail"]
+            [attributes.pairwise_id]
+            openid = ["sub"]
+        "#,
+        )
+        .unwrap(),
+    );
+    let config = serde_json::json!({
+        "sp_key_path": testdata("sp-key.pem"),
+        "idp_entity_id": IDP_ENTITY,
+        "idp_sso_url": "https://proxy.example.com/IdP/sso",
+        "idp_cert_path": testdata("idp-cert.pem"),
+        "passthrough_unmapped_attributes": true
+    });
+    let mut bx = build_ctx("SP", config);
+    bx.attribute_mapper = mapper;
+    let sp = tunnelbana_plugins::saml2_backend::Saml2Backend::build(&bx).unwrap();
+
+    let attrs = vec![Attribute {
+        name: "urn:oid:9.9.9.9".to_string(),
+        name_format: None,
+        friendly_name: Some("Pairwise_ID".to_string()),
+        values: vec![AttributeValue::String("attacker-controlled".to_string())],
+    }];
+    let req_id = "_pass_fab";
+    let b64 = signed_response_with(Some(req_id), 0, attrs);
+    let internal = match acs_result(sp.as_ref(), b64, Some(req_id)).await.unwrap() {
+        BackendAction::AuthResponse(d) => d,
+        _ => panic!("expected AuthResponse"),
+    };
+    assert!(
+        !internal.attributes.contains_key("pairwise_id"),
+        "passthrough must not fabricate an internal attribute of another profile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit regression: unknown `security` preset fails closed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn saml_backend_rejects_unknown_security_preset() {
+    let base = serde_json::json!({
+        "sp_key_path": testdata("sp-key.pem"),
+        "idp_entity_id": IDP_ENTITY,
+        "idp_sso_url": "https://proxy.example.com/IdP/sso",
+        "idp_cert_path": testdata("idp-cert.pem"),
+    });
+
+    let mut bad = base.clone();
+    bad.as_object_mut()
+        .unwrap()
+        .insert("security".into(), "bogus".into());
+    assert!(
+        tunnelbana_plugins::saml2_backend::Saml2Backend::build(&build_ctx("SP", bad)).is_err(),
+        "an unknown security preset must be a config error, not silent permissive"
+    );
+
+    // The known presets match case-insensitively.
+    let mut strict = base;
+    strict
+        .as_object_mut()
+        .unwrap()
+        .insert("security".into(), "STRICT".into());
+    assert!(
+        tunnelbana_plugins::saml2_backend::Saml2Backend::build(&build_ctx("SP", strict)).is_ok()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit regression: ForceAuthn/IsPassive propagate through the proxy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn saml_frontend_carries_force_authn_and_is_passive_to_backend() {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let idp = frontend();
+    let opts = AuthnRequestOptions {
+        sp_entity_id: SP_ENTITY.to_string(),
+        acs_url: Some(ACS_URL.to_string()),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: Some("urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST".to_string()),
+        allow_create: true,
+        force_authn: Some(true),
+        is_passive: Some(true),
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let b64 =
+        base64::engine::general_purpose::STANDARD.encode(req.to_xml_string().unwrap().as_bytes());
+    let mut ctx = post_sso_ctx(b64);
+
+    let action = idp.handle_endpoint(&mut ctx, "sso").await.unwrap();
+    match action {
+        FrontendAction::StartAuth { request, .. } => {
+            assert!(request.force_authn, "ForceAuthn must reach the backend");
+            assert!(request.is_passive, "IsPassive must reach the backend");
+        }
+        _ => panic!("expected StartAuth"),
+    }
+}
+
+fn location_header(resp: &Response) -> String {
+    resp.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+        .map(|(_, v)| v.clone())
+        .expect("location header")
+}
+
+/// Decode the deflated SAMLRequest of an HTTP-Redirect binding URL.
+fn inflate_redirect_saml_request(location: &str) -> String {
+    use std::io::Read;
+
+    let encoded = form_urlencoded::parse(location.split_once('?').unwrap().1.as_bytes())
+        .find(|(k, _)| k == "SAMLRequest")
+        .map(|(_, v)| v.into_owned())
+        .expect("SAMLRequest parameter");
+    let deflated = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    let mut xml = String::new();
+    flate2::read::DeflateDecoder::new(&deflated[..])
+        .read_to_string(&mut xml)
+        .unwrap();
+    xml
+}
+
+#[tokio::test]
+async fn saml_backend_forwards_authn_constraints_upstream() {
+    let sp = backend();
+    let mut ctx = Context::new(HttpRequestData::default(), State::new());
+    let mut request = InternalData::request("https://downstream.example/sp");
+    request.force_authn = true;
+    request.is_passive = true;
+
+    let resp = sp.start_auth(&mut ctx, request).await.unwrap();
+    let xml = inflate_redirect_saml_request(&location_header(&resp));
+    assert!(xml.contains(r#"ForceAuthn="true""#), "got {xml}");
+    assert!(xml.contains(r#"IsPassive="true""#), "got {xml}");
+}
+
+#[tokio::test]
+async fn saml_backend_omits_authn_constraints_by_default() {
+    let sp = backend();
+    let mut ctx = Context::new(HttpRequestData::default(), State::new());
+    let resp = sp
+        .start_auth(
+            &mut ctx,
+            InternalData::request("https://downstream.example/sp"),
+        )
+        .await
+        .unwrap();
+    let xml = inflate_redirect_saml_request(&location_header(&resp));
+    assert!(!xml.contains("ForceAuthn"), "got {xml}");
+    assert!(!xml.contains("IsPassive"), "got {xml}");
 }

@@ -62,6 +62,33 @@ pub struct OidcBackend {
 impl OidcBackend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
         let cfg: OidcBackendConfig = bx.parse_config()?;
+
+        // Statically configured endpoints require an explicit `issuer`:
+        // falling back to the authorization endpoint as the expected `iss`
+        // would accept id_tokens from an issuer nobody configured.
+        if (cfg.authorization_endpoint.is_some() || cfg.token_endpoint.is_some())
+            && cfg.issuer.is_none()
+        {
+            return Err(Error::Config(format!(
+                "oidc backend {}: issuer is required when endpoints are configured statically",
+                bx.name
+            )));
+        }
+        // Endpoints and the issuer are redirected to or fetched with
+        // credentials attached; require https (plain http only for loopback
+        // hosts, for local development).
+        for (what, url) in [
+            ("issuer", &cfg.issuer),
+            ("authorization_endpoint", &cfg.authorization_endpoint),
+            ("token_endpoint", &cfg.token_endpoint),
+            ("userinfo_endpoint", &cfg.userinfo_endpoint),
+            ("jwks_uri", &cfg.jwks_uri),
+        ] {
+            if let Some(url) = url {
+                crate::url_check::require_https(url, &format!("oidc backend {}: {what}", bx.name))?;
+            }
+        }
+
         let redirect_uri = format!("{}/callback", bx.module_base());
         let _ = &redirect_uri;
 
@@ -112,8 +139,12 @@ impl OidcBackend {
             &self.config.authorization_endpoint,
             &self.config.token_endpoint,
         ) {
+            // build() guarantees `issuer` is set alongside static endpoints.
+            let issuer = self.config.issuer.clone().ok_or_else(|| {
+                Error::Config("oidc backend: issuer is required with static endpoints".into())
+            })?;
             return Ok(ProviderInfo {
-                issuer: self.config.issuer.clone().unwrap_or_else(|| a.clone()),
+                issuer,
                 authorization_endpoint: a.clone(),
                 token_endpoint: t.clone(),
                 userinfo_endpoint: self.config.userinfo_endpoint.clone(),
@@ -138,8 +169,21 @@ impl Backend for OidcBackend {
         vec![Route::exact(format!("{}/callback", self.name), "callback")]
     }
 
-    async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {
+    async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response> {
         let provider = self.provider_info().await?;
+
+        // Forward the requester's authentication constraints as an OIDC
+        // `prompt`; never silently drop them.
+        let prompt = match (request.force_authn, request.is_passive) {
+            (false, false) => None,
+            (true, false) => Some("login"),
+            (false, true) => Some("none"),
+            (true, true) => {
+                return Err(Error::Authn(
+                    "force_authn and is_passive cannot be honored together upstream".into(),
+                ))
+            }
+        };
 
         let state = random_token(24);
         let nonce = random_token(24);
@@ -150,13 +194,17 @@ impl Backend for OidcBackend {
         ctx.state.set_str(&self.name, "oidc_nonce", &nonce);
         ctx.state.set_str(&self.name, "code_verifier", &verifier);
 
+        let extra: &[(&str, &str)] = match prompt {
+            Some(p) => &[("prompt", p)],
+            None => &[],
+        };
         let url = rp::authorization_url(
             &provider,
             &self.client,
             &state,
             &nonce,
             Some(&challenge),
-            &[],
+            extra,
         );
         Ok(Response::redirect(url))
     }
@@ -188,7 +236,13 @@ impl Backend for OidcBackend {
             .ok_or_else(|| Error::BadRequest("missing code".into()))?
             .to_string();
 
-        let nonce = ctx.state.get_str(&self.name, "oidc_nonce");
+        // A missing stored nonce must fail closed, exactly like a missing
+        // stored state: passing `None` to id_token verification would silently
+        // skip the nonce check.
+        let nonce = ctx
+            .state
+            .get_str(&self.name, "oidc_nonce")
+            .ok_or_else(|| Error::Authn("missing stored nonce".into()))?;
         let verifier = ctx.state.get_str(&self.name, "code_verifier");
 
         let provider = self.provider_info().await?;
@@ -216,7 +270,7 @@ impl Backend for OidcBackend {
             id_token,
             &provider.issuer,
             &self.client.client_id,
-            nonce.as_deref(),
+            Some(&nonce),
         )?;
 
         let sub = id_claims
@@ -252,6 +306,8 @@ impl Backend for OidcBackend {
             subject_id: Some(sub),
             subject_type: SubjectType::Public,
             attributes: internal_attrs,
+            force_authn: false,
+            is_passive: false,
         };
 
         // Clean up per-flow state.
@@ -302,5 +358,165 @@ mod subject_tests {
         )
         .is_err());
         assert!(require_matching_userinfo_subject(&serde_json::json!({}), "alice").is_err());
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use tunnelbana_core::http::HttpRequestData;
+    use tunnelbana_core::plugin::NullHttpClient;
+    use tunnelbana_core::state::State;
+
+    fn backend() -> Box<dyn Backend> {
+        let config = serde_json::json!({
+            "client_id": "client",
+            "issuer": "https://op.example",
+            "authorization_endpoint": "https://op.example/authorize",
+            "token_endpoint": "https://op.example/token",
+        });
+        OidcBackend::build(&BuildContext {
+            name: "oidc".to_string(),
+            base_url: "https://proxy.example".to_string(),
+            config,
+            attribute_mapper: Arc::new(AttributeMapper::from_toml("").unwrap()),
+            http_client: Arc::new(NullHttpClient),
+            secret: "secret".to_string(),
+            previous_secrets: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    async fn start_auth_url(request: InternalData) -> String {
+        let sp = backend();
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        let resp = sp.start_auth(&mut ctx, request).await.unwrap();
+        resp.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .map(|(_, v)| v.clone())
+            .expect("location header")
+    }
+
+    #[tokio::test]
+    async fn force_authn_maps_to_prompt_login() {
+        let mut request = InternalData::request("https://sp.example");
+        request.force_authn = true;
+        let url = start_auth_url(request).await;
+        assert!(url.contains("prompt=login"), "got {url}");
+    }
+
+    #[tokio::test]
+    async fn is_passive_maps_to_prompt_none() {
+        let mut request = InternalData::request("https://sp.example");
+        request.is_passive = true;
+        let url = start_auth_url(request).await;
+        assert!(url.contains("prompt=none"), "got {url}");
+    }
+
+    #[tokio::test]
+    async fn no_constraints_send_no_prompt() {
+        let url = start_auth_url(InternalData::request("https://sp.example")).await;
+        assert!(!url.contains("prompt="), "got {url}");
+    }
+
+    #[tokio::test]
+    async fn conflicting_constraints_error() {
+        let mut request = InternalData::request("https://sp.example");
+        request.force_authn = true;
+        request.is_passive = true;
+        let sp = backend();
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        assert!(sp.start_auth(&mut ctx, request).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::*;
+    use tunnelbana_core::context::Context;
+    use tunnelbana_core::http::HttpRequestData;
+    use tunnelbana_core::plugin::NullHttpClient;
+    use tunnelbana_core::state::State;
+
+    fn bx(config: serde_json::Value) -> BuildContext {
+        BuildContext {
+            name: "OIDC".to_string(),
+            base_url: "https://proxy.example.com".to_string(),
+            config,
+            attribute_mapper: Arc::new(AttributeMapper::from_toml("").unwrap()),
+            http_client: Arc::new(NullHttpClient),
+            secret: "test-secret".to_string(),
+            previous_secrets: Vec::new(),
+        }
+    }
+
+    fn static_endpoints() -> serde_json::Value {
+        serde_json::json!({
+            "issuer": "https://op.example.com",
+            "authorization_endpoint": "https://op.example.com/authorize",
+            "token_endpoint": "https://op.example.com/token",
+            "client_id": "rp-1",
+        })
+    }
+
+    #[test]
+    fn static_endpoints_require_explicit_issuer() {
+        let mut config = static_endpoints();
+        config.as_object_mut().unwrap().remove("issuer");
+        let err = OidcBackend::build(&bx(config))
+            .err()
+            .expect("build must fail");
+        assert!(err.to_string().contains("issuer is required"), "got: {err}");
+    }
+
+    #[test]
+    fn non_https_endpoints_are_rejected_at_build() {
+        let mut config = static_endpoints();
+        config["token_endpoint"] = serde_json::json!("http://op.example.com/token");
+        let err = OidcBackend::build(&bx(config))
+            .err()
+            .expect("build must fail");
+        assert!(err.to_string().contains("https is required"), "got: {err}");
+
+        let mut config = static_endpoints();
+        config["issuer"] = serde_json::json!("http://op.example.com");
+        assert!(OidcBackend::build(&bx(config)).is_err());
+    }
+
+    #[test]
+    fn loopback_http_is_allowed_for_local_dev() {
+        let config = serde_json::json!({
+            "issuer": "http://localhost:8080",
+            "authorization_endpoint": "http://localhost:8080/authorize",
+            "token_endpoint": "http://127.0.0.1:8080/token",
+            "client_id": "rp-1",
+        });
+        assert!(OidcBackend::build(&bx(config)).is_ok());
+    }
+
+    #[test]
+    fn https_static_endpoints_with_issuer_build() {
+        assert!(OidcBackend::build(&bx(static_endpoints())).is_ok());
+    }
+
+    #[tokio::test]
+    async fn callback_without_stored_nonce_fails_closed() {
+        let backend = OidcBackend::build(&bx(static_endpoints())).unwrap();
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        // A flow with a valid stored state but no stored nonce: the nonce
+        // check must fail closed rather than be silently skipped.
+        ctx.state.set_str("OIDC", "oidc_state", "st-1");
+        ctx.request.query.insert("state".into(), "st-1".into());
+        ctx.request.query.insert("code".into(), "code-1".into());
+        let err = backend
+            .handle_endpoint(&mut ctx, "callback")
+            .await
+            .err()
+            .expect("callback must fail");
+        assert!(
+            err.to_string().contains("missing stored nonce"),
+            "got: {err}"
+        );
     }
 }

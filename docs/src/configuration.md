@@ -259,8 +259,11 @@ direction: downstream SPs must be registered via
 ## `${ENV}` interpolation
 
 Anywhere in the config (and in included files), `${VAR}` is replaced by the
-environment variable `VAR` before parsing. Unknown variables become the empty
-string. Use this to keep secrets out of the file:
+environment variable `VAR` before parsing. Interpolation applies to the raw
+file text, **including comments** — an unset variable fails configuration
+loading with an error naming the variable (matching SATOSA's `!ENV`), so
+avoid writing a literal `${...}` pattern in comments. Use this to keep
+secrets out of the file:
 
 ```toml
 state_encryption_key = "${TUNNELBANA_STATE_KEY}"

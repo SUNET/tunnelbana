@@ -31,6 +31,8 @@ struct NetworkConfig {
     resolve_issuer: &'static str,
     ta_ec_subject: &'static str,
     key_distribution: KeyDistribution,
+    /// Serve the OP's endpoints over plain http in the resolved metadata.
+    insecure_op_endpoints: bool,
 }
 
 impl Default for NetworkConfig {
@@ -39,6 +41,7 @@ impl Default for NetworkConfig {
             resolve_issuer: TA_ID,
             ta_ec_subject: TA_ID,
             key_distribution: KeyDistribution::Inline,
+            insecure_op_endpoints: false,
         }
     }
 }
@@ -135,7 +138,7 @@ impl HttpClient for MockNetwork {
             claims.extra.insert(
                 "metadata".into(),
                 serde_json::json!({
-                    "openid_provider": provider_metadata(&self.op_key, self.config.key_distribution)
+                    "openid_provider": provider_metadata(&self.op_key, &self.config)
                 }),
             );
             tunnelbana_oidc::jwt::sign(
@@ -249,15 +252,21 @@ fn content_type_for(url: &str) -> &'static str {
     }
 }
 
-fn provider_metadata(op_key: &SigningKey, key_distribution: KeyDistribution) -> serde_json::Value {
+fn provider_metadata(op_key: &SigningKey, config: &NetworkConfig) -> serde_json::Value {
+    let scheme = if config.insecure_op_endpoints {
+        "http"
+    } else {
+        "https"
+    };
+    let op_url = OP_ID.replacen("https", scheme, 1);
     let mut metadata = serde_json::json!({
         "issuer": OP_ID,
-        "authorization_endpoint": format!("{OP_ID}/authorize"),
-        "token_endpoint": format!("{OP_ID}/token"),
+        "authorization_endpoint": format!("{op_url}/authorize"),
+        "token_endpoint": format!("{op_url}/token"),
         "client_registration_types_supported": ["automatic"]
     });
     let object = metadata.as_object_mut().unwrap();
-    match key_distribution {
+    match config.key_distribution {
         KeyDistribution::Inline => {
             object.insert(
                 "jwks".into(),
@@ -518,6 +527,23 @@ async fn rp_entity_configuration_is_served_and_self_signed() {
 }
 
 #[tokio::test]
+async fn start_auth_rejects_authn_constraints_it_cannot_honor() {
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
+    let backend = build_backend(net, fed_jwk, ta_pub);
+
+    // The federation backend has no channel for ForceAuthn/IsPassive; it must
+    // fail rather than silently drop the requester's constraint.
+    let mut forced = InternalData::request("https://sp.example");
+    forced.force_authn = true;
+    assert!(backend.start_auth(&mut ctx(), forced).await.is_err());
+
+    let mut passive = InternalData::request("https://sp.example");
+    passive.is_passive = true;
+    assert!(backend.start_auth(&mut ctx(), passive).await.is_err());
+}
+
+#[tokio::test]
 async fn full_code_flow_via_resolved_op() {
     let rp_fed_jwk = ec_jwk("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
@@ -613,6 +639,56 @@ async fn callback_rejects_state_mismatch_and_wrong_nonce() {
         err.is_err(),
         "nonce mismatch must fail id_token verification"
     );
+}
+
+#[tokio::test]
+async fn callback_without_stored_nonce_fails_closed() {
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);
+    let backend = build_backend(net, fed_jwk, ta_pub);
+
+    let mut c = ctx();
+    let resp = backend
+        .start_auth(&mut c, InternalData::request("https://sp.example"))
+        .await
+        .unwrap();
+    let state = qp(&location(&resp), "state").unwrap();
+
+    // The stored nonce is gone (lost or tampered state): the callback must
+    // fail closed rather than silently skip the id_token nonce check.
+    c.state
+        .set_value("OIDFedRP", "oidc_nonce", serde_json::Value::Null);
+    c.request.query.insert("state".into(), state);
+    c.request.query.insert("code".into(), "authcode-1".into());
+    let err = backend
+        .handle_endpoint(&mut c, "callback")
+        .await
+        .err()
+        .expect("callback must fail");
+    assert!(
+        err.to_string().contains("missing stored nonce"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn resolved_http_op_endpoints_are_rejected() {
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let config = NetworkConfig {
+        insecure_op_endpoints: true,
+        ..Default::default()
+    };
+    let (net, fed_jwk, ta_pub) = network_with(&rp_fed_jwk, config);
+    let backend = build_backend(net, fed_jwk, ta_pub);
+
+    // TA-resolved endpoints over plain http (non-loopback) must be refused
+    // before any redirect or fetch.
+    let mut c = ctx();
+    let err = backend
+        .start_auth(&mut c, InternalData::request("https://sp.example"))
+        .await
+        .expect_err("start_auth must fail");
+    assert!(err.to_string().contains("https is required"), "got: {err}");
 }
 
 #[tokio::test]

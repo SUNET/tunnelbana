@@ -88,7 +88,7 @@ where
                 key.into(),
                 Entry {
                     value,
-                    expires_at: now_secs() + ttl,
+                    expires_at: now_secs().saturating_add(ttl),
                 },
             );
         }
@@ -119,7 +119,7 @@ where
             key,
             Entry {
                 value,
-                expires_at: now + ttl,
+                expires_at: now.saturating_add(ttl),
             },
         );
         // Amortized cleanup: when the map outgrows the watermark, sweep expired
@@ -220,6 +220,17 @@ mod tests {
         // An expired key is re-insertable.
         assert!(cache.put_if_absent("jti-2", (), 0));
         assert!(cache.put_if_absent("jti-2", (), 60));
+    }
+
+    #[test]
+    fn huge_ttl_does_not_overflow() {
+        let cache: TtlCache<String> = TtlCache::new(u64::MAX);
+        cache.put("a", "value-a".to_string());
+        assert_eq!(cache.get("a").as_deref(), Some("value-a"));
+
+        let cache: TtlCache<()> = TtlCache::new(60);
+        assert!(cache.put_if_absent("jti", (), u64::MAX));
+        assert!(!cache.put_if_absent("jti", (), u64::MAX));
     }
 
     #[test]

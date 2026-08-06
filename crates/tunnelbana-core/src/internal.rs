@@ -59,6 +59,14 @@ pub struct InternalData {
     /// Internal attribute map: internal-name -> list of values.
     #[serde(default)]
     pub attributes: BTreeMap<String, Vec<String>>,
+    /// The requester demands fresh authentication (request path only; SAML
+    /// `ForceAuthn`, OIDC `prompt=login`).
+    #[serde(default)]
+    pub force_authn: bool,
+    /// The requester forbids user interaction (request path only; SAML
+    /// `IsPassive`, OIDC `prompt=none`).
+    #[serde(default)]
+    pub is_passive: bool,
 }
 
 impl InternalData {

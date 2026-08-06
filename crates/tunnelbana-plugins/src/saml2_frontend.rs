@@ -483,11 +483,10 @@ impl Saml2Frontend {
             store => match store.resolve(&sp_entity_id).await? {
                 Some(entry) => Some(entry),
                 None => {
-                    tracing::warn!("saml2 frontend {}: unknown SP {sp_entity_id}", self.name);
-                    return Ok(FrontendAction::Respond(Response::text(
-                        403,
-                        format!("unknown SP: {sp_entity_id}"),
-                    )));
+                    // Debug-escaped: entity ids are attacker-controlled and
+                    // must not forge log lines or be reflected to the client.
+                    tracing::warn!("saml2 frontend {}: unknown SP {sp_entity_id:?}", self.name);
+                    return Ok(FrontendAction::Respond(Response::text(403, "unknown SP")));
                 }
             },
         };
@@ -508,10 +507,13 @@ impl Saml2Frontend {
                     verify_authn_request_signature(entry, &redirect_decoded, &authn_request, &xml)
                 {
                     tracing::warn!(
-                        "saml2 frontend {}: rejecting AuthnRequest from {sp_entity_id}: {reason}",
+                        "saml2 frontend {}: rejecting AuthnRequest from {sp_entity_id:?}: {reason}",
                         self.name
                     );
-                    return Ok(FrontendAction::Respond(Response::text(403, reason)));
+                    return Ok(FrontendAction::Respond(Response::text(
+                        403,
+                        "AuthnRequest signature verification failed",
+                    )));
                 }
                 true
             } else {
@@ -591,7 +593,7 @@ impl Saml2Frontend {
             Some(format) if self.name_id_formats.iter().any(|f| f == format) => format.to_string(),
             Some(format) => {
                 tracing::warn!(
-                    "saml2 frontend {}: SP {} requested unsupported NameID format {format}",
+                    "saml2 frontend {}: SP {:?} requested unsupported NameID format {format:?}",
                     self.name,
                     processed.sp_entity_id
                 );
@@ -651,7 +653,12 @@ impl Saml2Frontend {
         }
 
         Ok(FrontendAction::StartAuth {
-            request: InternalData::request(processed.sp_entity_id),
+            request: InternalData {
+                requester: Some(processed.sp_entity_id),
+                force_authn: processed.force_authn,
+                is_passive: processed.is_passive,
+                ..Default::default()
+            },
             target_backend: self.backend.clone(),
         })
     }

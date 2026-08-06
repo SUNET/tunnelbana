@@ -91,6 +91,10 @@ name = "OIDC"
   access_token_ttl  = 3600            # seconds (default 3600)
   id_token_ttl      = 3600            # seconds (default 3600)
   refresh_token_ttl = 2592000         # seconds (default 2592000 = 30 days)
+  # Max accepted age of private_key_jwt client assertions, measured from iat
+  # (default 300; exp and a single-use jti are always required). Widen only
+  # for clients that cannot mint a fresh assertion per token request.
+  # client_assertion_max_age = 300
   # Optional: pin every flow from this frontend to a named backend, overriding
   # custom_routing and the default backend (see Backend selection). Omit to let
   # routing micro-services / the default backend decide.
@@ -98,7 +102,7 @@ name = "OIDC"
 
   [frontend.config.dpop]
   enabled             = true           # default false
-  proof_max_age_secs  = 300            # default 300
+  proof_max_age_secs  = 300            # default 300; must be positive
   require_nonce       = false          # default false
   nonce_lifetime_secs = 300            # default 300
 
@@ -152,7 +156,8 @@ main config while keeping keys, TTLs, and other settings inline.
   URIs.
 - An **unknown field** in a file entry (e.g. `redirect_uri` instead of
   `redirect_uris`) is rejected at boot rather than silently dropped, so a typo
-  cannot quietly yield a half-configured client.
+  cannot quietly yield a half-configured client. The same strictness applies to
+  inline `[[frontend.config.clients]]` tables.
 - The path is read **as-given** (relative to the process working directory, like
   `signing_key_path`), and `${ENV}` interpolation applies. The file is read
   **once at startup**; editing it requires a restart.
@@ -196,6 +201,10 @@ name = "OIDFed"
   # Optional: pin every flow from this frontend to a named backend, overriding
   # custom_routing and the default backend (see Backend selection).
   # backend         = "Saml2"
+  # Max accepted age of private_key_jwt client assertions, measured from iat
+  # (default 300; exp and a single-use jti are always required). Widen only
+  # for RPs that cannot mint a fresh assertion per token request.
+  # client_assertion_max_age = 300
   # Optional: seed statically pre-registered clients from a JSON file (see
   # "Client roster from a file"). These coexist with RPs the federation OP
   # auto-registers at runtime through the trust chain.
@@ -359,7 +368,8 @@ name = "Upstream"
   [backend.config]
   # Either discover from the issuer…
   issuer                     = "https://accounts.upstream.example"
-  # …or pin endpoints explicitly:
+  # …or pin endpoints explicitly (issuer is then required as well; all URLs
+  # must be https — plain http is accepted only for loopback hosts):
   # authorization_endpoint   = "https://…/authorize"
   # token_endpoint           = "https://…/token"
   # userinfo_endpoint        = "https://…/userinfo"
@@ -570,6 +580,12 @@ name = "Saml2"
   # lowercased FriendlyName-or-Name key (SATOSA: allow_unknown_attributes).
   # Frontends still drop them unless the map learns the name.
   # passthrough_unmapped_attributes = true
+  # MDQ mode only: scope every IdP-asserted subject identifier (composed or
+  # raw NameID) by the issuing IdP, so one federation IdP cannot assert
+  # another IdP's subject (ADR 0048). Default false = SATOSA behavior.
+  # Enabling changes every downstream subject_id value - migrate stored
+  # account links first.
+  # scope_subject_id_by_issuer = true
   # Accept IdP-initiated Responses (no InResponseTo) within an existing
   # proxy flow. Default false: the ACS requires the in-flight AuthnRequest id.
   # allow_unsolicited = true
@@ -963,25 +979,28 @@ name = "primary-id"
   ignore = true
 ```
 
-### `custom_logging` - JSON audit records (ADR 0033; original ADR 0023)
+### `custom_logging` - JSON audit records (ADR 0036; original ADR 0023)
 
 ```toml
 # One JSON object per completed authentication, appended as a line:
 # {timestamp, sp, idp, frontend, backend, attr:{only the listed ones}}.
 # An unwritable log_target fails at startup; runtime write errors are logged
-# and never fail the flow.
+# and never fail the flow. The target must be a regular file and is opened
+# with O_NOFOLLOW (ADR 0036); set allow_insecure_log_target only for
+# SATOSA-style targets such as a symlink to /dev/stdout or a FIFO.
 [[microservice]]
 type = "custom_logging"
 name = "audit"
   [microservice.config]
   log_target = "/var/log/tunnelbana/audit.jsonl"
   attrs      = ["edupersonprincipalname", "mail"]
+  # allow_insecure_log_target = true   # follow symlinks / allow non-regular targets
 ```
 
-### `pairwiseid` - privacy-preserving per-SP identifier (ADR 0030)
+### `pairwiseid` - privacy-preserving per-SP identifier (ADR 0030, ADR 0035)
 
 ```toml
-# pairwise-id = hex(HMAC-SHA256(pairwise_salt, "{requester}-{subject-id}"))@scope
+# pairwise-id = hex(HMAC-SHA256(pairwise_salt, framed_input))@scope
 # where scope is the part of subject-id after the last '@'. Requires a
 # subject-id attribute; consumed by `nameid` for the persistent NameID.
 [[microservice]]
@@ -989,6 +1008,9 @@ type = "pairwiseid"
 name = "pairwise"
   [microservice.config]
   pairwise_salt = "${TUNNELBANA_PAIRWISE_SALT}"   # required, non-empty secret
+  # framing = "legacy"  # default: "{requester}-{subject-id}" (backward-compatible)
+  # framing = "v1"      # opt-in: injective "tbpwid-v1:{len}:{requester}:{subject-id}";
+                        # changes all derived identifiers - migrate account links first
 ```
 
 ### `static_attributes_for_virtual_idp` - per-(SP, virtual-IdP) attributes (ADR 0030)

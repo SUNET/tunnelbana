@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -22,6 +22,12 @@ struct CustomLoggingConfig {
     /// Internal attribute names whose values are included in the record.
     #[serde(default)]
     attrs: Vec<String>,
+    /// SATOSA-compatible open behavior: follow symlinks and accept
+    /// non-regular targets (e.g. a `log_target` symlinked to `/dev/stdout`
+    /// in a container, or a FIFO feeding syslog). Default false: the target
+    /// must be a regular file and symlinks are refused (O_NOFOLLOW).
+    #[serde(default)]
+    allow_insecure_log_target: bool,
 }
 
 /// Appends a JSON line per authentication response: timestamp, requester
@@ -31,6 +37,7 @@ pub struct CustomLogging {
     name: String,
     log_target: PathBuf,
     attrs: Vec<String>,
+    allow_insecure_log_target: bool,
 }
 
 impl CustomLogging {
@@ -38,7 +45,7 @@ impl CustomLogging {
         let cfg: CustomLoggingConfig = bx.parse_config()?;
         let log_target = PathBuf::from(&cfg.log_target);
         // Surface an unwritable target at startup, not mid-flow.
-        open_private_log(&log_target).map_err(|e| {
+        open_log(&log_target, cfg.allow_insecure_log_target).map_err(|e| {
             Error::Config(format!(
                 "custom_logging {}: cannot open log_target {}: {e}",
                 bx.name, cfg.log_target
@@ -48,6 +55,7 @@ impl CustomLogging {
             name: bx.name.clone(),
             log_target,
             attrs: cfg.attrs,
+            allow_insecure_log_target: cfg.allow_insecure_log_target,
         }))
     }
 }
@@ -86,8 +94,8 @@ impl MicroService for CustomLogging {
             "attr": attrs,
         });
 
-        let written =
-            open_private_log(&self.log_target).and_then(|mut file| writeln!(file, "{record}"));
+        let written = open_log(&self.log_target, self.allow_insecure_log_target)
+            .and_then(|mut file| writeln!(file, "{record}"));
         if let Err(e) = written {
             tracing::error!(
                 microservice = %self.name,
@@ -100,17 +108,27 @@ impl MicroService for CustomLogging {
     }
 }
 
-/// Open an audit log with owner-only permissions. On Unix, `mode` protects a
-/// newly created file and `set_permissions` also repairs a pre-existing target
-/// that was created under a permissive umask.
-fn open_private_log(path: &std::path::Path) -> std::io::Result<File> {
+/// Open an audit log for appending. By default this is hardened: on Unix,
+/// `O_NOFOLLOW` refuses a symlinked target, `mode` applies owner-only
+/// permissions when the file is created, and a pre-existing target must be
+/// a regular file (it keeps its own permissions). With `allow_insecure`
+/// (SATOSA-compatible behavior for container logging setups) symlinks are
+/// followed and non-regular targets such as FIFOs are accepted.
+fn open_log(path: &std::path::Path, allow_insecure: bool) -> std::io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    if !allow_insecure {
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
     let file = options.open(path)?;
     #[cfg(unix)]
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    if !allow_insecure && !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
     Ok(file)
 }
 
@@ -118,6 +136,9 @@ fn open_private_log(path: &std::path::Path) -> std::io::Result<File> {
 mod tests {
     use super::super::testutil::{bx, ctx, response_from};
     use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn temp_log(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -185,5 +206,73 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_log_target() {
+        let path = temp_log("symlink");
+        let target = temp_log("symlink-target");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&target);
+        std::fs::write(&target, "").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        assert!(CustomLogging::build(&bx(
+            "audit",
+            serde_json::json!({ "log_target": path.to_str().unwrap() })
+        ))
+        .is_err());
+        // The symlink target was not written through.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_existing_log_keeps_its_permissions() {
+        let path = temp_log("preexisting");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        CustomLogging::build(&bx(
+            "audit",
+            serde_json::json!({ "log_target": path.to_str().unwrap() }),
+        ))
+        .unwrap();
+        // Permissions are set only at creation, not repaired on every open.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn allow_insecure_log_target_accepts_symlink() {
+        let path = temp_log("symlink-allowed");
+        let target = temp_log("symlink-allowed-target");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&target);
+        std::fs::write(&target, "").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let svc = CustomLogging::build(&bx(
+            "audit",
+            serde_json::json!({
+                "log_target": path.to_str().unwrap(),
+                "allow_insecure_log_target": true
+            }),
+        ))
+        .unwrap();
+        let data = response_from("https://sp.example");
+        svc.process_response(&mut ctx(), data).await.unwrap();
+
+        // The record was written through the symlink (SATOSA behavior).
+        let contents = std::fs::read_to_string(&target).unwrap();
+        assert!(contents.contains("\"sp\":\"https://sp.example\""));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&target);
     }
 }

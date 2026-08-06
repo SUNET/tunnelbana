@@ -160,9 +160,14 @@ impl ProxyConfig {
             .unwrap_or_else(|| PathBuf::from("."));
         let raw = std::fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("reading {}: {e}", path.display())))?;
-        let interpolated = interpolate_env(&raw);
-        let mut cfg: ProxyConfig = toml::from_str(&interpolated)
-            .map_err(|e| Error::Config(format!("parsing {}: {e}", path.display())))?;
+        let interpolated = interpolate_env(&raw)?;
+        let mut cfg: ProxyConfig = toml::from_str(&interpolated).map_err(|e| {
+            Error::Config(format!(
+                "parsing {}: {}",
+                path.display(),
+                toml_parse_error(&interpolated, &e)
+            ))
+        })?;
         cfg.resolve_includes(&base_dir)?;
         cfg.validate()?;
         Ok(cfg)
@@ -171,9 +176,13 @@ impl ProxyConfig {
     /// Parse from a TOML string (no include resolution).
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
-        let interpolated = interpolate_env(s);
-        let cfg: ProxyConfig = toml::from_str(&interpolated)
-            .map_err(|e| Error::Config(format!("parsing config: {e}")))?;
+        let interpolated = interpolate_env(s)?;
+        let cfg: ProxyConfig = toml::from_str(&interpolated).map_err(|e| {
+            Error::Config(format!(
+                "parsing config: {}",
+                toml_parse_error(&interpolated, &e)
+            ))
+        })?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -190,9 +199,13 @@ impl ProxyConfig {
                 let raw = std::fs::read_to_string(&inc_path).map_err(|e| {
                     Error::Config(format!("reading include {}: {e}", inc_path.display()))
                 })?;
-                let interpolated = interpolate_env(&raw);
+                let interpolated = interpolate_env(&raw)?;
                 let value: toml::Value = toml::from_str(&interpolated).map_err(|e| {
-                    Error::Config(format!("parsing include {}: {e}", inc_path.display()))
+                    Error::Config(format!(
+                        "parsing include {}: {}",
+                        inc_path.display(),
+                        toml_parse_error(&interpolated, &e)
+                    ))
                 })?;
                 plugin.config = value;
             }
@@ -206,6 +219,15 @@ impl ProxyConfig {
         }
         if self.state_encryption_key.is_empty() {
             return Err(Error::Config("state_encryption_key must be set".into()));
+        }
+        if !matches!(
+            self.cookie_same_site.to_ascii_lowercase().as_str(),
+            "none" | "lax" | "strict"
+        ) {
+            return Err(Error::Config(format!(
+                "cookie_same_site must be one of None, Lax, or Strict (got {:?})",
+                self.cookie_same_site
+            )));
         }
         if self.state_encryption_key.len() < MIN_STATE_KEY_LEN {
             return Err(Error::Config(format!(
@@ -244,13 +266,47 @@ impl ProxyConfig {
 }
 
 /// Replace `${VAR}` occurrences with the value of environment variable `VAR`.
-/// Unknown variables are replaced with the empty string.
-pub fn interpolate_env(input: &str) -> String {
+/// Fails with an error naming the first unset variable, so a missing or
+/// misspelled variable cannot silently turn a secret into the empty string.
+pub fn interpolate_env(input: &str) -> Result<String> {
     let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").unwrap();
-    re.replace_all(input, |caps: &regex::Captures| {
-        std::env::var(&caps[1]).unwrap_or_default()
-    })
-    .into_owned()
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0;
+    for caps in re.captures_iter(input) {
+        let m = caps.get(0).unwrap();
+        out.push_str(&input[last..m.start()]);
+        let name = &caps[1];
+        let value = std::env::var(name).map_err(|_| {
+            Error::Config(format!(
+                "environment variable {name} referenced by the configuration is not set"
+            ))
+        })?;
+        out.push_str(&value);
+        last = m.end();
+    }
+    out.push_str(&input[last..]);
+    Ok(out)
+}
+
+/// Format a TOML parse error with the parser's message and line/column, but
+/// without the source snippet: the interpolated source can contain plaintext
+/// secrets, which must not be echoed into logs or error output.
+fn toml_parse_error(source: &str, error: &toml::de::Error) -> String {
+    match error.span() {
+        Some(span) => {
+            let (line, column) = line_col(source, span.start);
+            format!("{} at line {line}, column {column}", error.message())
+        }
+        None => error.message().to_string(),
+    }
+}
+
+/// One-based line and column of a byte offset into `source`.
+fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let before = &source[..offset.min(source.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |l| l.len()) + 1;
+    (line, column)
 }
 
 /// Convert a `toml::Value` to a `serde_json::Value`.
@@ -319,6 +375,65 @@ mod tests {
         assert_eq!(
             cfg.state_encryption_key,
             "injected-secret-that-is-32-bytes!"
+        );
+    }
+
+    #[test]
+    fn unset_env_var_fails_config_load() {
+        // Deliberately unique name so no other test (or the environment) sets it.
+        let toml_str = r#"
+            base_url = "https://x"
+            state_encryption_key = "${TB_TEST_DEFINITELY_UNSET_VAR}"
+        "#;
+        let err = ProxyConfig::from_str(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("TB_TEST_DEFINITELY_UNSET_VAR"),
+            "error must name the unset variable: {err}"
+        );
+    }
+
+    #[test]
+    fn toml_parse_error_omits_source_snippet() {
+        let toml_str = r#"
+            base_url = "https://x"
+            state_encryption_key = "plaintext-secret-do-not-leak!!"
+            broken = [unclosed
+        "#;
+        let err = ProxyConfig::from_str(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("plaintext-secret-do-not-leak"),
+            "parse error must not echo source lines: {msg}"
+        );
+        assert!(
+            msg.contains("line") && msg.contains("column"),
+            "parse error keeps line/column: {msg}"
+        );
+    }
+
+    #[test]
+    fn cookie_same_site_is_validated() {
+        for value in ["None", "lax", "STRICT"] {
+            let toml_str = format!(
+                r#"
+                    base_url = "https://x"
+                    state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+                    cookie_same_site = "{value}"
+                "#
+            );
+            let cfg = ProxyConfig::from_str(&toml_str).unwrap();
+            assert_eq!(cfg.cookie_same_site, value);
+        }
+
+        let toml_str = r#"
+            base_url = "https://x"
+            state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+            cookie_same_site = "Bogus"
+        "#;
+        let err = ProxyConfig::from_str(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("cookie_same_site"),
+            "unexpected error: {err}"
         );
     }
 

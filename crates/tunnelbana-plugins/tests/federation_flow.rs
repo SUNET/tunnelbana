@@ -3,7 +3,7 @@
 //! `private_key_jwt` token authentication.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tunnelbana_core::attributes::AttributeMapper;
@@ -206,6 +206,8 @@ impl Backend for MockBackend {
             subject_id: Some("fed-user".into()),
             subject_type: SubjectType::Pairwise,
             attributes,
+            force_authn: false,
+            is_passive: false,
         }))
     }
 }
@@ -524,5 +526,95 @@ fn clients_file_duplicate_fails_federation_build() {
     assert!(
         err.to_string().contains("duplicate client_id"),
         "got: {err}"
+    );
+}
+
+/// A counting mock that serves the TA entity configuration but fails every
+/// resolve request, so resolution of any `client_id` always fails.
+struct FailingResolve {
+    ta_key: SigningKey,
+    resolve_hits: Mutex<u32>,
+}
+
+#[async_trait]
+impl HttpClient for FailingResolve {
+    async fn get(&self, url: &str) -> CoreResult<HttpFetchResponse> {
+        if url == format!("{TA_ID}/.well-known/openid-federation") {
+            let metadata = serde_json::json!({
+                "federation_entity": {
+                    "federation_resolve_endpoint": format!("{TA_ID}/resolve")
+                }
+            });
+            let body = tunnelbana_oidc::federation::build_entity_configuration(
+                &self.ta_key,
+                TA_ID,
+                &self.ta_key.to_public_jwks(),
+                &[],
+                metadata,
+                &[],
+                3600,
+            )
+            .unwrap();
+            return Ok(HttpFetchResponse {
+                status: 200,
+                body: body.into_bytes(),
+                content_type: Some("application/entity-statement+jwt".into()),
+            });
+        }
+        if url.starts_with(&format!("{TA_ID}/resolve")) {
+            *self.resolve_hits.lock().unwrap() += 1;
+        }
+        Ok(HttpFetchResponse {
+            status: 404,
+            body: Vec::new(),
+            content_type: None,
+        })
+    }
+
+    async fn post_form(
+        &self,
+        _url: &str,
+        _form: &[(String, String)],
+        _headers: &[(String, String)],
+    ) -> CoreResult<HttpFetchResponse> {
+        Ok(HttpFetchResponse {
+            status: 404,
+            body: Vec::new(),
+            content_type: None,
+        })
+    }
+}
+
+/// An unknown `client_id` that fails federation resolution is negatively
+/// cached for a short window: a repeated request must not fan out to the
+/// trust anchor's resolve endpoint again right away.
+#[tokio::test]
+async fn failed_rp_resolution_is_negatively_cached() {
+    let ta_key = ec_key("ta-1");
+    let net = Arc::new(FailingResolve {
+        ta_key: ta_key.clone(),
+        resolve_hits: Mutex::new(0),
+    });
+    let http: Arc<dyn HttpClient> = net.clone();
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
+    let ta_pub: serde_json::Value =
+        serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
+    let proxy = build_proxy(http, op_jwk, ta_pub);
+
+    let authz = format!(
+        "OIDFed/authorization?client_id={}&response_type=code&redirect_uri={}&scope=openid&state=st",
+        enc("https://unknown.example.com"),
+        enc("https://unknown.example.com/cb")
+    );
+    let r1 = proxy.run(req(&authz, "GET", None)).await;
+    assert_eq!(r1.status, 400, "unresolvable client must be rejected");
+    assert_eq!(*net.resolve_hits.lock().unwrap(), 1);
+
+    let r2 = proxy.run(req(&authz, "GET", None)).await;
+    assert_eq!(r2.status, 400);
+    assert_eq!(
+        *net.resolve_hits.lock().unwrap(),
+        1,
+        "the second failure must be served from the negative cache"
     );
 }
