@@ -12,6 +12,7 @@ use jose_rs::jwk::JwkSet;
 use serde::Deserialize;
 use serde_json::Value;
 use tunnelbana_core::attributes::AttributeMapper;
+use tunnelbana_core::cache::TtlCache;
 use tunnelbana_core::context::Context;
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpClient, Response};
@@ -25,9 +26,14 @@ use tunnelbana_oidc::provider::{Provider, TokenLifetimes};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::tokens::TokenCodec;
 
-use crate::keyload::load_signing_key;
+use crate::keyload::{load_signing_key, scoped_secret};
 
 const AUTHZ_KEY: &str = "authz_request";
+
+/// How long a failed RP resolution is negatively cached before the trust
+/// anchors are consulted again; bounds the resolve fan-out a spray of unknown
+/// `client_id`s can cause.
+const RESOLUTION_FAILURE_TTL: u64 = 60;
 
 #[derive(Debug, Deserialize)]
 struct TrustAnchorConfig {
@@ -102,7 +108,7 @@ struct FederationFrontendConfig {
     #[serde(default)]
     signing_key_id: Option<String>,
     #[serde(default)]
-    clients: Vec<Client>,
+    clients: Vec<Value>,
     /// Path to a JSON file holding a bare array of additional statically
     /// pre-registered clients, merged with `clients` (these coexist with RPs
     /// auto-registered at runtime). A duplicate `client_id` is a boot error.
@@ -116,6 +122,12 @@ struct FederationFrontendConfig {
     id_token_ttl: Option<u64>,
     #[serde(default)]
     refresh_token_ttl: Option<u64>,
+    /// Maximum accepted age (seconds, measured from `iat`) of `private_key_jwt`
+    /// client assertions at the token endpoint. Defaults to grindvakt's 300;
+    /// widen only for clients that cannot mint fresh assertions per request.
+    /// `exp` and a single-use `jti` are always required.
+    #[serde(default)]
+    client_assertion_max_age: Option<u64>,
     /// Pin every flow from this frontend to a named backend. Overrides
     /// `custom_routing` and the default backend.
     #[serde(default)]
@@ -145,6 +157,10 @@ pub struct FederationFrontend {
     trust_marks: Vec<Value>,
     /// Backend name every flow is pinned to, if configured.
     backend: Option<String>,
+    /// Short-TTL negative cache of client_ids whose federation resolution
+    /// recently failed, so each unknown id does not fan out to trust-anchor
+    /// fetches on every request.
+    resolution_failures: TtlCache<()>,
 }
 
 impl FederationFrontend {
@@ -186,14 +202,25 @@ impl FederationFrontend {
             crate::client_loader::load_clients(cfg.clients, cfg.clients_file.as_deref())?;
         let store = Arc::new(InMemoryClientStore::with_clients(client_list));
         let dyn_store: Arc<dyn tunnelbana_oidc::client::ClientStore> = store.clone();
-        let codec = TokenCodec::new(&bx.secret).with_previous_secrets(&bx.previous_secrets);
+        // Mix the frontend instance name into the sealing key material, so a
+        // token sealed by one frontend cannot be opened by another frontend
+        // sharing the same master secret.
+        let codec = TokenCodec::new(&scoped_secret(&bx.secret, &bx.name)).with_previous_secrets(
+            &bx.previous_secrets
+                .iter()
+                .map(|s| scoped_secret(s, &bx.name))
+                .collect::<Vec<_>>(),
+        );
         let lifetimes = TokenLifetimes {
             code_ttl: cfg.code_ttl.unwrap_or(600),
             access_token_ttl: cfg.access_token_ttl.unwrap_or(3600),
             id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
             refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
-        let provider = Provider::new(metadata, op_key, dyn_store, codec, lifetimes);
+        let mut provider = Provider::new(metadata, op_key, dyn_store, codec, lifetimes);
+        if let Some(max_age) = cfg.client_assertion_max_age {
+            provider = provider.with_client_assertion_max_age(max_age);
+        }
 
         // Build trust anchors map.
         let mut trust_anchors: TrustAnchors = HashMap::new();
@@ -227,6 +254,7 @@ impl FederationFrontend {
             organization_uri: fed.organization_uri.clone(),
             trust_marks: fed.trust_marks.clone(),
             backend: cfg.backend,
+            resolution_failures: TtlCache::new(RESOLUTION_FAILURE_TTL),
         }))
     }
 
@@ -394,19 +422,28 @@ impl FederationFrontend {
             .ok_or_else(|| Error::BadRequest("missing client_id".into()))?;
 
         // Ensure the client is known (auto-register from the federation if not).
+        let unresolvable = || {
+            FrontendAction::Respond(
+                OAuthError::new(
+                    OAuthErrorCode::InvalidRequest,
+                    "client could not be resolved",
+                )
+                .to_response(),
+            )
+        };
         let client = match self.provider.clients.get(&client_id).await {
             Some(c) => c,
+            // A recently failed resolution is negatively cached for a short
+            // window: do not fan out to the trust anchors again right away.
+            None if self.resolution_failures.get(&client_id).is_some() => {
+                return Ok(unresolvable());
+            }
             None => match self.auto_register(&client_id).await {
                 Ok(c) => c,
                 Err(e) => {
+                    self.resolution_failures.put(&client_id, ());
                     tracing::warn!(frontend = %self.name, client_id = %client_id, error = %e, "federation RP resolution failed");
-                    return Ok(FrontendAction::Respond(
-                        OAuthError::new(
-                            OAuthErrorCode::InvalidRequest,
-                            "client could not be resolved",
-                        )
-                        .to_response(),
-                    ));
+                    return Ok(unresolvable());
                 }
             },
         };

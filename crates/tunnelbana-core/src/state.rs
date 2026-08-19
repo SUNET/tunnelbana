@@ -32,6 +32,12 @@ const MAX_COOKIE_BYTES: usize = 4096;
 /// Current sealed-envelope format version.
 const ENVELOPE_VERSION: u8 = 1;
 
+/// Maximum accepted clock skew for an envelope `iat` ahead of the local clock.
+/// A state cookie dated further into the future than this is rejected rather
+/// than having its age clamped to zero, which would let a forged `iat` extend
+/// a cookie's effective lifetime.
+const MAX_IAT_SKEW_SECONDS: u64 = 60;
+
 /// HKDF salt and info for state-key derivation. Fixed, public domain-separation
 /// constants — they bind the derived key to this specific use.
 const HKDF_SALT: &[u8] = b"tunnelbana-state-cookie-v1";
@@ -282,7 +288,16 @@ impl StateSealer {
         }
 
         if let Some(ttl) = self.ttl_seconds {
-            let age = now_unix().saturating_sub(envelope.iat);
+            let now = now_unix();
+            if envelope.iat > now + MAX_IAT_SKEW_SECONDS {
+                tracing::debug!(
+                    iat = envelope.iat,
+                    now,
+                    "state cookie issued in the future beyond skew; treating as fresh session"
+                );
+                return State::new();
+            }
+            let age = now.saturating_sub(envelope.iat);
             if age >= ttl {
                 tracing::debug!(age, ttl, "state cookie expired; treating as fresh session");
                 return State::new();
@@ -439,6 +454,66 @@ mod tests {
             restored.get_str("ns", "k").is_none(),
             "expired cookie must be rejected"
         );
+    }
+
+    #[test]
+    fn future_iat_beyond_skew_yields_empty_state() {
+        let sealer = StateSealer::new("a-long-enough-test-secret-value", "TB_STATE")
+            .with_secure(false)
+            .with_ttl_seconds(Some(3600));
+
+        // An `iat` far in the future must be rejected, not clamped to age 0.
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            iat: now_unix() + MAX_IAT_SKEW_SECONDS + 300,
+            data: {
+                let mut m = Map::new();
+                m.insert("ns".to_string(), serde_json::json!({ "k": "v" }));
+                m
+            },
+        };
+        let plaintext = serde_json::to_vec(&envelope).unwrap();
+        let token = jose_rs::jwe::encrypt(
+            &sealer.keys[0],
+            &plaintext,
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
+
+        let restored = sealer.unseal(Some(&token));
+        assert!(
+            restored.get_str("ns", "k").is_none(),
+            "cookie dated beyond the accepted skew must be rejected"
+        );
+    }
+
+    #[test]
+    fn iat_within_skew_survives() {
+        let sealer = StateSealer::new("a-long-enough-test-secret-value", "TB_STATE")
+            .with_secure(false)
+            .with_ttl_seconds(Some(3600));
+
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            iat: now_unix() + 5,
+            data: {
+                let mut m = Map::new();
+                m.insert("ns".to_string(), serde_json::json!({ "k": "v" }));
+                m
+            },
+        };
+        let plaintext = serde_json::to_vec(&envelope).unwrap();
+        let token = jose_rs::jwe::encrypt(
+            &sealer.keys[0],
+            &plaintext,
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
+
+        let restored = sealer.unseal(Some(&token));
+        assert_eq!(restored.get_str("ns", "k").as_deref(), Some("v"));
     }
 
     #[test]

@@ -114,26 +114,26 @@ impl MicroService for AttributeAuthorization {
         if let Some(allow) = Self::rules(&self.attribute_allow, requester, provider) {
             for (attr, regexes) in allow {
                 match data.attributes.get(attr) {
-                    Some(values) => {
-                        if !values.iter().any(|v| regexes.iter().any(|r| r.is_match(v))) {
-                            return Err(denied());
-                        }
+                    Some(values)
+                        if !values.iter().any(|v| regexes.iter().any(|r| r.is_match(v))) =>
+                    {
+                        return Err(denied());
                     }
                     None if self.force_attributes_presence_on_allow => return Err(denied()),
-                    None => {}
+                    _ => {}
                 }
             }
         }
         if let Some(deny) = Self::rules(&self.attribute_deny, requester, provider) {
             for (attr, regexes) in deny {
                 match data.attributes.get(attr) {
-                    Some(values) => {
-                        if values.iter().any(|v| regexes.iter().any(|r| r.is_match(v))) {
-                            return Err(denied());
-                        }
+                    Some(values)
+                        if values.iter().any(|v| regexes.iter().any(|r| r.is_match(v))) =>
+                    {
+                        return Err(denied());
                     }
                     None if self.force_attributes_presence_on_deny => return Err(denied()),
-                    None => {}
+                    _ => {}
                 }
             }
         }

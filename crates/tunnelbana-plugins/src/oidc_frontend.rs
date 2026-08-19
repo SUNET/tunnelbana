@@ -10,7 +10,7 @@ use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::Response;
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, Route};
-use tunnelbana_oidc::client::{Client, InMemoryClientStore};
+use tunnelbana_oidc::client::InMemoryClientStore;
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
 use tunnelbana_oidc::provider::{Provider, TokenLifetimes};
@@ -18,7 +18,7 @@ use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::tokens::TokenCodec;
 
 use crate::dpop::{DpopRuntime, DpopSettings};
-use crate::keyload::load_signing_key;
+use crate::keyload::{load_signing_key, scoped_secret};
 
 /// State namespace key under which the in-flight authorization request is held.
 const AUTHZ_KEY: &str = "authz_request";
@@ -36,7 +36,7 @@ struct OidcFrontendConfig {
     #[serde(default)]
     signing_key_id: Option<String>,
     #[serde(default)]
-    clients: Vec<Client>,
+    clients: Vec<serde_json::Value>,
     /// Path to a JSON file holding a bare array of additional clients, merged
     /// with `clients`. A duplicate `client_id` across the two is a boot error.
     #[serde(default)]
@@ -49,6 +49,12 @@ struct OidcFrontendConfig {
     id_token_ttl: Option<u64>,
     #[serde(default)]
     refresh_token_ttl: Option<u64>,
+    /// Maximum accepted age (seconds, measured from `iat`) of `private_key_jwt`
+    /// client assertions at the token endpoint. Defaults to grindvakt's 300;
+    /// widen only for clients that cannot mint fresh assertions per request.
+    /// `exp` and a single-use `jti` are always required.
+    #[serde(default)]
+    client_assertion_max_age: Option<u64>,
     /// Extra metadata fields to merge into the discovery document.
     #[serde(default)]
     extra_metadata: serde_json::Map<String, serde_json::Value>,
@@ -87,7 +93,7 @@ impl OidcFrontend {
             cfg.signing_key_id.as_deref(),
         )?;
 
-        let dpop = cfg.dpop.build_runtime(&bx.secret);
+        let dpop = cfg.dpop.build_runtime(&bx.secret, &bx.name)?;
 
         let mut metadata = ProviderMetadata::new(issuer.clone(), &module_base);
         // Advertise the signing alg actually in use.
@@ -110,14 +116,25 @@ impl OidcFrontend {
         let client_list =
             crate::client_loader::load_clients(cfg.clients, cfg.clients_file.as_deref())?;
         let clients = Arc::new(InMemoryClientStore::with_clients(client_list));
-        let codec = TokenCodec::new(&bx.secret).with_previous_secrets(&bx.previous_secrets);
+        // Mix the frontend instance name into the sealing key material, so a
+        // token sealed by one frontend cannot be opened by another frontend
+        // sharing the same master secret.
+        let codec = TokenCodec::new(&scoped_secret(&bx.secret, &bx.name)).with_previous_secrets(
+            &bx.previous_secrets
+                .iter()
+                .map(|s| scoped_secret(s, &bx.name))
+                .collect::<Vec<_>>(),
+        );
         let lifetimes = TokenLifetimes {
             code_ttl: cfg.code_ttl.unwrap_or(600),
             access_token_ttl: cfg.access_token_ttl.unwrap_or(3600),
             id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
             refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
-        let provider = Provider::new(metadata, signing_key, clients, codec, lifetimes);
+        let mut provider = Provider::new(metadata, signing_key, clients, codec, lifetimes);
+        if let Some(max_age) = cfg.client_assertion_max_age {
+            provider = provider.with_client_assertion_max_age(max_age);
+        }
 
         Ok(Box::new(OidcFrontend {
             name: bx.name.clone(),

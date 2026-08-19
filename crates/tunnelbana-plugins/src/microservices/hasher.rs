@@ -114,6 +114,17 @@ impl Hasher {
 
         let mut entries = BTreeMap::new();
         for (requester, entry) in &raw {
+            // An explicitly empty salt would silently hash without a salt.
+            let salt = match &entry.salt {
+                Some(salt) if !salt.is_empty() => salt.clone(),
+                Some(_) => {
+                    return Err(Error::Config(format!(
+                        "hasher {}: empty salt for requester {requester:?}",
+                        bx.name
+                    )))
+                }
+                None => default_salt.clone(),
+            };
             let allow_legacy_md5 = entry.allow_legacy_md5.unwrap_or(default_allow_legacy_md5);
             let alg = HashAlg::parse(
                 entry.alg.as_deref().unwrap_or(default_alg_name),
@@ -130,7 +141,7 @@ impl Hasher {
             entries.insert(
                 requester.clone(),
                 HasherEntry {
-                    salt: entry.salt.clone().unwrap_or_else(|| default_salt.clone()),
+                    salt,
                     alg,
                     subject_id: entry.subject_id.unwrap_or(default_subject_id),
                     attributes: entry
@@ -265,6 +276,18 @@ mod tests {
         assert!(Hasher::build(&bx(
             "hasher",
             serde_json::json!({ "": { "salt": "x", "alg": "md5" } })
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_empty_per_requester_salt() {
+        assert!(Hasher::build(&bx(
+            "hasher",
+            serde_json::json!({
+                "": { "salt": "abcdef" },
+                "https://sp.example": { "salt": "" }
+            })
         ))
         .is_err());
     }

@@ -1,6 +1,73 @@
 # Changelog
 
-## 0.3.0 [2026-08-04]
+## 0.3.0 [2026-08-06]
+
+- **Dependencies:** grindvakt 0.7.0 and jose-rs 0.7.0, which carry the
+  protocol-layer fixes from the same audit (private_key_jwt assertions
+  require `exp` and single-use `jti`; id_token verification requires
+  `exp`/`iat`; authorization-request scope is checked against the client's
+  registered scope; token-endpoint auth is pinned to the registered method;
+  discovery requires https and an issuer match; JWTs pinning an unknown
+  `kid` and JWEs carrying `zip`/empty `crit` are rejected). See their
+  changelogs and ADRs for behavior-breaking details.
+
+- **Security:** a follow-up audit pass hardened configuration loading, error
+  handling, and the outbound HTTP client (ADR 0037). `${ENV}` interpolation
+  now fails configuration loading with an error naming the unset variable
+  instead of silently substituting the empty string; TOML parse errors keep
+  line/column but no longer echo the post-interpolation source snippet, which
+  could contain plaintext secrets; `cookie_same_site` is validated against
+  `None`/`Lax`/`Strict` (case-insensitive) at startup; a state-cookie seal
+  failure is logged instead of silently dropped; unhandled request errors
+  return a generic `request failed` body while details stay in the server
+  log; TTL-cache expiry arithmetic saturates instead of overflowing; a state
+  cookie with an `iat` more than 60 seconds in the future is rejected rather
+  than clamped to age zero; and the outbound reqwest client never follows
+  redirects, so a 307/308 cannot re-send token-endpoint form bodies
+  (`client_secret`, authorization code) cross-origin. The same pass also made
+  `hasher` reject an empty per-requester salt (ADR 0034) and `custom_logging`
+  open audit logs with `O_NOFOLLOW` (ADR 0036). The `pairwiseid`
+  micro-service gained an opt-in injective HMAC framing
+  (`framing = "v1"`, ADR 0035); the default `legacy` framing is unchanged,
+  so existing pairwise identifiers are unaffected unless `v1` is explicitly
+  enabled — enabling it changes all derived values and requires migrating
+  stored account links first.
+
+- **Security (protocol plugins):** OIDC and federation frontends now derive
+  per-instance token-sealing keys (ADR 0038) — **upgrade note:** all
+  authorization codes, access/refresh tokens, and DPoP nonces minted before
+  the upgrade are invalidated (in-flight logins restart), and
+  `previous_state_encryption_keys` does not bridge pre-upgrade tokens;
+  renaming a frontend instance also invalidates its outstanding tokens.
+  State cookies are unaffected. DPoP `proof_max_age_secs` must be positive
+  and overlong `jti`s are rejected (ADR 0039); inline `clients` entries
+  reject unknown fields like `clients_file` already did (ADR 0040); the OIDC
+  backend fails closed on a missing stored nonce, requires an explicit
+  `issuer` with static endpoints, and requires https upstream URLs except
+  loopback (ADR 0041); the federation frontend negative-caches failed RP
+  resolutions and the federation backend requires https on resolved OP
+  endpoints (ADR 0042). Both OIDC frontends accept
+  `client_assertion_max_age` to widen grindvakt's 300-second bound on
+  `private_key_jwt` assertion age for clients that cannot mint fresh
+  assertions per token request.
+
+- **Security (SAML):** `passthrough_unmapped_attributes` can no longer merge
+  into or fabricate mapped internal attributes (case-insensitive known
+  check, ADR 0047); the SAML backend's `security` value must be `strict` or
+  `permissive` (ADR 0050); attacker-controlled entity IDs are escaped in
+  logs and no longer reflected in 403 bodies (ADR 0051); `ForceAuthn` /
+  `IsPassive` are propagated upstream (`prompt=login`/`prompt=none` for the
+  OIDC backend) or rejected when the backend cannot honor them (ADR 0049).
+  MDQ-mode issuer scoping of composed/transient subject identifiers is
+  available as an opt-in (`scope_subject_id_by_issuer = true`, ADR 0048);
+  the default keeps SATOSA-compatible unscoped composed identifiers, so
+  existing account links are unaffected unless the option is enabled.
+
+- **Compatibility escape hatch:** `custom_logging` accepts
+  `allow_insecure_log_target = true` to restore SATOSA-style behavior
+  (follow symlinks, allow FIFO/stdout-linked targets) for container logging
+  setups; the hardened regular-file + `O_NOFOLLOW` behavior stays the
+  default (ADR 0036).
 
 - **Repository-wide security hardening:** state cookies now retain their
   original issue time across resealing; every rotation key must satisfy the

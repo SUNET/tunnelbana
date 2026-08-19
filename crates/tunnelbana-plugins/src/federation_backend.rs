@@ -442,14 +442,31 @@ impl FederationBackend {
         })?;
         let token_endpoint = get("token_endpoint")
             .ok_or_else(|| Error::Authn("resolved OP metadata has no token_endpoint".into()))?;
+        let userinfo_endpoint = get("userinfo_endpoint");
+        let jwks_uri = get("jwks_uri");
+        // The resolved endpoints are redirected to (authorization) and fetched
+        // with credentials attached (token/userinfo/jwks); require https so a
+        // compromised or malicious resolution path cannot downgrade the flow
+        // to plaintext. Loopback http stays allowed for tests and local dev.
+        for (what, url) in [
+            ("authorization_endpoint", Some(&authorization_endpoint)),
+            ("token_endpoint", Some(&token_endpoint)),
+            ("userinfo_endpoint", userinfo_endpoint.as_ref()),
+            ("jwks_uri", jwks_uri.as_ref()),
+        ] {
+            if let Some(url) = url {
+                crate::url_check::require_https(url, &format!("resolved OP {what}"))
+                    .map_err(|e| Error::Authn(e.to_string()))?;
+            }
+        }
         let op = ResolvedOp {
             entity_id: resolved.subject,
             provider: ProviderInfo {
                 issuer: get("issuer").unwrap_or_else(|| op_entity_id.to_string()),
                 authorization_endpoint,
                 token_endpoint,
-                userinfo_endpoint: get("userinfo_endpoint"),
-                jwks_uri: get("jwks_uri"),
+                userinfo_endpoint,
+                jwks_uri,
             },
             metadata: op_meta.clone(),
             federation_jwks: resolved.subject_jwks,
@@ -583,7 +600,15 @@ impl Backend for FederationBackend {
         routes
     }
 
-    async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {
+    async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response> {
+        if request.force_authn || request.is_passive {
+            // The signed request object and discovery round-trip have no
+            // channel for ForceAuthn/IsPassive; fail rather than silently
+            // drop the requester's constraint.
+            return Err(Error::Authn(
+                "federation backend cannot honor force_authn/is_passive".into(),
+            ));
+        }
         match &self.discovery {
             // Discovery: send the browser to the external discovery service.
             // The frontend's in-flight request already rides the encrypted
@@ -759,7 +784,13 @@ impl FederationBackend {
             .ok_or_else(|| Error::BadRequest("missing code".into()))?
             .to_string();
 
-        let nonce = ctx.state.get_str(&self.name, "oidc_nonce");
+        // A missing stored nonce must fail closed, exactly like a missing
+        // stored state: passing `None` to id_token verification would silently
+        // skip the nonce check.
+        let nonce = ctx
+            .state
+            .get_str(&self.name, "oidc_nonce")
+            .ok_or_else(|| Error::Authn("missing stored nonce".into()))?;
         let verifier = ctx.state.get_str(&self.name, "code_verifier");
 
         // The OP chosen at start (fixed or via discovery) was persisted in state.
@@ -787,7 +818,7 @@ impl FederationBackend {
             id_token,
             &op.provider.issuer,
             &self.client.client_id,
-            nonce.as_deref(),
+            Some(&nonce),
         )?;
 
         let sub = id_claims
@@ -823,6 +854,8 @@ impl FederationBackend {
             subject_id: Some(sub),
             subject_type: SubjectType::Pairwise,
             attributes: internal_attrs,
+            force_authn: false,
+            is_passive: false,
         };
 
         ctx.state.clear_namespace(&self.name);

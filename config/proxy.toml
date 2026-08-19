@@ -10,14 +10,18 @@ base_url = "https://proxy.example.com"
 
 # Secret used to derive the state-cookie AEAD key (via HKDF-SHA256) and the OIDC
 # token-codec key. Must be at least 32 bytes of high-entropy material.
-# Prefer an environment variable in production: state_encryption_key = "${TUNNELBANA_STATE_KEY}"
+# Load this from an environment variable in production; see the environment
+# interpolation section in docs/src/configuration.md for the supported syntax.
+# Avoid placeholder expressions in comments because the complete file is
+# interpolated before TOML parsing.
 state_encryption_key = "change-me-to-a-long-random-secret"
 
 # Optional: previous secrets retained for decryption only, to allow zero-downtime
 # key rotation. Move the old key here when you change state_encryption_key, then
 # drop it once all in-flight cookies have expired (see state_cookie_max_age).
 # Every previous key must also contain at least 32 bytes.
-# previous_state_encryption_keys = ["${TUNNELBANA_STATE_KEY_OLD}"]
+# Configure environment-provided old keys using the interpolation syntax
+# documented in docs/src/configuration.md.
 
 cookie_name = "TUNNELBANA_STATE"
 # When cookie_secure is true the cookie is emitted with the __Host- prefix.

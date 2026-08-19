@@ -3,7 +3,7 @@
 //! via HTTP-Redirect, then at the ACS verify the signature, validate the Response
 //! (32-check `AssertionValidator` via `process_response`) and map attributes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -99,6 +99,15 @@ struct Saml2BackendConfig {
     /// dropped.
     #[serde(default)]
     passthrough_unmapped_attributes: bool,
+    /// MDQ/dynamic mode only: scope every IdP-asserted subject identifier —
+    /// composed from attributes or a raw NameID — by the issuing IdP
+    /// (`{issuer_len}:{issuer}:{id}`, ADR 0048), so one federation IdP cannot
+    /// assert another IdP's subject. Default false = SATOSA behavior:
+    /// composed identifiers are used unscoped and persistent NameIDs are
+    /// issuer-scoped (ADR 0005). Enabling this changes every downstream
+    /// `subject_id` value; migrate stored account links first.
+    #[serde(default)]
+    scope_subject_id_by_issuer: bool,
     /// Accept IdP-initiated (unsolicited) Responses carrying no
     /// `InResponseTo`, within an existing proxy flow. Default false: the ACS
     /// then requires the AuthnRequest id persisted at `start_auth`. Note that
@@ -206,6 +215,7 @@ pub struct Saml2Backend {
     strict: bool,
     accepted_time_diff_secs: Option<u64>,
     passthrough_unmapped_attributes: bool,
+    scope_subject_id_by_issuer: bool,
     allow_unsolicited: bool,
     /// Assertion IDs accepted by this backend, retained until their SAML
     /// validity deadline. gamlastan 0.8 fails closed when validation has no
@@ -316,6 +326,21 @@ impl Saml2Backend {
             }
         }
 
+        // Fail closed on a typo'd security preset instead of silently
+        // selecting the permissive one.
+        let strict = match cfg.security.as_deref() {
+            None => false,
+            Some(v) if v.eq_ignore_ascii_case("strict") => true,
+            Some(v) if v.eq_ignore_ascii_case("permissive") => false,
+            Some(other) => {
+                return Err(Error::Config(format!(
+                    "saml2 backend {}: unknown security value {other:?} \
+                     (expected \"strict\" or \"permissive\")",
+                    bx.name
+                )))
+            }
+        };
+
         Ok(Box::new(Saml2Backend {
             name: bx.name.clone(),
             sp_entity_id,
@@ -328,9 +353,10 @@ impl Saml2Backend {
             sign_requests: cfg.sign_authn_requests,
             name_id_format: cfg.name_id_format,
             sp_cert_b64,
-            strict: cfg.security.as_deref() == Some("strict"),
+            strict,
             accepted_time_diff_secs: cfg.accepted_time_diff_secs,
             passthrough_unmapped_attributes: cfg.passthrough_unmapped_attributes,
+            scope_subject_id_by_issuer: cfg.scope_subject_id_by_issuer,
             allow_unsolicited: cfg.allow_unsolicited,
             replay_cache: InMemoryReplayCache::new(),
             organization: cfg.organization.as_ref().map(|o| o.to_organization()),
@@ -773,19 +799,35 @@ impl Saml2Backend {
         // Optionally keep attributes the map does not know about, under a
         // normalized (lowercased) name — FriendlyName preferred. Iterates the
         // structured attributes (not the Name+FriendlyName-flattened map) so
-        // each attribute is considered exactly once. Mapped internal values
-        // are never clobbered; collisions merge with order-preserving dedupe.
-        // Leak-safety: frontends emit via `from_internal`, which drops
-        // internal names absent from the attribute map, so passthrough
-        // attributes cannot leave the proxy without a frontend-side opt-in.
+        // each attribute is considered exactly once. Attributes whose
+        // normalized key collides with a mapped internal attribute (of any
+        // profile) are dropped, never merged. Leak-safety: frontends emit via
+        // `from_internal`, which drops internal names absent from the
+        // attribute map, so passthrough attributes cannot leave the proxy
+        // without a frontend-side opt-in.
         if self.passthrough_unmapped_attributes {
-            let known = self.mapper.external_names("saml");
+            // Case-insensitive throughout: an IdP spelling a mapped name as
+            // "MAIL"/"Mail" must not bypass the known-attribute check.
+            let known: BTreeSet<String> = self
+                .mapper
+                .external_names("saml")
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+            // Internal names across every profile (not just "saml"): an
+            // unmapped attribute must never impersonate an internal attribute
+            // the map defines for another profile either.
+            let internal_names: BTreeSet<String> = self
+                .mapper
+                .attributes()
+                .map(|(name, _)| name.to_lowercase())
+                .collect();
             for attr in &saml_attributes {
-                let known_attr = known.contains(attr.name.as_str())
+                let known_attr = known.contains(&attr.name.to_lowercase())
                     || attr
                         .friendly_name
                         .as_deref()
-                        .is_some_and(|f| known.contains(f));
+                        .is_some_and(|f| known.contains(&f.to_lowercase()));
                 if known_attr {
                     continue;
                 }
@@ -798,6 +840,12 @@ impl Saml2Backend {
                     .as_deref()
                     .unwrap_or(&attr.name)
                     .to_lowercase();
+                // Never merge into or fabricate a mapped internal attribute:
+                // that would let an IdP inject values the proxy treats as
+                // authoritative (e.g. the subject-id source attributes).
+                if internal_attrs.contains_key(&key) || internal_names.contains(&key) {
+                    continue;
+                }
                 let entry = internal_attrs.entry(key).or_default();
                 for v in values {
                     if !entry.contains(&v) {
@@ -811,9 +859,10 @@ impl Saml2Backend {
             self.mapper.as_ref(),
             &internal_attrs,
             &name_id,
-            subject_type,
             &idp_entity_id,
             self.is_dynamic_idp_selection(),
+            subject_type,
+            self.scope_subject_id_by_issuer,
         );
 
         ctx.state.clear_namespace(&self.name);
@@ -829,6 +878,8 @@ impl Saml2Backend {
             subject_id: Some(subject_id),
             subject_type,
             attributes: internal_attrs,
+            force_authn: false,
+            is_passive: false,
         };
         Ok(BackendAction::AuthResponse(response))
     }
@@ -848,7 +899,19 @@ impl Backend for Saml2Backend {
         ]
     }
 
-    async fn start_auth(&self, ctx: &mut Context, _request: InternalData) -> Result<Response> {
+    async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response> {
+        // Persist the requester's authentication constraints so they survive
+        // a discovery-service round-trip and reach `build_authn_redirect`.
+        ctx.state.set_value(
+            &self.name,
+            "force_authn",
+            serde_json::Value::Bool(request.force_authn),
+        );
+        ctx.state.set_value(
+            &self.name,
+            "is_passive",
+            serde_json::Value::Bool(request.is_passive),
+        );
         // Pick the target IdP. In MDQ mode the target can be chosen per
         // request — an `entityID` handed back by a discovery service
         // (SeamlessAccess/thiss.io) or a target-entity decoration left by a
@@ -869,6 +932,14 @@ impl Backend for Saml2Backend {
                 match target.or_else(|| self.idp_entity_id.clone()) {
                     Some(target) => self.build_authn_redirect(ctx, Some(&target)).await,
                     None => {
+                        if request.is_passive {
+                            // Discovery needs user interaction; fail rather
+                            // than silently drop IsPassive.
+                            return Err(Error::Authn(
+                                "IsPassive requested but IdP discovery requires user interaction"
+                                    .into(),
+                            ));
+                        }
                         let disco = self.disco_srv.as_deref().ok_or_else(|| {
                             Error::Authn(
                                 "no IdP selected and no discovery service configured".into(),
@@ -943,6 +1014,16 @@ impl Saml2Backend {
         // is emitted (preserving prior behavior).
         let (authn_context_class_refs, authn_context_comparison) = read_target_accr(ctx);
 
+        // The downstream requester's ForceAuthn/IsPassive constraints,
+        // persisted by `start_auth` (false when absent), are forwarded
+        // upstream so they are never silently dropped.
+        let state_flag = |key: &str| {
+            ctx.state
+                .get_value(&self.name, key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+
         let options = AuthnRequestOptions {
             sp_entity_id: self.sp_entity_id.clone(),
             acs_url: Some(self.acs_url.clone()),
@@ -950,6 +1031,8 @@ impl Saml2Backend {
             protocol_binding: Some(constants::BINDING_HTTP_POST.to_string()),
             name_id_format: self.name_id_format.clone(),
             allow_create: true,
+            force_authn: state_flag("force_authn").then_some(true),
+            is_passive: state_flag("is_passive").then_some(true),
             authn_context_class_refs,
             authn_context_comparison,
             ..Default::default()
@@ -1158,11 +1241,24 @@ fn select_subject_id(
     mapper: &AttributeMapper,
     internal_attrs: &BTreeMap<String, Vec<String>>,
     raw_name_id: &str,
-    subject_type: SubjectType,
     issuer: &str,
     dynamic_idp_selection: bool,
+    subject_type: SubjectType,
+    scope_by_issuer: bool,
 ) -> String {
     if dynamic_idp_selection {
+        if scope_by_issuer {
+            // Opt-in hardening (ADR 0048): every IdP-asserted identifier —
+            // composed from attributes or a raw persistent/transient NameID —
+            // is only stable within the IdP that issued it, so scope it by
+            // issuer before treating it as the downstream subject identifier.
+            if let Some(subject_id) = mapper.compose_subject_id(internal_attrs) {
+                return scope_subject_id(issuer, &subject_id);
+            }
+            return scope_subject_id(issuer, raw_name_id);
+        }
+        // SATOSA-compatible default: composed identifiers are used unscoped;
+        // only raw persistent NameIDs are issuer-scoped (ADR 0005).
         if let Some(subject_id) = mapper.compose_subject_id(internal_attrs) {
             return subject_id;
         }
@@ -1173,9 +1269,9 @@ fn select_subject_id(
     raw_name_id.to_string()
 }
 
-// In federation mode, a raw persistent NameID is only stable within the IdP
-// that issued it, so scope it by issuer before treating it as the downstream
-// subject identifier.
+// In federation mode, an IdP-asserted identifier (composed or raw NameID) is
+// only stable within the IdP that issued it, so scope it by issuer before
+// treating it as the downstream subject identifier.
 fn scope_subject_id(issuer: &str, subject_id: &str) -> String {
     format!("{}:{issuer}:{subject_id}", issuer.len())
 }
@@ -1303,29 +1399,76 @@ mod tests {
         let mut attrs = BTreeMap::new();
         attrs.insert("mail".to_string(), vec!["anna@example.com".to_string()]);
 
+        // Default (SATOSA-compatible): composed identifier is used unscoped.
         let subject_id = select_subject_id(
             &mapper,
             &attrs,
             "opaque-name-id",
-            SubjectType::Persistent,
             "https://idp.example.com",
             true,
+            SubjectType::Persistent,
+            false,
         );
-
         assert_eq!(subject_id, "anna@example.com");
+
+        // Opt-in scoping: a composed identifier is IdP-asserted too, so it
+        // is issuer-scoped to stop one federation IdP asserting another
+        // IdP's subject.
+        let subject_id = select_subject_id(
+            &mapper,
+            &attrs,
+            "opaque-name-id",
+            "https://idp.example.com",
+            true,
+            SubjectType::Persistent,
+            true,
+        );
+        assert_eq!(
+            subject_id,
+            scope_subject_id("https://idp.example.com", "anna@example.com")
+        );
     }
 
     #[test]
-    fn dynamic_idp_scopes_persistent_nameid_fallback() {
+    fn dynamic_idp_nameid_fallback_scoping() {
+        // Persistent NameIDs are issuer-scoped in both modes (ADR 0005).
+        for scope in [false, true] {
+            let subject_id = select_subject_id(
+                &empty_mapper(),
+                &BTreeMap::new(),
+                "opaque-name-id",
+                "https://idp.example.com",
+                true,
+                SubjectType::Persistent,
+                scope,
+            );
+            assert_eq!(
+                subject_id,
+                scope_subject_id("https://idp.example.com", "opaque-name-id")
+            );
+        }
+
+        // Transient NameIDs: raw by default (SATOSA), scoped when opted in.
         let subject_id = select_subject_id(
             &empty_mapper(),
             &BTreeMap::new(),
             "opaque-name-id",
-            SubjectType::Persistent,
             "https://idp.example.com",
             true,
+            SubjectType::Transient,
+            false,
         );
+        assert_eq!(subject_id, "opaque-name-id");
 
+        let subject_id = select_subject_id(
+            &empty_mapper(),
+            &BTreeMap::new(),
+            "opaque-name-id",
+            "https://idp.example.com",
+            true,
+            SubjectType::Transient,
+            true,
+        );
         assert_eq!(
             subject_id,
             scope_subject_id("https://idp.example.com", "opaque-name-id")
@@ -1338,9 +1481,10 @@ mod tests {
             &empty_mapper(),
             &BTreeMap::new(),
             "opaque-name-id",
-            SubjectType::Persistent,
             "https://idp.example.com",
             false,
+            SubjectType::Persistent,
+            true,
         );
 
         assert_eq!(subject_id, "opaque-name-id");

@@ -51,6 +51,8 @@ impl Backend for MockBackend {
             subject_id: Some("user-anna".into()),
             subject_type: SubjectType::Public,
             attributes,
+            force_authn: false,
+            is_passive: false,
         };
         Ok(BackendAction::AuthResponse(response))
     }
