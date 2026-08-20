@@ -484,6 +484,219 @@ If the issuer check raises, Tunnelbana aborts that pipeline call. The client
 receives a sanitized proxy error; the Python exception text is not reflected
 to it or copied into the server log.
 
+## Example 4: configure two Python micro-services together
+
+This example is deliberately complete for operators who are unfamiliar with
+TOML. It configures two independent Python micro-services:
+
+1. `FreshAuthenticationPolicy` runs on the request path. It requires fresh,
+   interactive authentication for selected downstream requesters.
+2. `StaticResponseAttributes` runs on the response path. It adds
+   operator-configured attributes after upstream authentication.
+
+Each service lives in a separate Python file and has separate settings. They
+share the one process-wide Python runtime, module path, concurrency limit, and
+timeout.
+
+### Directory layout
+
+Place the files beside the existing `proxy.toml` using this layout:
+
+```text
+deployment/
+├── proxy.toml
+└── python/
+    └── services/
+        ├── __init__.py
+        ├── fresh_auth.py
+        └── response_attributes.py
+```
+
+`__init__.py` may be empty. It makes `services` an ordinary Python package.
+The configured `module_path = "python"` makes the `python/` directory the
+import root.
+
+### First service: request policy
+
+Create `python/services/fresh_auth.py`:
+
+```python
+from typing import Any
+
+
+class FreshAuthenticationPolicy:
+    def __init__(
+        self, name: str, base_url: str, config: dict[str, Any]
+    ) -> None:
+        del name, base_url
+        self.requesters = frozenset(config.get("requesters", []))
+
+    def process_request(
+        self, context: dict[str, Any], data: dict[str, Any]
+    ) -> dict[str, Any]:
+        del context
+        if data["requester"] in self.requesters:
+            data["force_authn"] = True
+            data["is_passive"] = False
+        return data
+```
+
+This class defines only `process_request`. Its configured instance checks the
+downstream SP entity ID or OIDC client ID in `data["requester"]`. A match sets
+`force_authn` and clears passive authentication. On the response path its
+missing `process_response` method is an identity operation.
+
+### Second service: response attributes
+
+Create `python/services/response_attributes.py`:
+
+```python
+from typing import Any
+
+
+class StaticResponseAttributes:
+    def __init__(
+        self, name: str, base_url: str, config: dict[str, Any]
+    ) -> None:
+        del name, base_url
+        self.attributes = {
+            key: list(values)
+            for key, values in config.get("attributes", {}).items()
+        }
+
+    def process_response(
+        self, context: dict[str, Any], data: dict[str, Any]
+    ) -> dict[str, Any]:
+        del context
+        for key, configured_values in self.attributes.items():
+            current_values = data["attributes"].setdefault(key, [])
+            for value in configured_values:
+                if value not in current_values:
+                    current_values.append(value)
+        return data
+```
+
+This class defines only `process_response`. It copies its settings during
+startup and appends each configured value once. On the request path its missing
+`process_request` method is an identity operation.
+
+Attribute names in this example are Tunnelbana internal attribute names. They
+must agree with the deployment's attribute map and release policy.
+
+### Complete TOML configuration
+
+Add the following Python-related section to the existing `proxy.toml`. Keep
+the deployment's existing top-level settings, frontends, and backends; they are
+not repeated here.
+
+```toml
+# One global Python table is shared by every Python micro-service.
+[python]
+module_path = "python"
+max_concurrent_calls = 16
+call_timeout_seconds = 30
+
+# The first item in the micro-service list.
+[[microservice]]
+type = "python"
+name = "require-fresh-auth"
+
+# These tables belong to the micro-service immediately above.
+[microservice.config]
+module = "services.fresh_auth"
+class = "FreshAuthenticationPolicy"
+
+[microservice.config.settings]
+requesters = [
+    "https://admin.example/sp",
+    "operations-dashboard",
+]
+
+# A second, separate item in the same micro-service list.
+[[microservice]]
+type = "python"
+name = "add-response-attributes"
+
+# These tables now belong to the second micro-service.
+[microservice.config]
+module = "services.response_attributes"
+class = "StaticResponseAttributes"
+
+[microservice.config.settings.attributes]
+support_contact = ["helpdesk@example.org"]
+account_category = ["managed"]
+```
+
+The TOML punctuation is significant:
+
+- `[python]` uses one pair of brackets because it defines one global table.
+  Write it once, regardless of how many Python micro-services are configured.
+- `[[microservice]]` uses two pairs of brackets because it appends one item to
+  the micro-service list. The example contains it twice, so it creates two
+  services.
+- `[microservice.config]` belongs to the most recently declared
+  `[[microservice]]`. It tells that service which Python module and class to
+  load.
+- `[microservice.config.settings]` also belongs to the most recent service.
+  Its keys become the constructor's `config` dictionary.
+- `[microservice.config.settings.attributes]` creates a nested
+  `config["attributes"]` dictionary for the second class. Each TOML array
+  becomes a Python list.
+- Quoted strings remain strings. Do not remove the quotes around URLs, names,
+  module paths, class names, or attribute values.
+- The two `name` values identify different configured instances and must be
+  unique. A name does not have to match the Python class name.
+
+Tunnelbana effectively performs these two constructor calls once during
+startup:
+
+```python
+FreshAuthenticationPolicy(
+    "require-fresh-auth",
+    "https://proxy.example",
+    {
+        "requesters": [
+            "https://admin.example/sp",
+            "operations-dashboard",
+        ]
+    },
+)
+
+StaticResponseAttributes(
+    "add-response-attributes",
+    "https://proxy.example",
+    {
+        "attributes": {
+            "support_contact": ["helpdesk@example.org"],
+            "account_category": ["managed"],
+        }
+    },
+)
+```
+
+The actual second argument is the deployment's configured `base_url`; the URL
+above is illustrative.
+
+### What happens during a flow
+
+On the request path, Tunnelbana walks the configured list in TOML order:
+
+1. `require-fresh-auth` calls `process_request` and may change
+   `force_authn` and `is_passive`.
+2. `add-response-attributes` has no `process_request`, so it passes the
+   request data through unchanged.
+
+On the response path, Tunnelbana walks the same order:
+
+1. `require-fresh-auth` has no `process_response`, so it passes the response
+   data through unchanged.
+2. `add-response-attributes` calls `process_response` and appends the two
+   configured internal attributes.
+
+Both configured objects are independent and are reused for the process
+lifetime. They share `max_concurrent_calls = 16`; the value is not a separate
+limit for each class.
+
 ## Execution limits, errors, and logging
 
 ```mermaid
