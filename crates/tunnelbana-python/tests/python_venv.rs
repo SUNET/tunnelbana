@@ -59,7 +59,7 @@ fn build(
         secret: "not-exposed-to-python".into(),
         previous_secrets: vec![],
     };
-    runtime.build_microservice(&bx)
+    runtime.build_microservice(&bx, &[])
 }
 
 fn site_packages(venv: &Path) -> PathBuf {

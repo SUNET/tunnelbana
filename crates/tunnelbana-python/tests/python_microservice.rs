@@ -42,7 +42,7 @@ fn build(
         secret: "not-exposed-to-python".into(),
         previous_secrets: vec![],
     };
-    runtime.build_microservice(&bx)
+    runtime.build_microservice(&bx, &["python-selected".to_string()])
 }
 
 fn context() -> Context {
@@ -211,6 +211,46 @@ async fn malformed_internal_data_is_rejected_atomically() {
 }
 
 #[tokio::test]
+async fn returned_target_backend_must_be_a_configured_backend() {
+    let runtime = runtime(4, Duration::from_secs(2));
+    let known = build(
+        &runtime,
+        "backend-known",
+        "services",
+        "BackendChooser",
+        json!({"backend": "python-selected"}),
+    )
+    .unwrap();
+    let mut ctx = context();
+    known
+        .process_request(&mut ctx, InternalData::default())
+        .await
+        .unwrap();
+    assert_eq!(ctx.target_backend.as_deref(), Some("python-selected"));
+
+    let unknown = build(
+        &runtime,
+        "backend-unknown",
+        "services",
+        "BackendChooser",
+        json!({"backend": "not-a-backend"}),
+    )
+    .unwrap();
+    let mut ctx = context();
+    ctx.target_backend = Some("python-selected".into());
+    let error = unknown
+        .process_request(&mut ctx, InternalData::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "internal error: python microservice returned invalid output"
+    );
+    // Rejected atomically: the previous selection is retained.
+    assert_eq!(ctx.target_backend.as_deref(), Some("python-selected"));
+}
+
+#[tokio::test]
 async fn reserved_decorations_are_first_writer_wins() {
     let runtime = runtime(4, Duration::from_secs(2));
     let writer = build(
@@ -351,6 +391,8 @@ fn imports_classes_methods_constructors_and_config_are_validated() {
         ("services", "NoMethods"),
         ("services", "NonCallableMethod"),
         ("services", "ConstructorFailure"),
+        // A callable that is not a class must fail startup as documented.
+        ("services", "factory_function"),
     ] {
         assert!(
             build(&runtime, "invalid", module, class, json!({})).is_err(),
@@ -370,7 +412,7 @@ fn imports_classes_methods_constructors_and_config_are_validated() {
         secret: "secret".into(),
         previous_secrets: vec![],
     };
-    assert!(runtime.build_microservice(&bx).is_err());
+    assert!(runtime.build_microservice(&bx, &[]).is_err());
 }
 
 #[tokio::test]

@@ -87,8 +87,11 @@ fn build_proxy(cfg: ProxyConfig, config_path: &str) -> anyhow::Result<Proxy> {
             std::time::Duration::from_secs(python.call_timeout_seconds),
         )?;
         let constructor_runtime = runtime.clone();
+        // Python may return a target_backend; the boundary validates it
+        // against the configured backend names before committing.
+        let backend_names: Vec<String> = cfg.backends.iter().map(|b| b.name.clone()).collect();
         registry.register_microservice("python", move |bx| {
-            constructor_runtime.build_microservice(bx)
+            constructor_runtime.build_microservice(bx, &backend_names)
         });
         // Python configuration can itself contain deployment-sensitive paths
         // and limits, so successful startup is logged without their values.

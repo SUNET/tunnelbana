@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 [2026-08-20]
 
 - **Embedded Python micro-services:** add trusted, synchronous CPython 3.13
   micro-services through the isolated `tunnelbana-python` crate (ADR 0052).
@@ -32,8 +32,12 @@
   interpreter environment variables stay ignored. Create the venv with
   `uv venv --python 3.13` (or `python3.13 -m venv`) at image build time; a
   missing directory, `pyvenv.cfg`, or `bin/python` fails startup.
-
-## 0.3.0 [2026-08-06]
+- **Embedded Python review fixes (PR #21):** the configured `class` must be a
+  Python class (`inspect.isclass`), so factory functions and other callables
+  fail startup as documented; and a `target_backend` returned by Python is
+  validated against the configured backend names before commit on both the
+  request and response paths instead of failing later or being silently
+  retained.
 
 - **Dependencies:** grindvakt 0.7.0 and jose-rs 0.7.0, which carry the
   protocol-layer fixes from the same audit (private_key_jwt assertions

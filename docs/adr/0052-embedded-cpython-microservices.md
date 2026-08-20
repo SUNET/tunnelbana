@@ -40,8 +40,11 @@ cancel a running call when an application-level timeout expires.
   Reserved first-writer-wins decorations (`target_entity_id`,
   `target_authn_context_class_ref`, `target_accr_comparison`) may be published
   when absent but never changed or removed once another component set them.
-  The proxy core follows an `error_redirect` decoration only when it is an
-  absolute http(s) URL free of control characters.
+  A returned `target_backend` must be `None` or a configured backend name on
+  both paths. The proxy core follows an `error_redirect` decoration only when
+  it is an absolute http(s) URL free of control characters.
+- Require the configured `class` to be a Python class (`inspect.isclass`),
+  not merely a callable, so factory functions fail startup as documented.
 - Run each call in `spawn_blocking` behind one global Tokio semaphore. The
   deadline covers permit wait and execution. A timed-out blocking task is
   detached and retains its owned permit until Python returns.

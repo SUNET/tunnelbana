@@ -170,12 +170,15 @@ impl PythonRuntime {
     }
 
     /// Build a configured Python micro-service. Suitable for a captured
-    /// `Registry::register_microservice` closure.
+    /// `Registry::register_microservice` closure. `backends` is the set of
+    /// configured backend names; a `target_backend` returned by Python must
+    /// be one of them (or `None`) to be committed.
     pub fn build_microservice(
         self: &Arc<Self>,
         bx: &BuildContext,
+        backends: &[String],
     ) -> Result<Box<dyn MicroService>> {
-        PythonMicroService::build(self.clone(), bx)
+        PythonMicroService::build(self.clone(), bx, backends)
             .map(|service| Box::new(service) as Box<dyn MicroService>)
     }
 
@@ -275,11 +278,14 @@ struct PythonMicroServiceInner {
     instance: Py<PyAny>,
     has_request: bool,
     has_response: bool,
+    /// Configured backend names; the only values (besides `None`) accepted
+    /// for a returned `target_backend`.
+    backends: std::collections::BTreeSet<String>,
     runtime: Arc<PythonRuntime>,
 }
 
 impl PythonMicroService {
-    fn build(runtime: Arc<PythonRuntime>, bx: &BuildContext) -> Result<Self> {
+    fn build(runtime: Arc<PythonRuntime>, bx: &BuildContext, backends: &[String]) -> Result<Self> {
         let config: PythonMicroServiceConfig = bx.parse_config()?;
         if config.module.trim().is_empty() || config.class.trim().is_empty() {
             return Err(Error::Config(format!(
@@ -297,15 +303,17 @@ impl PythonMicroService {
         let built = Python::attach(|py| -> PyResult<(Py<PyAny>, bool, bool)> {
             let module = py.import(config.module.as_str())?;
             let class = module.getattr(config.class.as_str())?;
-            if !class.is_callable() {
+            let inspect = py.import("inspect")?;
+            // The contract requires a class, not merely a callable: a factory
+            // function or callable object must fail startup as documented.
+            if !inspect.getattr("isclass")?.call1((&class,))?.is_truthy()? {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "configured class is not callable",
+                    "configured class is not a Python class",
                 ));
             }
             let settings = pythonize::pythonize(py, &config.settings)
                 .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid settings"))?;
             let instance = class.call1((bx.name.as_str(), bx.base_url.as_str(), settings))?;
-            let inspect = py.import("inspect")?;
             let has_request = validate_method(py, &inspect, &instance, "process_request")?;
             let has_response = validate_method(py, &inspect, &instance, "process_response")?;
             if !has_request && !has_response {
@@ -341,6 +349,7 @@ impl PythonMicroService {
                 instance,
                 has_request,
                 has_response,
+                backends: backends.iter().cloned().collect(),
                 runtime,
             }),
         })
@@ -426,6 +435,17 @@ impl PythonMicroService {
                 log_boundary_error(&self.inner, phase, "reserved decoration overwritten");
                 Error::Internal("python microservice returned invalid output".into())
             })?;
+        // A returned backend selection must name a configured backend; an
+        // unknown name would otherwise fail only later on the request path
+        // and be silently retained on the response path.
+        if let Some(backend) = &output.context.target_backend {
+            if !self.inner.backends.contains(backend) {
+                log_boundary_error(&self.inner, phase, "unknown target_backend");
+                return Err(Error::Internal(
+                    "python microservice returned invalid output".into(),
+                ));
+            }
+        }
         ctx.target_backend = output.context.target_backend;
         ctx.decorations = output.context.decorations;
         Ok(output.data.into())

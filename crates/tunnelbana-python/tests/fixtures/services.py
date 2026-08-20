@@ -78,6 +78,19 @@ class MalformedData:
         return data
 
 
+def factory_function(name, base_url, config):
+    return RoundTrip(name, base_url, config)
+
+
+class BackendChooser:
+    def __init__(self, name, base_url, config):
+        self.backend = config["backend"]
+
+    def process_request(self, context, data):
+        context["target_backend"] = self.backend
+        return data
+
+
 class TargetEntityWriter:
     def __init__(self, name, base_url, config):
         pass

@@ -209,11 +209,12 @@ context keys. Changing `path`, `method`, `query`, `form`, `requester`, or
 `target_frontend` makes the whole call fail, even if the changed value would
 otherwise have a valid type.
 
-Setting `target_backend` during `process_request` affects backend selection and
-the value must be a configured backend name. Changing it during
-`process_response` is permitted by the boundary but does not reroute the
-upstream operation that has already completed. Decorations are not written to
-Tunnelbana's encrypted state cookie; use them only within the current flow.
+Setting `target_backend` during `process_request` affects backend selection.
+On both paths a returned `target_backend` must be `None` or the name of a
+configured backend; any other string makes the whole call fail. Changing it
+during `process_response` is permitted by the boundary but does not reroute
+the upstream operation that has already completed. Decorations are not written
+to Tunnelbana's encrypted state cookie; use them only within the current flow.
 
 ### Reserved decoration keys
 
@@ -317,7 +318,7 @@ Each Python `[[microservice]]` has this configuration:
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `module` | Yes | Dotted Python module import, relative to `module_path`, such as `services.affiliation`. |
-| `class` | Yes | Callable class name in that module. |
+| `class` | Yes | Name of a Python class in that module. A factory function or other non-class callable is rejected at startup. |
 | `settings` | No | TOML table converted to the constructor's `config` dictionary. |
 
 The global Python table and the service-level table containing
@@ -822,6 +823,8 @@ bodies. Python code remains responsible for the safety of its own logging.
   (`target_entity_id`, `target_authn_context_class_ref`,
   `target_accr_comparison`) that an earlier pipeline component already set, or
   building `error_redirect` from a request value instead of `settings`.
+- Setting `context["target_backend"]` to a name that is not a configured
+  backend. The whole call is rejected, on the response path too.
 - Defining `async def process_request(...)` or returning an awaitable. Embedded
   Python methods are synchronous only.
 - Keeping per-request values on `self`, relying on a fresh class instance, or
