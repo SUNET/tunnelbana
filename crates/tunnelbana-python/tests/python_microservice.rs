@@ -13,9 +13,16 @@ fn fixture_path() -> std::path::PathBuf {
 }
 
 fn runtime(max: usize, timeout: Duration) -> Arc<PythonRuntime> {
-    // Keep the source fixture tree free of interpreter-generated artifacts.
     static TEST_ENV: Once = Once::new();
-    TEST_ENV.call_once(|| std::env::set_var("PYTHONDONTWRITEBYTECODE", "1"));
+    // Must be set before the interpreter starts: the isolated configuration
+    // is expected to ignore it (see pythonpath_environment_is_ignored).
+    // Bytecode caches are disabled by the runtime itself, not an env var.
+    TEST_ENV.call_once(|| {
+        std::env::set_var(
+            "PYTHONPATH",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pythonpath"),
+        )
+    });
     PythonRuntime::initialize(fixture_path(), max, timeout).unwrap()
 }
 
@@ -201,6 +208,91 @@ async fn malformed_internal_data_is_rejected_atomically() {
         "internal error: python microservice returned invalid output"
     );
     assert_eq!(ctx.target_backend.as_deref(), Some("original"));
+}
+
+#[tokio::test]
+async fn reserved_decorations_are_first_writer_wins() {
+    let runtime = runtime(4, Duration::from_secs(2));
+    let writer = build(
+        &runtime,
+        "reserved-writer",
+        "services",
+        "TargetEntityWriter",
+        json!({}),
+    )
+    .unwrap();
+
+    // Publishing the target entity id when absent is allowed.
+    let mut ctx = context();
+    writer
+        .process_request(&mut ctx, InternalData::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.decorations["target_entity_id"],
+        json!("https://python-chosen-idp.example")
+    );
+
+    // Changing a value another component already set is rejected atomically.
+    let mut ctx = context();
+    ctx.decorations.insert(
+        "target_entity_id".into(),
+        json!("https://discovery-chosen.example"),
+    );
+    let error = writer
+        .process_request(&mut ctx, InternalData::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "internal error: python microservice returned invalid output"
+    );
+    assert_eq!(
+        ctx.decorations["target_entity_id"],
+        json!("https://discovery-chosen.example")
+    );
+
+    // Removing it is a change too.
+    let remover = build(
+        &runtime,
+        "reserved-remover",
+        "services",
+        "TargetEntityRemover",
+        json!({}),
+    )
+    .unwrap();
+    let mut ctx = context();
+    ctx.decorations.insert(
+        "target_entity_id".into(),
+        json!("https://discovery-chosen.example"),
+    );
+    assert!(remover
+        .process_request(&mut ctx, InternalData::default())
+        .await
+        .is_err());
+    assert_eq!(
+        ctx.decorations["target_entity_id"],
+        json!("https://discovery-chosen.example")
+    );
+}
+
+#[test]
+fn pythonpath_environment_is_ignored() {
+    let runtime = runtime(4, Duration::from_secs(2));
+    // env_probe.py sits in the directory PYTHONPATH points at (set before the
+    // interpreter started) and would build successfully if the interpreter
+    // honored the environment. The isolated configuration must reject it.
+    assert!(build(&runtime, "env-probe", "env_probe", "EnvProbe", json!({})).is_err());
+}
+
+#[test]
+fn initialize_rejects_a_second_module_path() {
+    let _runtime = runtime(4, Duration::from_secs(2));
+    let other = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pythonpath");
+    let error = PythonRuntime::initialize(other, 4, Duration::from_secs(2))
+        .err()
+        .expect("a second module path must be rejected");
+    assert!(error.to_string().contains("different module path"));
 }
 
 #[tokio::test]

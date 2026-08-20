@@ -78,6 +78,24 @@ class MalformedData:
         return data
 
 
+class TargetEntityWriter:
+    def __init__(self, name, base_url, config):
+        pass
+
+    def process_request(self, context, data):
+        context["decorations"]["target_entity_id"] = "https://python-chosen-idp.example"
+        return data
+
+
+class TargetEntityRemover:
+    def __init__(self, name, base_url, config):
+        pass
+
+    def process_request(self, context, data):
+        del context["decorations"]["target_entity_id"]
+        return data
+
+
 class Raises:
     def __init__(self, name, base_url, config):
         pass

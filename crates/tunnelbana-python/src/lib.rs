@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tunnelbana_core::error::{Error, Result};
@@ -41,7 +41,19 @@ const DATA_KEYS: &[&str] = &[
     "is_passive",
 ];
 const AUTH_INFO_KEYS: &[&str] = &["auth_class_ref", "timestamp", "issuer"];
+/// Decoration keys that are first-writer-wins across the pipeline. Python may
+/// publish them when absent but must not change or remove a value another
+/// component already set (e.g. the discovery service's IdP choice).
+const FIRST_WRITER_DECORATION_KEYS: &[&str] = &[
+    tunnelbana_core::context::KEY_TARGET_ENTITYID,
+    tunnelbana_core::context::KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+    tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON,
+];
 static MODULE_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Serializes interpreter setup and the module-path claim. Without it, two
+/// concurrent `initialize` calls with different paths could both pass the
+/// `MODULE_PATH` check and both end up on `sys.path`.
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Process-wide controls for all embedded Python calls.
 pub struct PythonRuntime {
@@ -89,6 +101,9 @@ impl PythonRuntime {
                 "python.module_path is not an accessible directory".into(),
             ));
         }
+        let _guard = INIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = MODULE_PATH.get() {
             if existing != &canonical {
                 return Err(Error::Config(
@@ -99,8 +114,7 @@ impl PythonRuntime {
 
         // Initialization is intentionally explicit: auto-initialize would make
         // interpreter startup an accidental side effect of the first request.
-        std::panic::catch_unwind(Python::initialize)
-            .map_err(|_| Error::Config("failed to initialize embedded CPython".into()))?;
+        initialize_isolated_cpython()?;
 
         Python::attach(|py| -> PyResult<()> {
             let sys = py.import("sys")?;
@@ -136,6 +150,46 @@ impl PythonRuntime {
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
     }
+}
+
+/// Start CPython with its *isolated* configuration instead of the default
+/// environment-driven one. Isolated mode ignores interpreter environment
+/// variables (`PYTHONPATH`, `PYTHONHOME`, ...), so import resolution cannot be
+/// extended from outside the `[python]` configuration; it also excludes the
+/// user site directory, leaves signal handling to the host process, and — with
+/// `write_bytecode` disabled — never writes cache files into the operator
+/// module directory, which is documented as read-only. The system standard
+/// library and site-packages remain importable for operator dependencies.
+fn initialize_isolated_cpython() -> Result<()> {
+    let failed = || Error::Config("failed to initialize embedded CPython".into());
+    // SAFETY: callers hold `INIT_LOCK`, so interpreter setup is not
+    // concurrent. The config struct is initialized by
+    // `PyConfig_InitIsolatedConfig` before any field access and cleared on
+    // every path.
+    unsafe {
+        if pyo3::ffi::Py_IsInitialized() == 0 {
+            let mut config = std::mem::MaybeUninit::<pyo3::ffi::PyConfig>::uninit();
+            pyo3::ffi::PyConfig_InitIsolatedConfig(config.as_mut_ptr());
+            let mut config = config.assume_init();
+            config.write_bytecode = 0;
+            // A conventional single-element sys.argv for operator modules.
+            let mut argv = [c"tunnelbana".as_ptr()];
+            let mut status = pyo3::ffi::PyConfig_SetBytesArgv(&mut config, 1, argv.as_mut_ptr());
+            if pyo3::ffi::PyStatus_Exception(status) == 0 {
+                status = pyo3::ffi::Py_InitializeFromConfig(&config);
+            }
+            pyo3::ffi::PyConfig_Clear(&mut config);
+            if pyo3::ffi::PyStatus_Exception(status) != 0 {
+                return Err(failed());
+            }
+            // Py_InitializeFromConfig leaves this thread attached with the
+            // GIL held; release it so any thread can attach.
+            pyo3::ffi::PyEval_SaveThread();
+        }
+    }
+    // Let PyO3 record the already-initialized interpreter (no-op re-init).
+    std::panic::catch_unwind(Python::initialize).map_err(|_| failed())?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,6 +360,13 @@ impl PythonMicroService {
             log_boundary_error(&self.inner, phase, "read-only context mutation");
             Error::Internal("python microservice returned invalid output".into())
         })?;
+        output
+            .context
+            .validate_reserved_decorations(&original)
+            .map_err(|_| {
+                log_boundary_error(&self.inner, phase, "reserved decoration overwritten");
+                Error::Internal("python microservice returned invalid output".into())
+            })?;
         ctx.target_backend = output.context.target_backend;
         ctx.decorations = output.context.decorations;
         Ok(output.data.into())
@@ -529,6 +590,20 @@ impl ContextSnapshot {
             || self.target_frontend != original.target_frontend
         {
             return Err(());
+        }
+        Ok(())
+    }
+
+    /// Enforce the pipeline's first-writer-wins convention for reserved
+    /// routing decorations: once another component has published one, Python
+    /// must return it unchanged.
+    fn validate_reserved_decorations(&self, original: &Self) -> std::result::Result<(), ()> {
+        for key in FIRST_WRITER_DECORATION_KEYS {
+            if let Some(existing) = original.decorations.get(*key) {
+                if self.decorations.get(*key) != Some(existing) {
+                    return Err(());
+                }
+            }
         }
         Ok(())
     }

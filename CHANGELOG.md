@@ -12,6 +12,18 @@
   awaitable results, automatic discovery, Python endpoints, and runtime pip
   installation are unsupported. Build and runtime images now include the
   matching dynamically linked CPython packages.
+- **Embedded Python hardening (differential review F1-F3):** the interpreter
+  starts with CPython's isolated configuration (`PYTHONPATH`/`PYTHONHOME`
+  ignored, user site excluded, bytecode caches disabled, signal handlers left
+  to the host); reserved first-writer-wins decorations (`target_entity_id`,
+  `target_authn_context_class_ref`, `target_accr_comparison`) can no longer be
+  changed or removed by Python once set by an earlier pipeline component; and
+  the proxy now follows an `error_redirect` decoration only when it is an
+  absolute http(s) URL without control characters, falling back to the normal
+  protocol error otherwise (note: a relative `on_error` URL in
+  `primary_identifier` config is now ignored at error time - use an absolute
+  URL). Runtime initialization is also serialized so concurrent initializers
+  cannot race the single-module-path guard.
 
 ## 0.3.0 [2026-08-06]
 

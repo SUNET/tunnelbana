@@ -203,16 +203,38 @@ these keys:
 | `decorations` | `dict[str, JsonValue]` | Non-persistent, flow-local values exchanged by pipeline components. | **Yes** |
 
 Python may change only `target_backend` and `decorations`. It may add, replace,
-or remove keys below `decorations`, provided every value remains JSON-compatible.
-It may not add or remove top-level context keys. Changing `path`, `method`,
-`query`, `form`, `requester`, or `target_frontend` makes the whole call fail,
-even if the changed value would otherwise have a valid type.
+or remove keys below `decorations`, provided every value remains JSON-compatible
+and the reserved keys below are respected. It may not add or remove top-level
+context keys. Changing `path`, `method`, `query`, `form`, `requester`, or
+`target_frontend` makes the whole call fail, even if the changed value would
+otherwise have a valid type.
 
 Setting `target_backend` during `process_request` affects backend selection and
 the value must be a configured backend name. Changing it during
 `process_response` is permitted by the boundary but does not reroute the
 upstream operation that has already completed. Decorations are not written to
 Tunnelbana's encrypted state cookie; use them only within the current flow.
+
+### Reserved decoration keys
+
+Some decoration keys are read by the proxy core and other pipeline components,
+not just by your own services. Treat them as security-sensitive:
+
+- `error_redirect` - when any later pipeline step fails, the proxy issues an
+  HTTP redirect to this URL *instead of* rendering a protocol error. Set it
+  only from values in your `settings` table, never from `query`, `form`, or
+  attribute values; a request-derived value would let a client choose where
+  the proxy redirects on failure (an open redirect on your identity-proxy
+  origin). The proxy only follows absolute `http(s)` URLs and ignores
+  anything else, but the redirect target's host is not otherwise restricted.
+- `target_entity_id`, `target_authn_context_class_ref`,
+  `target_accr_comparison` - upstream IdP/OP selection and authentication
+  context forwarding. These are **first writer wins** across the pipeline:
+  a Python service may publish them when they are absent, but changing or
+  removing a value that an earlier component (for example the discovery
+  service) already set makes the whole call fail, exactly like a read-only
+  field mutation. Never derive `target_entity_id` from an untrusted request
+  value; that would let a client pick the upstream identity provider.
 
 The restricted snapshot deliberately excludes the complete URI, headers,
 cookies, request body, encrypted or persistent state, secrets, HTTP client
@@ -309,6 +331,15 @@ files, or install packages. Imports performed by the configured trusted module
 itself still behave like normal Python imports. Provision third-party
 dependencies in the image or host before Tunnelbana starts; runtime `pip`
 installation is not supported.
+
+The interpreter starts with CPython's *isolated configuration*: interpreter
+environment variables such as `PYTHONPATH`, `PYTHONHOME`, and
+`PYTHONDONTWRITEBYTECODE` are ignored, the per-user site directory
+(`~/.local/lib/...`) is excluded, and bytecode caches (`__pycache__`) are
+never written, so the module directory can be deployed read-only. Import
+resolution therefore cannot be extended from outside the `[python]`
+configuration. The standard library and the system/environment site-packages
+remain importable for dependencies.
 
 Micro-service names must be unique. Several configured Python services may use
 the same module or class, but each entry receives its own class instance and
@@ -746,6 +777,10 @@ bodies. Python code remains responsible for the safety of its own logging.
   flow-local helper values below `context["decorations"]` instead.
 - Modifying `query`, `form`, `requester`, or another read-only context field.
   Tunnelbana detects the mutation and rejects all output from the call.
+- Changing or removing a reserved first-writer-wins decoration
+  (`target_entity_id`, `target_authn_context_class_ref`,
+  `target_accr_comparison`) that an earlier pipeline component already set, or
+  building `error_redirect` from a request value instead of `settings`.
 - Defining `async def process_request(...)` or returning an awaitable. Embedded
   Python methods are synchronous only.
 - Keeping per-request values on `self`, relying on a fresh class instance, or

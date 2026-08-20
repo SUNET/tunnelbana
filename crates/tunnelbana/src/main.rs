@@ -444,7 +444,6 @@ mod tests {
 
     #[actix_web::test]
     async fn build_proxy_resolves_and_registers_python_microservice() {
-        std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
         let cfg = ProxyConfig::from_str(
             r#"
                 base_url = "https://proxy.example"

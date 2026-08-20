@@ -22,15 +22,23 @@ cancel a running call when an application-level timeout expires.
 - Add a dedicated `tunnelbana-python` workspace crate using exactly PyO3 0.29.2
   and pythonize 0.29.0. Link dynamically to the system CPython 3.13 library.
   Core and built-in plugins do not depend on either crate.
-- Initialize CPython explicitly at binary startup. Add only the configured
-  module directory and import only explicit module/class pairs. Reuse one class
-  instance per configured micro-service.
+- Initialize CPython explicitly at binary startup using CPython's isolated
+  configuration: interpreter environment variables (`PYTHONPATH`,
+  `PYTHONHOME`, ...) are ignored, the user site directory is excluded, and
+  bytecode caches are never written. Add only the configured module directory
+  and import only explicit module/class pairs. Reuse one class instance per
+  configured micro-service.
 - Support synchronous `process_request` and `process_response` methods only.
   Require at least one callable method and treat a missing direction as
   identity. Reject coroutine functions and runtime awaitables.
 - Expose complete `InternalData`, but only a restricted context snapshot. Allow
   changes to `target_backend`, `decorations`, and returned `InternalData`.
   Strictly validate all output and read-only fields before an atomic commit.
+  Reserved first-writer-wins decorations (`target_entity_id`,
+  `target_authn_context_class_ref`, `target_accr_comparison`) may be published
+  when absent but never changed or removed once another component set them.
+  The proxy core follows an `error_redirect` decoration only when it is an
+  absolute http(s) URL free of control characters.
 - Run each call in `spawn_blocking` behind one global Tokio semaphore. The
   deadline covers permit wait and execution. A timed-out blocking task is
   detached and retains its owned permit until Python returns.
@@ -53,7 +61,8 @@ runtime package installation are outside this decision.
 | Python exception discloses data to a client or log | Fixed outward error; logs omit exception messages/source and bound escaped stack locations | Module, class, method phase, file/function location are operational metadata |
 | Blocking work starves async runtime workers | `spawn_blocking` plus global semaphore | CPython/native code can consume blocking threads and process resources |
 | Timeout creates unbounded detached calls | Permit remains owned until the timed-out call exits | Enough permanently hung calls can exhaust all Python capacity |
-| Unexpected code is loaded | One explicit module path and configured imports; no discovery or pip | Import statements inside trusted modules may load their own dependencies |
+| Unexpected code is loaded | One explicit module path and configured imports; isolated interpreter configuration ignores `PYTHONPATH`/`PYTHONHOME` and the user site directory; no discovery or pip | Import statements inside trusted modules may load their own dependencies from system site-packages |
+| Python steers routing or client redirects from request input | First-writer-wins enforcement for reserved routing decorations; proxy follows only absolute http(s) `error_redirect` URLs | Operator code that derives an allowed value (e.g. a fresh `target_entity_id` or an https `error_redirect`) from untrusted input remains its own responsibility |
 
 ## Consequences
 
