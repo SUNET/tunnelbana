@@ -308,6 +308,7 @@ The global `[python]` table is required if any micro-service has
 | Key | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `module_path` | Yes | - | One accessible import directory, absolute or relative to `proxy.toml`. It must not be empty. |
+| `venv` | No | - | A virtual environment directory (absolute or relative to `proxy.toml`) the interpreter adopts for dependencies. See [Using a virtual environment](#using-a-virtual-environment). |
 | `max_concurrent_calls` | No | `16` | Maximum calls admitted across all Python micro-services. Must be greater than zero. |
 | `call_timeout_seconds` | No | `30` | Total deadline for semaphore waiting plus execution. Must be greater than zero. |
 
@@ -329,8 +330,9 @@ Tunnelbana adds the one configured module directory to the interpreter's
 existing import paths. It does not scan it, discover classes, import all Python
 files, or install packages. Imports performed by the configured trusted module
 itself still behave like normal Python imports. Provision third-party
-dependencies in the image or host before Tunnelbana starts; runtime `pip`
-installation is not supported.
+dependencies in the image or host before Tunnelbana starts - either in a
+virtual environment referenced by `venv` (recommended, see below) or in the
+system site-packages; runtime `pip` installation is not supported.
 
 The interpreter starts with CPython's *isolated configuration*: interpreter
 environment variables such as `PYTHONPATH`, `PYTHONHOME`, and
@@ -338,8 +340,47 @@ environment variables such as `PYTHONPATH`, `PYTHONHOME`, and
 (`~/.local/lib/...`) is excluded, and bytecode caches (`__pycache__`) are
 never written, so the module directory can be deployed read-only. Import
 resolution therefore cannot be extended from outside the `[python]`
-configuration. The standard library and the system/environment site-packages
+configuration. The standard library and the system or venv site-packages
 remain importable for dependencies.
+
+## Using a virtual environment
+
+Set `venv` to a virtual environment directory and the embedded interpreter
+adopts it exactly like a venv-launched Python: `pyvenv.cfg` is honored
+(including `include-system-site-packages`), `sys.prefix` moves into the venv,
+and the venv's site-packages is fully processed - `.pth` path configuration
+files and editable installs included. Activation is file-based, not
+environment-based: `VIRTUAL_ENV` and `PATH` are irrelevant and remain ignored
+like all interpreter environment variables.
+
+```toml
+[python]
+module_path = "python"
+venv = "/opt/venv"
+```
+
+Your own micro-service modules stay in `module_path`, which keeps import
+priority over the venv; the venv carries their third-party dependencies. The
+venv must be created for the same CPython minor version Tunnelbana links
+against (3.13) and must exist at startup - a missing directory, a missing
+`pyvenv.cfg`, or a missing `bin/python` is a fail-fast configuration error.
+
+In containers, create the venv with [`uv`](https://docs.astral.sh/uv/) at
+image build time. For example, extending Tunnelbana's runtime image:
+
+```dockerfile
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Build the dependency venv against the same CPython 3.13 the proxy links
+# against. --no-managed-python pins uv to the distribution interpreter
+# instead of downloading its own.
+RUN uv venv --no-managed-python --python /usr/bin/python3.13 /opt/venv \
+ && uv pip install --python /opt/venv/bin/python ldap3 pyyaml
+```
+
+`uv pip install --python /opt/venv/bin/python -r requirements.txt` works the
+same way for pinned dependency sets. Nothing needs to "activate" the venv in
+the container entrypoint; the `venv` key in `proxy.toml` is the only wiring.
 
 Micro-service names must be unique. Several configured Python services may use
 the same module or class, but each entry receives its own class instance and

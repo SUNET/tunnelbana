@@ -68,6 +68,12 @@ fn default_python_call_timeout_seconds() -> u64 {
 pub struct PythonConfig {
     /// The sole directory added to Python's import search path.
     pub module_path: String,
+    /// Optional virtual environment directory (created with `uv venv` or
+    /// `python -m venv`). The embedded interpreter adopts it exactly like a
+    /// venv-launched Python: `pyvenv.cfg` is honored and the venv's
+    /// site-packages (including `.pth` files) are processed.
+    #[serde(default)]
+    pub venv: Option<String>,
     /// Maximum number of Python calls admitted across all micro-services.
     #[serde(default = "default_python_max_concurrent_calls")]
     pub max_concurrent_calls: usize,
@@ -295,6 +301,11 @@ impl ProxyConfig {
         if let Some(python) = &self.python {
             if python.module_path.trim().is_empty() {
                 return Err(Error::Config("python.module_path must not be empty".into()));
+            }
+            if let Some(venv) = &python.venv {
+                if venv.trim().is_empty() {
+                    return Err(Error::Config("python.venv must not be empty".into()));
+                }
             }
             if python.max_concurrent_calls == 0 {
                 return Err(Error::Config(
@@ -577,6 +588,7 @@ mod tests {
         .unwrap();
         let python = cfg.python.unwrap();
         assert_eq!(python.module_path, "python");
+        assert_eq!(python.venv, None);
         assert_eq!(python.max_concurrent_calls, 16);
         assert_eq!(python.call_timeout_seconds, 30);
     }
@@ -595,6 +607,7 @@ mod tests {
 
         for field in [
             "module_path = \"\"",
+            "module_path = \"python\"\nvenv = \"\"",
             "module_path = \"python\"\nmax_concurrent_calls = 0",
             "module_path = \"python\"\ncall_timeout_seconds = 0",
             "module_path = \"python\"\nunknown = true",

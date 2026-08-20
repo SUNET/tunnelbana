@@ -27,7 +27,10 @@ cancel a running call when an application-level timeout expires.
   `PYTHONHOME`, ...) are ignored, the user site directory is excluded, and
   bytecode caches are never written. Add only the configured module directory
   and import only explicit module/class pairs. Reuse one class instance per
-  configured micro-service.
+  configured micro-service. An optional configured virtual environment is
+  adopted by pointing `PyConfig.executable` at its interpreter, so CPython's
+  own path machinery applies `pyvenv.cfg` and venv site-packages; this stays
+  file-based configuration, never environment-based activation.
 - Support synchronous `process_request` and `process_response` methods only.
   Require at least one callable method and treat a missing direction as
   identity. Reject coroutine functions and runtime awaitables.

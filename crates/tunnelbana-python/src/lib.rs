@@ -50,6 +50,7 @@ const FIRST_WRITER_DECORATION_KEYS: &[&str] = &[
     tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON,
 ];
 static MODULE_PATH: OnceLock<PathBuf> = OnceLock::new();
+static VENV_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// Serializes interpreter setup and the module-path claim. Without it, two
 /// concurrent `initialize` calls with different paths could both pass the
 /// `MODULE_PATH` check and both end up on `sys.path`.
@@ -63,9 +64,11 @@ pub struct PythonRuntime {
 
 impl PythonRuntime {
     /// Explicitly initialize CPython and add the configured operator module
-    /// directory to `sys.path`.
+    /// directory to `sys.path`. When `venv` is given, the interpreter adopts
+    /// that virtual environment exactly like a venv-launched Python.
     pub fn initialize(
         module_path: impl AsRef<Path>,
+        venv: Option<impl AsRef<Path>>,
         max_concurrent_calls: usize,
         call_timeout: Duration,
     ) -> Result<Arc<Self>> {
@@ -101,6 +104,28 @@ impl PythonRuntime {
                 "python.module_path is not an accessible directory".into(),
             ));
         }
+        // Fail fast on a venv that CPython could not adopt: it must look like
+        // a standard virtual environment created by `uv venv`/`python -m venv`
+        // for the same CPython version this binary links against.
+        let venv = match venv {
+            Some(venv) => {
+                let canonical = venv.as_ref().canonicalize().map_err(|_| {
+                    Error::Config("python.venv is not an accessible directory".into())
+                })?;
+                if !canonical.join("pyvenv.cfg").is_file() {
+                    return Err(Error::Config(
+                        "python.venv does not contain a pyvenv.cfg".into(),
+                    ));
+                }
+                if !canonical.join("bin/python").is_file() {
+                    return Err(Error::Config(
+                        "python.venv does not contain bin/python".into(),
+                    ));
+                }
+                Some(canonical)
+            }
+            None => None,
+        };
         let _guard = INIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -111,10 +136,17 @@ impl PythonRuntime {
                 ));
             }
         }
+        if let Some(existing) = VENV_PATH.get() {
+            if existing != &venv {
+                return Err(Error::Config(
+                    "CPython was already initialized with a different virtual environment".into(),
+                ));
+            }
+        }
 
         // Initialization is intentionally explicit: auto-initialize would make
         // interpreter startup an accidental side effect of the first request.
-        initialize_isolated_cpython()?;
+        initialize_isolated_cpython(venv.as_deref())?;
 
         Python::attach(|py| -> PyResult<()> {
             let sys = py.import("sys")?;
@@ -129,6 +161,7 @@ impl PythonRuntime {
         })
         .map_err(|_| Error::Config("failed to configure embedded CPython imports".into()))?;
         let _ = MODULE_PATH.set(canonical);
+        let _ = VENV_PATH.set(venv);
 
         Ok(Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent_calls)),
@@ -160,8 +193,24 @@ impl PythonRuntime {
 /// `write_bytecode` disabled — never writes cache files into the operator
 /// module directory, which is documented as read-only. The system standard
 /// library and site-packages remain importable for operator dependencies.
-fn initialize_isolated_cpython() -> Result<()> {
+///
+/// When `venv` is given, `PyConfig.executable` is pointed at the venv's
+/// interpreter so CPython's own path machinery adopts the environment exactly
+/// like a venv-launched Python: `pyvenv.cfg` is honored (including
+/// `include-system-site-packages`), `sys.prefix` moves into the venv, and the
+/// venv's site-packages is processed by `site` — `.pth` files included. This
+/// is file-based configuration; environment variables such as `VIRTUAL_ENV`
+/// remain ignored.
+fn initialize_isolated_cpython(venv: Option<&Path>) -> Result<()> {
     let failed = || Error::Config("failed to initialize embedded CPython".into());
+    let venv_python = match venv {
+        Some(venv) => {
+            use std::os::unix::ffi::OsStrExt;
+            let executable = venv.join("bin/python");
+            Some(std::ffi::CString::new(executable.as_os_str().as_bytes()).map_err(|_| failed())?)
+        }
+        None => None,
+    };
     // SAFETY: callers hold `INIT_LOCK`, so interpreter setup is not
     // concurrent. The config struct is initialized by
     // `PyConfig_InitIsolatedConfig` before any field access and cleared on
@@ -175,6 +224,16 @@ fn initialize_isolated_cpython() -> Result<()> {
             // A conventional single-element sys.argv for operator modules.
             let mut argv = [c"tunnelbana".as_ptr()];
             let mut status = pyo3::ffi::PyConfig_SetBytesArgv(&mut config, 1, argv.as_mut_ptr());
+            if let Some(executable) = &venv_python {
+                if pyo3::ffi::PyStatus_Exception(status) == 0 {
+                    let config_ptr: *mut pyo3::ffi::PyConfig = &mut config;
+                    status = pyo3::ffi::PyConfig_SetBytesString(
+                        config_ptr,
+                        std::ptr::addr_of_mut!((*config_ptr).executable),
+                        executable.as_ptr(),
+                    );
+                }
+            }
             if pyo3::ffi::PyStatus_Exception(status) == 0 {
                 status = pyo3::ffi::Py_InitializeFromConfig(&config);
             }

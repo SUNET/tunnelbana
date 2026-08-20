@@ -24,6 +24,14 @@
   `primary_identifier` config is now ignored at error time - use an absolute
   URL). Runtime initialization is also serialized so concurrent initializers
   cannot race the single-module-path guard.
+- **Embedded Python virtual environments:** new optional `python.venv` key
+  pointing at a venv directory (absolute or relative to `proxy.toml`). The
+  embedded interpreter adopts it exactly like a venv-launched Python via
+  `PyConfig.executable`: `pyvenv.cfg` is honored, `sys.prefix` moves into the
+  venv, and its site-packages (including `.pth` files) is processed, while
+  interpreter environment variables stay ignored. Create the venv with
+  `uv venv --python 3.13` (or `python3.13 -m venv`) at image build time; a
+  missing directory, `pyvenv.cfg`, or `bin/python` fails startup.
 
 ## 0.3.0 [2026-08-06]
 

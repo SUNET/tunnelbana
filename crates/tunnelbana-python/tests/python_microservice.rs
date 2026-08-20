@@ -23,7 +23,7 @@ fn runtime(max: usize, timeout: Duration) -> Arc<PythonRuntime> {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pythonpath"),
         )
     });
-    PythonRuntime::initialize(fixture_path(), max, timeout).unwrap()
+    PythonRuntime::initialize(fixture_path(), None::<&std::path::Path>, max, timeout).unwrap()
 }
 
 fn build(
@@ -289,9 +289,10 @@ fn pythonpath_environment_is_ignored() {
 fn initialize_rejects_a_second_module_path() {
     let _runtime = runtime(4, Duration::from_secs(2));
     let other = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pythonpath");
-    let error = PythonRuntime::initialize(other, 4, Duration::from_secs(2))
-        .err()
-        .expect("a second module path must be rejected");
+    let error =
+        PythonRuntime::initialize(other, None::<&std::path::Path>, 4, Duration::from_secs(2))
+            .err()
+            .expect("a second module path must be rejected");
     assert!(error.to_string().contains("different module path"));
 }
 

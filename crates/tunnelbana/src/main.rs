@@ -76,8 +76,13 @@ fn build_proxy(cfg: ProxyConfig, config_path: &str) -> anyhow::Result<Proxy> {
     tunnelbana_plugins::register_all(&mut registry);
     if let Some(python) = &cfg.python {
         let module_path = resolve_sibling(config_path, &python.module_path);
+        let venv = python
+            .venv
+            .as_ref()
+            .map(|venv| resolve_sibling(config_path, venv));
         let runtime = tunnelbana_python::PythonRuntime::initialize(
             &module_path,
+            venv.as_deref(),
             python.max_concurrent_calls,
             std::time::Duration::from_secs(python.call_timeout_seconds),
         )?;
