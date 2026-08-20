@@ -119,11 +119,12 @@ fn open_log(path: &std::path::Path, allow_insecure: bool) -> std::io::Result<Fil
     options.create(true).append(true);
     #[cfg(unix)]
     if !allow_insecure {
-        // O_NONBLOCK matters for correctness, not just latency: opening a FIFO
-        // write-only without it blocks until a reader appears, so the
-        // regular-file check below would never run and a planted FIFO would
-        // hang the caller (boot, or a tokio worker per response) instead of
-        // being rejected. O_NOFOLLOW does not cover this: a FIFO is not a
+        // O_NONBLOCK matters for correctness, not just latency: without it a
+        // write-only open of a readerless FIFO blocks until a reader appears,
+        // hanging the caller (boot, or a tokio worker per response). With it,
+        // that open fails immediately with ENXIO, and a FIFO that does have a
+        // reader opens without blocking and is rejected by the regular-file
+        // check below. O_NOFOLLOW does not cover this: a FIFO is not a
         // symlink.
         options
             .mode(0o600)

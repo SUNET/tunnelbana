@@ -271,10 +271,11 @@ impl FederationFrontend {
     /// Negatively cache a `client_id` whose federation resolution just failed.
     ///
     /// The key is attacker-controlled on an unauthenticated endpoint, so this
-    /// must not let the cache grow without bound: `put_if_absent` carries
-    /// `TtlCache`'s amortized sweep of expired entries (plain `put` does not),
-    /// and over-long ids are not stored at all. Leaving an existing live entry
-    /// untouched also stops a repeat sprayer from extending its own TTL.
+    /// must not let the cache grow without bound: over-long ids are not
+    /// stored at all, and every `TtlCache` insert sweeps expired entries.
+    /// `put_if_absent` is used rather than `put` because it leaves an
+    /// existing live entry untouched, so a repeat sprayer cannot keep
+    /// extending its own failure's TTL.
     fn note_resolution_failure(&self, client_id: &str) {
         if client_id.len() > MAX_CACHED_CLIENT_ID_LEN {
             tracing::debug!(
