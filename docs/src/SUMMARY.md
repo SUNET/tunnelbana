@@ -7,6 +7,7 @@
   - [Built-in plugin reference](built-in-plugins.md)
 - [Attributes and transforms](attributes.md)
 - [Micro-services](micro-services.md)
+- [Embedded Python micro-services](python-microservices.md)
 - [Legacy identifier compatibility](legacy-identifiers.md)
 - [Security: the state cookie](security-state-cookie.md)
 - [Writing a plugin](writing-a-plugin.md)

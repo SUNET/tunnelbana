@@ -1,6 +1,43 @@
 # Changelog
 
-## 0.3.0 [2026-08-06]
+## 0.3.0 [2026-08-20]
+
+- **Embedded Python micro-services:** add trusted, synchronous CPython 3.13
+  micro-services through the isolated `tunnelbana-python` crate (ADR 0052).
+  Configured class instances are reused, receive a strict complete
+  `InternalData` dictionary and restricted context snapshot, and may atomically
+  update only returned data, `target_backend`, and decorations. Calls run on
+  Tokio's blocking pool behind a global semaphore and total deadline; timed-out
+  calls retain their permits until they actually exit. Coroutine methods,
+  awaitable results, automatic discovery, Python endpoints, and runtime pip
+  installation are unsupported. Build and runtime images now include the
+  matching dynamically linked CPython packages.
+- **Embedded Python hardening (differential review F1-F3):** the interpreter
+  starts with CPython's isolated configuration (`PYTHONPATH`/`PYTHONHOME`
+  ignored, user site excluded, bytecode caches disabled, signal handlers left
+  to the host); reserved first-writer-wins decorations (`target_entity_id`,
+  `target_authn_context_class_ref`, `target_accr_comparison`) can no longer be
+  changed or removed by Python once set by an earlier pipeline component; and
+  the proxy now follows an `error_redirect` decoration only when it is an
+  absolute http(s) URL without control characters, falling back to the normal
+  protocol error otherwise (note: a relative `on_error` URL in
+  `primary_identifier` config is now ignored at error time - use an absolute
+  URL). Runtime initialization is also serialized so concurrent initializers
+  cannot race the single-module-path guard.
+- **Embedded Python virtual environments:** new optional `python.venv` key
+  pointing at a venv directory (absolute or relative to `proxy.toml`). The
+  embedded interpreter adopts it exactly like a venv-launched Python via
+  `PyConfig.executable`: `pyvenv.cfg` is honored, `sys.prefix` moves into the
+  venv, and its site-packages (including `.pth` files) is processed, while
+  interpreter environment variables stay ignored. Create the venv with
+  `uv venv --python 3.13` (or `python3.13 -m venv`) at image build time; a
+  missing directory, `pyvenv.cfg`, or `bin/python` fails startup.
+- **Embedded Python review fixes (PR #21):** the configured `class` must be a
+  Python class (`inspect.isclass`), so factory functions and other callables
+  fail startup as documented; and a `target_backend` returned by Python is
+  validated against the configured backend names before commit on both the
+  request and response paths instead of failing later or being silently
+  retained.
 
 - **Dependencies:** grindvakt 0.7.0 and jose-rs 0.7.0, which carry the
   protocol-layer fixes from the same audit (private_key_jwt assertions

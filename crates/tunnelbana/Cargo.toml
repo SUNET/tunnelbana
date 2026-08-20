@@ -14,6 +14,7 @@ path = "src/main.rs"
 tunnelbana-core = { path = "../tunnelbana-core" }
 tunnelbana-oidc = { path = "../tunnelbana-oidc" }
 tunnelbana-plugins = { path = "../tunnelbana-plugins" }
+tunnelbana-python = { path = "../tunnelbana-python" }
 actix-web.workspace = true
 tokio.workspace = true
 reqwest.workspace = true

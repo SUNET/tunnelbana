@@ -19,6 +19,7 @@ docker run --rm \
   -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
   -w /src rust:1-trixie \
   bash -c 'export PATH=/usr/local/cargo/bin:$PATH; \
-           apt-get update -qq && apt-get install -y -qq perl >/dev/null 2>&1; \
+           export PYO3_PYTHON=/usr/bin/python3.13; \
+           apt-get update -qq && apt-get install -y -qq perl python3.13-dev >/dev/null 2>&1; \
            cargo build --release -p tunnelbana'
 echo "binary: $REPO/.build-cache/target-trixie/release/tunnelbana"

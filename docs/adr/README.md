@@ -50,3 +50,4 @@ accepted — supersede with a new record rather than editing history.
 | [0049](0049-force-authn-is-passive-propagation.md) | Propagating ForceAuthn/IsPassive through the proxy | Accepted |
 | [0050](0050-saml-backend-security-preset-fail-closed.md) | Fail-closed `security` preset in the SAML2 backend | Accepted |
 | [0051](0051-saml-frontend-sanitized-rejections.md) | Sanitized rejection output in the SAML2 frontend | Accepted |
+| [0052](0052-embedded-cpython-microservices.md) | Embedded CPython micro-services | Accepted |

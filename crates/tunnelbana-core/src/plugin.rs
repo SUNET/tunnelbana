@@ -194,7 +194,8 @@ impl BuildContext {
 
 type FrontendCtor = fn(&BuildContext) -> Result<Box<dyn Frontend>>;
 type BackendCtor = fn(&BuildContext) -> Result<Box<dyn Backend>>;
-type MicroServiceCtor = fn(&BuildContext) -> Result<Box<dyn MicroService>>;
+type MicroServiceCtor =
+    Arc<dyn Fn(&BuildContext) -> Result<Box<dyn MicroService>> + Send + Sync + 'static>;
 
 /// Maps a `type` string from config to a plugin constructor.
 #[derive(Default)]
@@ -215,8 +216,14 @@ impl Registry {
     pub fn register_backend(&mut self, kind: &str, ctor: BackendCtor) {
         self.backends.insert(kind.to_string(), ctor);
     }
-    pub fn register_microservice(&mut self, kind: &str, ctor: MicroServiceCtor) {
-        self.microservices.insert(kind.to_string(), ctor);
+    pub fn register_microservice<F>(&mut self, kind: &str, ctor: F)
+    where
+        F: Fn(&BuildContext) -> Result<Box<dyn MicroService>> + Send + Sync + 'static,
+    {
+        // Function items used by existing registrations coerce into this
+        // closure just as before, while Arc-backed storage also permits the
+        // Python constructor to capture its initialized runtime.
+        self.microservices.insert(kind.to_string(), Arc::new(ctor));
     }
 
     pub fn build_frontend(&self, kind: &str, bx: &BuildContext) -> Result<Box<dyn Frontend>> {

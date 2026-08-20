@@ -39,7 +39,7 @@ async fn main() -> std::io::Result<()> {
     });
     let index_page = web::Data::new(index_page);
 
-    let proxy = build_proxy(cfg).unwrap_or_else(|e| {
+    let proxy = build_proxy(cfg, &config_path).unwrap_or_else(|e| {
         eprintln!("failed to assemble proxy: {e}");
         std::process::exit(1);
     });
@@ -71,9 +71,32 @@ fn init_tracing(logging: &tunnelbana_core::config::LoggingConfig) {
 }
 
 /// Instantiate all configured plugins and assemble the proxy.
-fn build_proxy(cfg: ProxyConfig) -> anyhow::Result<Proxy> {
+fn build_proxy(cfg: ProxyConfig, config_path: &str) -> anyhow::Result<Proxy> {
     let mut registry = Registry::new();
     tunnelbana_plugins::register_all(&mut registry);
+    if let Some(python) = &cfg.python {
+        let module_path = resolve_sibling(config_path, &python.module_path);
+        let venv = python
+            .venv
+            .as_ref()
+            .map(|venv| resolve_sibling(config_path, venv));
+        let runtime = tunnelbana_python::PythonRuntime::initialize(
+            &module_path,
+            venv.as_deref(),
+            python.max_concurrent_calls,
+            std::time::Duration::from_secs(python.call_timeout_seconds),
+        )?;
+        let constructor_runtime = runtime.clone();
+        // Python may return a target_backend; the boundary validates it
+        // against the configured backend names before committing.
+        let backend_names: Vec<String> = cfg.backends.iter().map(|b| b.name.clone()).collect();
+        registry.register_microservice("python", move |bx| {
+            constructor_runtime.build_microservice(bx, &backend_names)
+        });
+        // Python configuration can itself contain deployment-sensitive paths
+        // and limits, so successful startup is logged without their values.
+        tracing::info!("initialized embedded CPython");
+    }
 
     // Attribute mapper.
     let mapper = match &cfg.attributes {
@@ -425,6 +448,30 @@ mod tests {
         let config_path = dir.join("proxy.toml");
         assert!(load_index_page(&cfg, config_path.to_str().unwrap()).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[actix_web::test]
+    async fn build_proxy_resolves_and_registers_python_microservice() {
+        let cfg = ProxyConfig::from_str(
+            r#"
+                base_url = "https://proxy.example"
+                state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+
+                [python]
+                module_path = "../tunnelbana-python/tests/fixtures"
+
+                [[microservice]]
+                type = "python"
+                name = "python-roundtrip"
+
+                [microservice.config]
+                module = "services"
+                class = "RoundTrip"
+            "#,
+        )
+        .unwrap();
+        let config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proxy.toml");
+        build_proxy(cfg, config_path.to_str().unwrap()).unwrap();
     }
 
     #[actix_web::test]

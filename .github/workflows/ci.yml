@@ -12,9 +12,18 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    container: rust:1-trixie
     timeout-minutes: 30
+    env:
+      PYO3_PYTHON: /usr/bin/python3.13
 
     steps:
+      - name: Install CPython build and runtime packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git python3.13 python3.13-dev
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checkout tunnelbana
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

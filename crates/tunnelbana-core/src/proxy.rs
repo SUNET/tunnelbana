@@ -219,8 +219,14 @@ impl Proxy {
             .decoration(crate::context::KEY_ERROR_REDIRECT)
             .and_then(|v| v.as_str())
         {
-            tracing::warn!(error = %error, redirect = url, "request failed; redirecting");
-            return Response::redirect(url);
+            if is_valid_error_redirect(url) {
+                tracing::warn!(error = %error, redirect = url, "request failed; redirecting");
+                return Response::redirect(url);
+            }
+            tracing::warn!(
+                error = %error,
+                "ignoring error_redirect decoration that is not an absolute http(s) URL"
+            );
         }
         let status = error.status_hint();
         if let Some(fe_name) = ctx
@@ -240,9 +246,86 @@ impl Proxy {
     }
 }
 
+/// An `error_redirect` decoration is written by micro-services (including
+/// operator-supplied Python code) and is emitted verbatim as a `Location`
+/// header. Require an absolute http(s) URL with a non-empty authority and no
+/// control characters or spaces, so a value that was (against guidance)
+/// derived from request input cannot smuggle a scheme such as `javascript:`
+/// or split the response header.
+fn is_valid_error_redirect(url: &str) -> bool {
+    let rest = ["https://", "http://"].iter().find_map(|scheme| {
+        url.get(..scheme.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+    });
+    match rest {
+        Some(rest) if !rest.is_empty() => !url.chars().any(|c| c.is_ascii_control() || c == ' '),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::KEY_ERROR_REDIRECT;
+    use crate::state::State;
+
+    #[test]
+    fn error_redirect_validation_accepts_only_absolute_http_urls() {
+        assert!(is_valid_error_redirect("https://sp.example/error"));
+        assert!(is_valid_error_redirect("http://sp.example/error?code=x"));
+        assert!(is_valid_error_redirect("HTTPS://sp.example/error"));
+
+        for url in [
+            "",
+            "https://",
+            "http://",
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "//evil.example/phish",
+            "/relative/path",
+            "https://sp.example/\r\nSet-Cookie: x=y",
+            "https://sp.example/a b",
+            "httpsx://sp.example/",
+        ] {
+            assert!(!is_valid_error_redirect(url), "accepted {url:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_error_redirect_decoration_redirects() {
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
+        let proxy = Proxy::new(vec![], vec![], vec![], sealer);
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        ctx.decorate(
+            KEY_ERROR_REDIRECT,
+            serde_json::Value::String("https://sp.example/error".into()),
+        );
+        let response = proxy
+            .render_error(&mut ctx, Error::Internal("boom".into()))
+            .await;
+        assert_eq!(response.status, 302);
+        assert!(response
+            .headers
+            .iter()
+            .any(|(n, v)| n == "location" && v == "https://sp.example/error"));
+    }
+
+    #[tokio::test]
+    async fn invalid_error_redirect_decoration_falls_back_to_generic_error() {
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
+        let proxy = Proxy::new(vec![], vec![], vec![], sealer);
+        for url in ["javascript:alert(1)", "https://sp.example/\r\nX: y"] {
+            let mut ctx = Context::new(HttpRequestData::default(), State::new());
+            ctx.decorate(KEY_ERROR_REDIRECT, serde_json::Value::String(url.into()));
+            let response = proxy
+                .render_error(&mut ctx, Error::Internal("boom".into()))
+                .await;
+            assert_ne!(response.status, 302);
+            assert!(response.headers.iter().all(|(n, _)| n != "location"));
+            assert_eq!(String::from_utf8(response.body).unwrap(), "request failed");
+        }
+    }
 
     #[tokio::test]
     async fn unhandled_error_returns_generic_body() {
