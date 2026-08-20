@@ -100,6 +100,23 @@
   the default keeps SATOSA-compatible unscoped composed identifiers, so
   existing account links are unaffected unless the option is enabled.
 
+- **Security (follow-up to the audit pass):** two denial-of-service defects
+  found while reviewing the changes above were fixed. `custom_logging` now
+  opens audit logs with `O_NONBLOCK` alongside `O_NOFOLLOW` and clears the
+  flag once the target is confirmed to be a regular file: without it, opening
+  a planted FIFO blocked until a reader appeared, so the regular-file check
+  ADR 0036 relies on never ran and the open hung the proxy at boot, or parked
+  one tokio worker per authentication response until the proxy stopped
+  serving. The federation frontend's negative-resolution cache is now bounded
+  - insertion uses `put_if_absent` (which carries the amortized sweep of
+  expired entries) and a `client_id` over 512 bytes is not stored - because
+  its keys come from an unauthenticated endpoint. Relatedly, `TtlCache::put`
+  and `put_with_ttl` now perform the same amortized sweep as `put_if_absent`;
+  previously only `put_if_absent` pruned, so any cache filled via `put` from
+  request-derived keys retained one entry per key ever seen (TTL expiry only
+  hides a value from `get`, it never reclaims the entry). See ADR 0036 and
+  ADR 0042, whose security-boundaries tables were corrected accordingly.
+
 - **Compatibility escape hatch:** `custom_logging` accepts
   `allow_insecure_log_target = true` to restore SATOSA-style behavior
   (follow symlinks, allow FIFO/stdout-linked targets) for container logging

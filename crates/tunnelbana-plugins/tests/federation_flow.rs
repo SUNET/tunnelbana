@@ -618,3 +618,67 @@ async fn failed_rp_resolution_is_negatively_cached() {
         "the second failure must be served from the negative cache"
     );
 }
+
+/// The negative cache is keyed by an attacker-supplied `client_id` on an
+/// unauthenticated endpoint. This covers the insertion path for cacheable
+/// ids - a spray of distinct ids is stored once each and repeats are served
+/// from the cache - and the exact key-length cap: an id at 512 bytes is
+/// cached, one byte over is never stored. Memory bounding of the map itself
+/// (the amortized sweep on insert) and `put_if_absent` leaving a live entry
+/// untouched are unit-tested in `tunnelbana-core`'s cache module.
+#[tokio::test]
+async fn negative_resolution_cache_caches_distinct_ids_and_caps_key_length() {
+    let ta_key = ec_key("ta-1");
+    let net = Arc::new(FailingResolve {
+        ta_key: ta_key.clone(),
+        resolve_hits: Mutex::new(0),
+    });
+    let http: Arc<dyn HttpClient> = net.clone();
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
+    let ta_pub: serde_json::Value =
+        serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
+    let proxy = build_proxy(http, op_jwk, ta_pub);
+
+    let hits = || *net.resolve_hits.lock().unwrap();
+    let authz_for = |client_id: &str| {
+        format!(
+            "OIDFed/authorization?client_id={}&response_type=code&redirect_uri={}&scope=openid&state=st",
+            enc(client_id),
+            enc("https://evil.example.com/cb")
+        )
+    };
+
+    // A spray of distinct cacheable ids: each unique id costs exactly one
+    // resolution, and a repeat of the same id is served from the cache.
+    for i in 0..8 {
+        let authz = authz_for(&format!("https://spray-{i}.example.com"));
+        assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+        assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    }
+    assert_eq!(
+        hits(),
+        8,
+        "each distinct cacheable id must be resolved once and then cached"
+    );
+
+    // Exactly at the 512-byte cap the id is still cached...
+    let base = "https://evil.example.com/";
+    let at_cap = format!("{base}{}", "a".repeat(512 - base.len()));
+    assert_eq!(at_cap.len(), 512);
+    let authz = authz_for(&at_cap);
+    assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    assert_eq!(hits(), 9, "an id at the length cap must still be cached");
+
+    // ...one byte over it is never stored, so every request re-resolves.
+    let over_cap = format!("{base}{}", "a".repeat(513 - base.len()));
+    assert_eq!(over_cap.len(), 513);
+    let authz = authz_for(&over_cap);
+    assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    assert_eq!(
+        hits(),
+        11,
+        "an over-long client_id must not be retained in the negative cache"
+    );
+}

@@ -986,8 +986,10 @@ name = "primary-id"
 # {timestamp, sp, idp, frontend, backend, attr:{only the listed ones}}.
 # An unwritable log_target fails at startup; runtime write errors are logged
 # and never fail the flow. The target must be a regular file and is opened
-# with O_NOFOLLOW (ADR 0036); set allow_insecure_log_target only for
-# SATOSA-style targets such as a symlink to /dev/stdout or a FIFO.
+# with O_NOFOLLOW|O_NONBLOCK (ADR 0036); set allow_insecure_log_target only
+# for SATOSA-style targets such as a symlink to /dev/stdout or a FIFO. Note
+# that in that mode a FIFO with no reader attached blocks the open, so the
+# proxy will stall - make sure the reader is running.
 [[microservice]]
 type = "custom_logging"
 name = "audit"

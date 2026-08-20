@@ -54,9 +54,9 @@ where
         self.len() == 0
     }
 
-    /// Drop every entry whose TTL has elapsed. Called opportunistically by
-    /// [`Self::put_if_absent`]; also safe to invoke directly (e.g. from a
-    /// periodic maintenance task).
+    /// Drop every entry whose TTL has elapsed, unconditionally. Inserts already
+    /// sweep opportunistically once the map outgrows a watermark, so this is
+    /// only needed to reclaim eagerly (e.g. from a periodic maintenance task).
     pub fn prune_expired(&self) {
         let now = now_secs();
         if let Ok(mut guard) = self.inner.write() {
@@ -83,14 +83,34 @@ where
 
     /// Insert with an explicit TTL (seconds).
     pub fn put_with_ttl(&self, key: impl Into<String>, value: V, ttl: u64) {
+        let now = now_secs();
         if let Ok(mut guard) = self.inner.write() {
             guard.insert(
                 key.into(),
                 Entry {
                     value,
-                    expires_at: now_secs().saturating_add(ttl),
+                    expires_at: now.saturating_add(ttl),
                 },
             );
+            // Same amortized sweep as `put_if_absent`. Any cache whose keys
+            // come from request input (client ids, entity ids) would otherwise
+            // retain one entry per key ever seen: expiry alone only hides a
+            // value from `get`, it never reclaims the entry.
+            Self::maybe_prune(&mut guard, now, &self.prune_at);
+        }
+    }
+
+    /// Sweep expired entries once the map outgrows the watermark, then re-arm
+    /// at twice the surviving size (never below [`PRUNE_FLOOR`]).
+    fn maybe_prune(
+        guard: &mut std::collections::HashMap<String, Entry<V>>,
+        now: u64,
+        prune_at: &AtomicUsize,
+    ) {
+        if guard.len() >= prune_at.load(Ordering::Relaxed) {
+            guard.retain(|_, e| e.expires_at > now);
+            let next = guard.len().saturating_mul(2).max(PRUNE_FLOOR);
+            prune_at.store(next, Ordering::Relaxed);
         }
     }
 
@@ -122,15 +142,10 @@ where
                 expires_at: now.saturating_add(ttl),
             },
         );
-        // Amortized cleanup: when the map outgrows the watermark, sweep expired
-        // entries and re-arm at twice the surviving size. This bounds memory for
-        // an append-only key space such as DPoP `jti` replay records, whose keys
-        // are never re-inserted and so would otherwise accumulate forever.
-        if guard.len() >= self.prune_at.load(Ordering::Relaxed) {
-            guard.retain(|_, e| e.expires_at > now);
-            let next = guard.len().saturating_mul(2).max(PRUNE_FLOOR);
-            self.prune_at.store(next, Ordering::Relaxed);
-        }
+        // Amortized cleanup: bounds memory for an append-only key space such as
+        // DPoP `jti` replay records, whose keys are never re-inserted and so
+        // would otherwise accumulate forever.
+        Self::maybe_prune(&mut guard, now, &self.prune_at);
         true
     }
 
@@ -203,6 +218,22 @@ mod tests {
         }
         // Every inserted entry had ttl=0 (already expired), so after the
         // amortized sweeps the surviving set is far below the total inserted.
+        assert!(
+            cache.len() <= PRUNE_FLOOR,
+            "expected bounded map, got {}",
+            cache.len()
+        );
+    }
+
+    #[test]
+    fn put_bounds_memory_for_expired_keys() {
+        // `put` is used for caches keyed by request input (e.g. failed
+        // federation client_id resolutions), so it must sweep like
+        // `put_if_absent` rather than retaining one entry per key ever seen.
+        let cache: TtlCache<()> = TtlCache::new(0);
+        for i in 0..(PRUNE_FLOOR * 8) {
+            cache.put(format!("client-{i}"), ());
+        }
         assert!(
             cache.len() <= PRUNE_FLOOR,
             "expected bounded map, got {}",
