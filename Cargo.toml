@@ -4,6 +4,7 @@ members = [
     "crates/tunnelbana-core",
     "crates/tunnelbana-oidc",
     "crates/tunnelbana-plugins",
+    "crates/tunnelbana-python",
     "crates/tunnelbana",
 ]
 
@@ -60,3 +61,7 @@ percent-encoding = "2"
 form_urlencoded = "1"
 regex = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
+
+# Embedded CPython support. Keep these exact and isolated to tunnelbana-python.
+pyo3 = { version = "=0.29.2", default-features = false }
+pythonize = "=0.29.0"

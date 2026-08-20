@@ -7,6 +7,7 @@
 
 use crate::error::{Error, Result};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Logging configuration.
@@ -53,6 +54,26 @@ fn default_http_request_timeout_seconds() -> u64 {
 }
 fn default_http_max_response_bytes() -> usize {
     8 * 1024 * 1024
+}
+fn default_python_max_concurrent_calls() -> usize {
+    16
+}
+fn default_python_call_timeout_seconds() -> u64 {
+    30
+}
+
+/// Global controls for embedded synchronous Python micro-services.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonConfig {
+    /// The sole directory added to Python's import search path.
+    pub module_path: String,
+    /// Maximum number of Python calls admitted across all micro-services.
+    #[serde(default = "default_python_max_concurrent_calls")]
+    pub max_concurrent_calls: usize,
+    /// Total deadline for permit acquisition and synchronous execution.
+    #[serde(default = "default_python_call_timeout_seconds")]
+    pub call_timeout_seconds: u64,
 }
 
 /// Minimum accepted length (in bytes) of `state_encryption_key`. A 32-byte
@@ -138,6 +159,10 @@ pub struct ProxyConfig {
     pub index_html: Option<String>,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Embedded Python runtime configuration. Required when a Python
+    /// micro-service is configured.
+    #[serde(default)]
+    pub python: Option<PythonConfig>,
     #[serde(rename = "frontend", default)]
     pub frontends: Vec<PluginConfig>,
     #[serde(rename = "backend", default)]
@@ -260,6 +285,37 @@ impl ProxyConfig {
             return Err(Error::Config(
                 "http_max_response_bytes must be greater than zero".into(),
             ));
+        }
+        let has_python_microservice = self.microservices.iter().any(|p| p.kind == "python");
+        if has_python_microservice && self.python.is_none() {
+            return Err(Error::Config(
+                "[python] is required when a microservice has type = \"python\"".into(),
+            ));
+        }
+        if let Some(python) = &self.python {
+            if python.module_path.trim().is_empty() {
+                return Err(Error::Config("python.module_path must not be empty".into()));
+            }
+            if python.max_concurrent_calls == 0 {
+                return Err(Error::Config(
+                    "python.max_concurrent_calls must be greater than zero".into(),
+                ));
+            }
+            if python.call_timeout_seconds == 0 {
+                return Err(Error::Config(
+                    "python.call_timeout_seconds must be greater than zero".into(),
+                ));
+            }
+        }
+
+        let mut microservice_names = HashSet::new();
+        for microservice in &self.microservices {
+            if !microservice_names.insert(microservice.name.as_str()) {
+                return Err(Error::Config(format!(
+                    "duplicate microservice name: {}",
+                    microservice.name
+                )));
+            }
         }
         Ok(())
     }
@@ -501,5 +557,70 @@ mod tests {
             http_max_response_bytes = 0
         "#;
         assert!(ProxyConfig::from_str(toml_str).is_err());
+    }
+
+    #[test]
+    fn python_defaults_are_applied() {
+        let cfg = ProxyConfig::from_str(
+            r#"
+                base_url = "https://x"
+                state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+
+                [python]
+                module_path = "python"
+
+                [[microservice]]
+                type = "python"
+                name = "example"
+            "#,
+        )
+        .unwrap();
+        let python = cfg.python.unwrap();
+        assert_eq!(python.module_path, "python");
+        assert_eq!(python.max_concurrent_calls, 16);
+        assert_eq!(python.call_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn python_configuration_is_required_and_strict() {
+        let base = r#"
+            base_url = "https://x"
+            state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+
+            [[microservice]]
+            type = "python"
+            name = "example"
+        "#;
+        assert!(ProxyConfig::from_str(base).is_err());
+
+        for field in [
+            "module_path = \"\"",
+            "module_path = \"python\"\nmax_concurrent_calls = 0",
+            "module_path = \"python\"\ncall_timeout_seconds = 0",
+            "module_path = \"python\"\nunknown = true",
+        ] {
+            let value = format!("{base}\n[python]\n{field}");
+            assert!(ProxyConfig::from_str(&value).is_err(), "accepted {field}");
+        }
+    }
+
+    #[test]
+    fn duplicate_microservice_names_are_rejected() {
+        let err = ProxyConfig::from_str(
+            r#"
+                base_url = "https://x"
+                state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+
+                [[microservice]]
+                type = "first"
+                name = "duplicate"
+
+                [[microservice]]
+                type = "second"
+                name = "duplicate"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate microservice name"));
     }
 }

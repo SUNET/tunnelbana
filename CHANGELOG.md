@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Embedded Python micro-services:** add trusted, synchronous CPython 3.13
+  micro-services through the isolated `tunnelbana-python` crate (ADR 0052).
+  Configured class instances are reused, receive a strict complete
+  `InternalData` dictionary and restricted context snapshot, and may atomically
+  update only returned data, `target_backend`, and decorations. Calls run on
+  Tokio's blocking pool behind a global semaphore and total deadline; timed-out
+  calls retain their permits until they actually exit. Coroutine methods,
+  awaitable results, automatic discovery, Python endpoints, and runtime pip
+  installation are unsupported. Build and runtime images now include the
+  matching dynamically linked CPython packages.
+
 ## 0.3.0 [2026-08-06]
 
 - **Dependencies:** grindvakt 0.7.0 and jose-rs 0.7.0, which carry the

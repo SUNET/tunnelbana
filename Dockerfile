@@ -20,6 +20,10 @@
 FROM rust:1-trixie AS build
 
 WORKDIR /src
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3.13-dev \
+ && rm -rf /var/lib/apt/lists/*
+ENV PYO3_PYTHON=/usr/bin/python3.13
 COPY . .
 
 # Cache mounts keep the crates.io registry and the target dir warm across
@@ -35,10 +39,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM debian:trixie-slim AS runtime
 
+# python3.13/libpython3.13: embedded Python micro-services and shared runtime.
 # ca-certificates: outbound TLS to MDQ / federation / JWKS endpoints.
 # curl: container HEALTHCHECK only.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl less \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl less python3.13 libpython3.13 \
  && rm -rf /var/lib/apt/lists/*
 
 # Run as an unprivileged system user.

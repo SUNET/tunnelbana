@@ -45,6 +45,7 @@ purely by config + which plugins are loaded:
 | `tunnelbana-core`    | Framework: `Context`, `InternalData`, encrypted state cookie, plugin traits + registry, router, proxy orchestrator, TOML config, attribute mapping, key loading (PEM **and** JWK), TTL/disk cache. |
 | `tunnelbana-oidc`    | Thin compatibility **shim** re-exporting the [`grindvakt`](https://github.com/kushaldas/grindvakt) protocol surface (OAuth2 / OIDC / **OpenID Federation 1.1** — OP engine, RP flow, stateless tokens, PKCE, `private_key_jwt`, entity statements, trust-chain resolution, metadata policies) so plugins keep using `tunnelbana_oidc::*` paths. New code should depend on `grindvakt` directly. |
 | `tunnelbana-plugins` | Concrete plugins: `oidc` frontend (OP), `oidc` backend (RP), `oidc_federation` frontend, `saml2` frontend (IdP) and backend (SP) via gamlastan, and micro-services (`static_attributes`, `filter_attributes`, `custom_routing`). |
+| `tunnelbana-python`  | Isolated embedded-CPython boundary for trusted synchronous Python micro-services, strict data/context conversion, and global execution controls. |
 | `tunnelbana`         | The actix-web binary: config loading, plugin instantiation, `reqwest`-backed HTTP client, request/response glue. |
 
 ## Design decisions
@@ -55,8 +56,10 @@ purely by config + which plugins are loaded:
 - **Stateless OIDC tokens** — authorization codes and access tokens are
   confidential JWE tokens carrying their own state + expiry; id_tokens are signed
   JWTs. The token and userinfo endpoints do no server lookups.
-- **Static compile-time plugin registry** — `Box<dyn Frontend/Backend/MicroService>`
-  selected by a `type` string in config. No dynamic loading.
+- **Explicit plugin registry** — `Box<dyn Frontend/Backend/MicroService>`
+  selected by a `type` string in config. Rust implementations are registered
+  at compile time; configured Python micro-service modules are imported only
+  through the isolated embedded runtime.
 - **Async actix + `reqwest`**; synchronous JOSE/crypto called inline.
 - **Keys** may be PEM/DER files **or** inline/file JWK(s); everything is
   normalized to a `jose_rs::Jwk` internally.
@@ -99,8 +102,8 @@ changes.
   **auto-registers** unknown RPs by resolving them through a trust anchor's
   `federation_resolve_endpoint`, unpacks request objects (RFC 9101), accepts
   `private_key_jwt` (RFC 7523). Metadata-policy operators implemented.
-- **Micro-services**: `static_attributes`, `filter_attributes` (response path),
-  `custom_routing` (request path, backend selection by requester).
+- **Micro-services**: built-in Rust transformations plus trusted synchronous
+  Python classes with strict data/context dictionaries and bounded execution.
 - The full proxy flow (route → state → dispatch → micro-services → state).
 
 This project is being developed heavily. So, it will a few months to be tested

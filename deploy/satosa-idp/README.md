@@ -51,7 +51,9 @@ registry artifacts, and builder caches are not secret stores. Provision
 
 The binary is cross-built on the dev host inside a debian-13 (trixie) container
 so its glibc matches `debian:13-slim`; the image contains neither the binary nor
-private keys, and the remote mounts both at runtime.
+private keys, and the remote mounts both at runtime. The build container installs
+the CPython 3.13 development package, and the runtime image carries Python 3.13
+and its matching shared library for embedded Python micro-services.
 
 ```bash
 # 1. Build (cached target + host cargo registry):
