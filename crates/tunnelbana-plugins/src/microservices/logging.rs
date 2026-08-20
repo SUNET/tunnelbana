@@ -119,17 +119,48 @@ fn open_log(path: &std::path::Path, allow_insecure: bool) -> std::io::Result<Fil
     options.create(true).append(true);
     #[cfg(unix)]
     if !allow_insecure {
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        // O_NONBLOCK matters for correctness, not just latency: opening a FIFO
+        // write-only without it blocks until a reader appears, so the
+        // regular-file check below would never run and a planted FIFO would
+        // hang the caller (boot, or a tokio worker per response) instead of
+        // being rejected. O_NOFOLLOW does not cover this: a FIFO is not a
+        // symlink.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
     #[cfg(unix)]
-    if !allow_insecure && !file.metadata()?.file_type().is_file() {
-        return Err(std::io::Error::other(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
+    if !allow_insecure {
+        if !file.metadata()?.file_type().is_file() {
+            return Err(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        // The target is a regular file, for which O_NONBLOCK has no effect on
+        // reads/writes; clear it anyway so the descriptor we hand out has the
+        // same semantics as an ordinary append handle.
+        clear_nonblock(&file)?;
     }
     Ok(file)
+}
+
+/// Drop `O_NONBLOCK` from an already-open descriptor.
+#[cfg(unix)]
+fn clear_nonblock(file: &File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is owned by `file` and stays open for the duration of both
+    // calls; F_GETFL/F_SETFL take no pointer arguments.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -227,6 +258,68 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_fifo_log_target_without_blocking() {
+        let path = temp_log("fifo");
+        let _ = std::fs::remove_file(&path);
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        // Run in a worker thread: without O_NONBLOCK the open blocks forever
+        // waiting for a reader, so a regression must fail the test rather than
+        // hang the whole suite.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        std::thread::spawn(move || {
+            let result = CustomLogging::build(&bx(
+                "audit",
+                serde_json::json!({ "log_target": probe.to_str().unwrap() }),
+            ));
+            let _ = tx.send(result.is_err());
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(is_err) => assert!(is_err, "a FIFO log_target must be rejected"),
+            Err(_) => panic!("opening a FIFO log_target blocked; O_NONBLOCK is missing"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allow_insecure_log_target_accepts_fifo() {
+        let path = temp_log("fifo-insecure");
+        let _ = std::fs::remove_file(&path);
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        // Hold the read end open so the SATOSA-compatible blocking open can
+        // complete, mirroring a container FIFO with a log shipper attached.
+        // O_NONBLOCK on this side too: a read-only FIFO open blocks until a
+        // writer appears, which is the very open we are about to make.
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let built = CustomLogging::build(&bx(
+            "audit",
+            serde_json::json!({
+                "log_target": path.to_str().unwrap(),
+                "allow_insecure_log_target": true
+            }),
+        ));
+        assert!(
+            built.is_ok(),
+            "opt-in insecure mode must still accept a FIFO"
+        );
+        drop(reader);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[cfg(unix)]

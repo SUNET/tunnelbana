@@ -618,3 +618,37 @@ async fn failed_rp_resolution_is_negatively_cached() {
         "the second failure must be served from the negative cache"
     );
 }
+
+/// The negative cache is keyed by an attacker-supplied `client_id` on an
+/// unauthenticated endpoint, so a spray of distinct ids must not grow it
+/// without bound. Over-long ids are not stored at all, and stored entries are
+/// swept by `put_if_absent`'s amortized prune once they expire.
+#[tokio::test]
+async fn negative_resolution_cache_is_bounded() {
+    let ta_key = ec_key("ta-1");
+    let net = Arc::new(FailingResolve {
+        ta_key: ta_key.clone(),
+        resolve_hits: Mutex::new(0),
+    });
+    let http: Arc<dyn HttpClient> = net.clone();
+    let op_jwk: serde_json::Value = ec_jwk("op-1");
+    let ta_pub: serde_json::Value =
+        serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
+    let proxy = build_proxy(http, op_jwk, ta_pub);
+
+    // An over-long client_id is rejected without being retained, so it is
+    // re-resolved rather than served from the cache.
+    let huge = format!("https://evil.example.com/{}", "a".repeat(600));
+    let authz = format!(
+        "OIDFed/authorization?client_id={}&response_type=code&redirect_uri={}&scope=openid&state=st",
+        enc(&huge),
+        enc("https://evil.example.com/cb")
+    );
+    assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    assert_eq!(proxy.run(req(&authz, "GET", None)).await.status, 400);
+    assert_eq!(
+        *net.resolve_hits.lock().unwrap(),
+        2,
+        "an over-long client_id must not be retained in the negative cache"
+    );
+}

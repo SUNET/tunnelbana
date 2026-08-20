@@ -727,10 +727,15 @@ name = "audit"
   attrs      = ["edupersonprincipalname", "mail"]   # only these are recorded
 ```
 
-On Unix the target is created (or repaired) with mode `0600`. Run tunnelbana as
-the account that owns the audit file; startup fails if that account cannot open
-or restrict the target. Directory access and log rotation remain deployment
-responsibilities.
+On Unix the target is created with mode `0600` and opened with
+`O_NOFOLLOW|O_NONBLOCK`, so a symlinked target is refused and a planted FIFO
+is rejected rather than blocking the proxy (ADR 0036). A **pre-existing**
+file keeps whatever permissions and ownership it already has - they are no
+longer repaired on open - so create the audit file yourself, or make sure
+nothing else can pre-create it: a pre-created world-readable file is accepted
+silently. Run tunnelbana as the account that owns the audit file; startup
+fails if that account cannot open the target. Directory access, hard links
+and log rotation remain deployment responsibilities.
 
 A record looks like:
 

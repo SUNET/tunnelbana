@@ -35,6 +35,12 @@ const AUTHZ_KEY: &str = "authz_request";
 /// `client_id`s can cause.
 const RESOLUTION_FAILURE_TTL: u64 = 60;
 
+/// Upper bound on a `client_id` retained in the negative-resolution cache.
+/// A federation entity identifier is a URL; anything longer is not going to
+/// resolve, and refusing to store it keeps attacker-controlled input from
+/// growing the cache's keys without bound (cf. `MAX_JTI_LEN` in `dpop`).
+const MAX_CACHED_CLIENT_ID_LEN: usize = 512;
+
 #[derive(Debug, Deserialize)]
 struct TrustAnchorConfig {
     entity_id: String,
@@ -262,6 +268,25 @@ impl FederationFrontend {
         format!("{}/{}", self.name, suffix)
     }
 
+    /// Negatively cache a `client_id` whose federation resolution just failed.
+    ///
+    /// The key is attacker-controlled on an unauthenticated endpoint, so this
+    /// must not let the cache grow without bound: `put_if_absent` carries
+    /// `TtlCache`'s amortized sweep of expired entries (plain `put` does not),
+    /// and over-long ids are not stored at all. Leaving an existing live entry
+    /// untouched also stops a repeat sprayer from extending its own TTL.
+    fn note_resolution_failure(&self, client_id: &str) {
+        if client_id.len() > MAX_CACHED_CLIENT_ID_LEN {
+            tracing::debug!(
+                len = client_id.len(),
+                "not caching over-long client_id resolution failure"
+            );
+            return;
+        }
+        self.resolution_failures
+            .put_if_absent(client_id, (), RESOLUTION_FAILURE_TTL);
+    }
+
     /// Build and sign the federation entity configuration.
     fn entity_configuration(&self) -> Result<String> {
         let mut openid_provider = self.provider.discovery_document();
@@ -441,7 +466,7 @@ impl FederationFrontend {
             None => match self.auto_register(&client_id).await {
                 Ok(c) => c,
                 Err(e) => {
-                    self.resolution_failures.put(&client_id, ());
+                    self.note_resolution_failure(&client_id);
                     tracing::warn!(frontend = %self.name, client_id = %client_id, error = %e, "federation RP resolution failed");
                     return Ok(unresolvable());
                 }

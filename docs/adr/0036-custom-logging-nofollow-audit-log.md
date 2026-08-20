@@ -20,13 +20,19 @@ record extends the process's authority over files it did not create.
 
 ## Decision
 
-- On Unix, the log target is opened with `O_NOFOLLOW`
-  (`OpenOptionsExt::custom_flags(libc::O_NOFOLLOW)`): a symlinked target is
-  refused at both startup and write time.
+- On Unix, the log target is opened with `O_NOFOLLOW | O_NONBLOCK`
+  (`OpenOptionsExt::custom_flags`): a symlinked target is refused at both
+  startup and write time.
 - Owner-only mode `0600` is applied only at creation via `OpenOptions::mode`;
   a pre-existing target keeps its own permissions.
 - The opened file must be a regular file; other file types (FIFOs, devices)
-  are rejected.
+  are rejected. `O_NONBLOCK` is required for this check to be reachable at
+  all: opening a FIFO write-only without it blocks until a reader appears, so
+  a planted FIFO would hang the caller before the check runs (see the
+  boundaries table). Once the descriptor is confirmed to be a regular file,
+  `O_NONBLOCK` is cleared with `fcntl(F_SETFL)`, since it has no effect on
+  regular-file I/O and the handle should behave like an ordinary append
+  handle.
 - An opt-out config flag `allow_insecure_log_target = true` restores the
   SATOSA-compatible open behavior (follow symlinks, accept non-regular
   targets) for deployments that log through a symlinked target such as
@@ -37,9 +43,11 @@ record extends the process's authority over files it did not create.
 
 | Threat | Control | Residual risk |
 |--------|---------|---------------|
-| Symlink redirection of audit writes and chmod | `O_NOFOLLOW` on every open (default) | A hard link to a writable regular file in the same directory tree is still followed; `allow_insecure_log_target` re-enables symlink redirection by operator choice |
-| Writes to non-regular targets (FIFOs, devices) | Regular-file check on the opened descriptor (default) | Accepted deliberately when `allow_insecure_log_target` is set |
-| Silent repair of permissive pre-existing logs | Permissions set only at creation | Operators must secure pre-existing log files themselves |
+| Symlink redirection of audit writes and chmod | `O_NOFOLLOW` on every open (default) | A hard link is still followed, and a hard link can target any writable regular file on the same filesystem, not only one in the same directory tree; a symlinked *parent* directory component is also still followed, so `O_NOFOLLOW` on the leaf does not prove the resolved path is the intended one. Closing either needs `openat2(RESOLVE_NO_SYMLINKS)` or a directory-anchored open. `allow_insecure_log_target` re-enables symlink redirection by operator choice |
+| Writes to non-regular targets (FIFOs, devices) | `O_NONBLOCK` on open, then a regular-file check on the descriptor (default) | Accepted deliberately when `allow_insecure_log_target` is set - note that in that mode a planted FIFO with no reader **will** block the caller |
+| Planted FIFO stalls the proxy (boot hang, or one parked tokio worker per response, since `process_response` opens without `spawn_blocking`) | `O_NONBLOCK` makes the open return `ENXIO` instead of blocking, so the regular-file check runs and rejects it | Only closed in the default mode; `allow_insecure_log_target` accepts the blocking open by design |
+| Silent repair of permissive pre-existing logs | Permissions set only at creation | Operators must secure pre-existing log files themselves. **Note this is weaker than the pre-ADR-0033 code**, which called `set_permissions(0600)` on every open and therefore hard-failed at startup on a target owned by another user; an attacker-owned, world-readable pre-existing regular file is now accepted silently |
+| Audit-write failure after startup | Failure is logged via `tracing::error!` | The flow still succeeds, so replacing the target with a symlink post-startup turns every subsequent write into `ELOOP` and authentication continues **unlogged** indefinitely. `O_NOFOLLOW` converts log *redirection* into silent total audit *loss*; operators should alert on the write-failure log line |
 
 ## Consequences
 
@@ -47,6 +55,8 @@ record extends the process's authority over files it did not create.
 
 - Audit records and permission changes can no longer be redirected through a
   symlink, and the process no longer chmods files it did not create.
+- A planted FIFO at the log target is rejected rather than hanging the proxy
+  at boot or parking a tokio worker per authentication response.
 
 **Negative / migration requirements**
 

@@ -32,6 +32,18 @@ so a spray of unknown ids fanned out to trust-anchor fetches unboundedly.
   rejected with `invalid_request` without consulting the trust anchors.
   Successful resolutions continue to be cached under the existing,
   trust-expiry-bounded RP cache.
+- The negative cache is keyed by unauthenticated, attacker-supplied input, so
+  it is explicitly bounded. Insertion goes through `put_if_absent`, which
+  carries `TtlCache`'s amortized sweep of expired entries, and a `client_id`
+  longer than 512 bytes is not stored at all (cf. `MAX_JTI_LEN` in `dpop`).
+  Leaving an existing live entry untouched also stops a repeat sprayer from
+  extending its own TTL.
+- `TtlCache::put`/`put_with_ttl` now run the same amortized sweep as
+  `put_if_absent`. Previously only `put_if_absent` pruned, so any cache
+  populated via `put` from request-derived keys retained one entry per key
+  ever seen: TTL expiry alone only hides a value from `get`, it never
+  reclaims the entry. This is fixed at the cache rather than per call site so
+  the footgun cannot recur.
 
 ## Security boundaries
 
@@ -39,6 +51,7 @@ so a spray of unknown ids fanned out to trust-anchor fetches unboundedly.
 |--------|---------|---------------|
 | Downgrade to plaintext via resolved metadata | https required for all resolved endpoints, loopback-only http exception | A TA vouching for a malicious but https OP remains a trust-anchor compromise |
 | Resolve fan-out from unknown `client_id` spray | 60-second negative cache per id | Each *distinct* unknown id still costs one resolution per window |
+| Unbounded memory growth from the negative cache itself (keys are attacker-supplied on an unauthenticated endpoint) | `put_if_absent` amortized sweep + 512-byte key cap; the sweep also added to `put`/`put_with_ttl` | Live (unexpired) entries are still bounded only by request rate times the 60-second window, and the prune watermark ratchets up and never down, so post-burst memory is retained until traffic doubles again. An over-long `client_id` is re-resolved rather than cached, trading a bounded 1:1 resolve cost for bounded memory |
 
 ## Consequences
 
@@ -48,6 +61,9 @@ so a spray of unknown ids fanned out to trust-anchor fetches unboundedly.
   credential-bearing fetches.
 - Repeated failing resolutions cost one trust-anchor round trip per minute
   instead of one per request.
+- The negative cache cannot be grown without bound by an unauthenticated
+  `client_id` spray, and every other `TtlCache` populated via `put` inherits
+  the same protection.
 
 **Negative / migration requirements**
 
