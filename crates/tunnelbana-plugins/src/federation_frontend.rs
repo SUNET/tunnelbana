@@ -638,7 +638,11 @@ impl Frontend for FederationFrontend {
     async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result<Response> {
         tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
         if let Some(req) = self.load_authz_request(ctx) {
-            let oerr = crate::oidc_common::backend_authorization_error(&req, error);
+            let oerr = crate::oidc_common::backend_authorization_error(
+                &req,
+                error,
+                ctx.interaction_required(),
+            );
             return Ok(oerr.to_redirect(&req.redirect_uri));
         }
         Ok(Response::text(500, "authentication could not be completed"))

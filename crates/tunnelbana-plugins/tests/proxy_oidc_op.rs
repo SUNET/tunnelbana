@@ -39,9 +39,10 @@ impl Backend for PromptProbeBackend {
         Vec::new()
     }
 
-    async fn start_auth(&self, _ctx: &mut Context, req: InternalData) -> Result<Response> {
+    async fn start_auth(&self, ctx: &mut Context, req: InternalData) -> Result<Response> {
         *self.seen.lock().unwrap() = Some((req.force_authn, req.is_passive));
         if req.is_passive {
+            ctx.mark_interaction_required();
             return Err(Error::Authn(
                 "passive request would require user interaction".into(),
             ));

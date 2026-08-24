@@ -14,13 +14,16 @@ pub(crate) fn apply_prompt_constraints(req: &AuthorizationRequest, request: &mut
 
 /// Render a backend failure as an OIDC authorization error.
 ///
-/// A passive request that reaches an authentication failure could not be
-/// completed without authentication UI, so OIDC Core §3.1.2.6 calls for
-/// `login_required`. Other authentication failures retain the existing
-/// `access_denied` behavior.
-pub(crate) fn backend_authorization_error(req: &AuthorizationRequest, error: &Error) -> OAuthError {
+/// A passive request whose backend specifically marks that UI is required is
+/// returned as `login_required`, as required by OIDC Core §3.1.2.6. Other
+/// authentication failures retain the existing `access_denied` behavior.
+pub(crate) fn backend_authorization_error(
+    req: &AuthorizationRequest,
+    error: &Error,
+    interaction_required: bool,
+) -> OAuthError {
     let (code, description) = match error {
-        Error::Authn(_) if req.has_prompt("none") => (
+        Error::Authn(_) if req.has_prompt("none") && interaction_required => (
             OAuthErrorCode::LoginRequired,
             "silent authentication could not be completed",
         ),
@@ -59,20 +62,17 @@ mod tests {
     }
 
     #[test]
-    fn passive_authentication_failure_is_login_required_with_state() {
+    fn only_marked_passive_authentication_failure_is_login_required() {
         let req = AuthorizationRequest {
             prompt: Some("none".into()),
             state: Some("state-1".into()),
             ..Default::default()
         };
-        let error = backend_authorization_error(&req, &Error::Authn("no session".into()));
+        let error = backend_authorization_error(&req, &Error::Authn("no session".into()), true);
         assert_eq!(error.code, OAuthErrorCode::LoginRequired);
         assert_eq!(error.state.as_deref(), Some("state-1"));
 
-        let ordinary = backend_authorization_error(
-            &AuthorizationRequest::default(),
-            &Error::Authn("denied".into()),
-        );
+        let ordinary = backend_authorization_error(&req, &Error::Authn("denied".into()), false);
         assert_eq!(ordinary.code, OAuthErrorCode::AccessDenied);
     }
 }

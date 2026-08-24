@@ -1866,6 +1866,7 @@ async fn saml_backend_passive_request_never_enters_idp_discovery() {
     request.is_passive = true;
 
     let error = sp.start_auth(&mut ctx, request).await.unwrap_err();
+    assert!(ctx.interaction_required());
     assert!(
         error
             .to_string()

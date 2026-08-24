@@ -216,7 +216,11 @@ impl Frontend for OidcFrontend {
         tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
         // If we have the in-flight request, redirect the error to the RP.
         if let Some(req) = self.load_authz_request(ctx) {
-            let oerr = crate::oidc_common::backend_authorization_error(&req, error);
+            let oerr = crate::oidc_common::backend_authorization_error(
+                &req,
+                error,
+                ctx.interaction_required(),
+            );
             return Ok(oerr.to_redirect(&req.redirect_uri));
         }
         Ok(Response::text(500, "authentication could not be completed"))

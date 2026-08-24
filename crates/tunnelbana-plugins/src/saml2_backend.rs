@@ -935,6 +935,7 @@ impl Backend for Saml2Backend {
                         if request.is_passive {
                             // Discovery needs user interaction; fail rather
                             // than silently drop IsPassive.
+                            ctx.mark_interaction_required();
                             return Err(Error::Authn(
                                 "IsPassive requested but IdP discovery requires user interaction"
                                     .into(),
