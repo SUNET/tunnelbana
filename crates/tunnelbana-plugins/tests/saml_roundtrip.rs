@@ -1850,6 +1850,31 @@ async fn saml_backend_forwards_authn_constraints_upstream() {
 }
 
 #[tokio::test]
+async fn saml_backend_passive_request_never_enters_idp_discovery() {
+    let config = serde_json::json!({
+        "sp_key_path": testdata("sp-key.pem"),
+        "disco_srv": "https://service.seamlessaccess.org/ds/",
+        "mdq": {
+            "url": "https://mdq.example.org/entities/",
+            "allow_unverified": true
+        }
+    });
+    let sp =
+        tunnelbana_plugins::saml2_backend::Saml2Backend::build(&build_ctx("SP", config)).unwrap();
+    let mut ctx = Context::new(HttpRequestData::default(), State::new());
+    let mut request = InternalData::request("rp-1");
+    request.is_passive = true;
+
+    let error = sp.start_auth(&mut ctx, request).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("discovery requires user interaction"),
+        "got {error}"
+    );
+}
+
+#[tokio::test]
 async fn saml_backend_omits_authn_constraints_by_default() {
     let sp = backend();
     let mut ctx = Context::new(HttpRequestData::default(), State::new());

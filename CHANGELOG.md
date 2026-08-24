@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 [2026-08-24]
+
+- **OIDC prompt handling:** update to grindvakt 0.7.1 and propagate
+  `prompt=login` / `prompt=none` from the OIDC and federation OP frontends
+  through the backend pipeline as forced/passive authentication. A passive
+  request that cannot be completed without user interaction returns
+  `login_required` to the validated redirect URI with the original state
+  instead of entering interactive IdP discovery, fixing #23.
+
 ## 0.3.0 [2026-08-20]
 
 - **Embedded Python micro-services:** add trusted, synchronous CPython 3.13

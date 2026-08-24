@@ -10,6 +10,7 @@ pub mod federation_frontend;
 pub mod keyload;
 pub mod microservices;
 pub mod oidc_backend;
+pub(crate) mod oidc_common;
 pub mod oidc_frontend;
 pub mod saml2_backend;
 pub mod saml2_frontend;
