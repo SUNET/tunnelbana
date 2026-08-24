@@ -26,10 +26,13 @@ behavior change the requester cannot detect.
   outgoing AuthnRequest. The flags ride the flow state so the
   discovery-service return leg forwards them too; when IdP discovery would
   require user interaction, an `IsPassive` request fails instead of
-  silently dropping the constraint.
+  silently dropping the constraint. On the ACS return leg, a stored passive
+  flow maps the SAML `NoPassive` status back to `login_required`.
 - The OIDC backend maps `force_authn` → `prompt=login` and `is_passive` →
-  `prompt=none`. Both set is contradictory (`prompt` cannot be `login` and
-  `none` at once) and is rejected with an error.
+  `prompt=none`, persists the passive flag across the upstream round trip,
+  and maps an upstream `login_required` back to the downstream passive-flow
+  error. Both set is contradictory (`prompt` cannot be `login` and `none` at
+  once) and is rejected with an error.
 - The federation backend has no channel for the constraint (signed request
   object + discovery round-trip); it returns an error rather than ignoring
   the flags.

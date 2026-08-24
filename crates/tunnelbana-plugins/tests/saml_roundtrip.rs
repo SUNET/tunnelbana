@@ -1876,6 +1876,48 @@ async fn saml_backend_passive_request_never_enters_idp_discovery() {
 }
 
 #[tokio::test]
+async fn saml_backend_no_passive_callback_restores_interaction_marker() {
+    use gamlastan::core::constants;
+    use gamlastan::core::protocol::status::Status;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let req_id = "_passive_callback";
+    let mut response = build_response(Some(req_id), 0, vec![]);
+    response.assertions.clear();
+    response.base.status = Status::with_sub_status(
+        constants::STATUS_RESPONDER,
+        constants::STATUS_NO_PASSIVE,
+        None,
+    );
+    let url = redirect_response_url(&response.to_xml_string().unwrap(), true);
+    let query: BTreeMap<String, String> =
+        form_urlencoded::parse(url.split_once('?').unwrap().1.as_bytes())
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+    let mut ctx = Context::new(
+        HttpRequestData {
+            path: "SP/acs".into(),
+            method: "GET".into(),
+            uri: url,
+            query,
+            ..Default::default()
+        },
+        State::new(),
+    );
+    ctx.state.set_str("SP", "authn_id", req_id);
+    ctx.state
+        .set_value("SP", "is_passive", serde_json::Value::Bool(true));
+
+    let error = backend()
+        .handle_endpoint(&mut ctx, "acs")
+        .await
+        .err()
+        .expect("NoPassive response must fail authentication");
+    assert!(error.to_string().contains("NoPassive"), "got {error}");
+    assert!(ctx.interaction_required());
+}
+
+#[tokio::test]
 async fn saml_backend_omits_authn_constraints_by_default() {
     let sp = backend();
     let mut ctx = Context::new(HttpRequestData::default(), State::new());
