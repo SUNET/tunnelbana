@@ -216,14 +216,11 @@ impl Frontend for OidcFrontend {
         tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
         // If we have the in-flight request, redirect the error to the RP.
         if let Some(req) = self.load_authz_request(ctx) {
-            let (code, description) = match error {
-                Error::Authn(_) => (OAuthErrorCode::AccessDenied, "authentication was denied"),
-                _ => (
-                    OAuthErrorCode::ServerError,
-                    "authentication could not be completed",
-                ),
-            };
-            let oerr = OAuthError::new(code, description).with_state(req.state.clone());
+            let oerr = crate::oidc_common::backend_authorization_error(
+                &req,
+                error,
+                ctx.interaction_required(),
+            );
             return Ok(oerr.to_redirect(&req.redirect_uri));
         }
         Ok(Response::text(500, "authentication could not be completed"))
@@ -251,6 +248,7 @@ impl OidcFrontend {
         if let Some(name) = client.client_name {
             request.requester_name = vec![name];
         }
+        crate::oidc_common::apply_prompt_constraints(&req, &mut request);
         Ok(FrontendAction::StartAuth {
             request,
             target_backend: self.backend.clone(),

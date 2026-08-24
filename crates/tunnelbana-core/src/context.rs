@@ -22,6 +22,9 @@ pub const KEY_TARGET_ENTITYID: &str = "target_entity_id";
 /// rendering a protocol error, set by micro-services (e.g.
 /// `primary_identifier`'s `on_error`).
 pub const KEY_ERROR_REDIRECT: &str = "error_redirect";
+/// Decoration key marking a failure that specifically requires user
+/// interaction and therefore cannot complete a passive authentication flow.
+const KEY_INTERACTION_REQUIRED: &str = "interaction_required";
 /// Decoration key carrying the SP's requested AuthnContextClassRef URIs
 /// (a JSON array of strings), published by the SAML frontend on the request
 /// path for the `accr` micro-service (SATOSA: `KEY_AUTHN_CONTEXT_CLASS_REF`).
@@ -77,6 +80,18 @@ impl Context {
     /// Fetch a decoration.
     pub fn decoration(&self, key: &str) -> Option<&Value> {
         self.decorations.get(key)
+    }
+
+    /// Mark the current authentication failure as requiring user interaction.
+    pub fn mark_interaction_required(&mut self) {
+        self.decorate(KEY_INTERACTION_REQUIRED, Value::Bool(true));
+    }
+
+    /// Whether the current authentication failure specifically requires UI.
+    pub fn interaction_required(&self) -> bool {
+        self.decoration(KEY_INTERACTION_REQUIRED)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 
     /// Record the requester in the base state namespace.

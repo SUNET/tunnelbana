@@ -193,6 +193,11 @@ impl Backend for OidcBackend {
         ctx.state.set_str(&self.name, "oidc_state", &state);
         ctx.state.set_str(&self.name, "oidc_nonce", &nonce);
         ctx.state.set_str(&self.name, "code_verifier", &verifier);
+        ctx.state.set_value(
+            &self.name,
+            "is_passive",
+            serde_json::Value::Bool(request.is_passive),
+        );
 
         let extra: &[(&str, &str)] = match prompt {
             Some(p) => &[("prompt", p)],
@@ -227,7 +232,15 @@ impl Backend for OidcBackend {
             return Err(Error::Authn("state mismatch".into()));
         }
 
-        if let Some(err) = ctx.request.param("error") {
+        if let Some(err) = ctx.request.param("error").map(str::to_string) {
+            let is_passive = ctx
+                .state
+                .get_value(&self.name, "is_passive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if is_passive && err == "login_required" {
+                ctx.mark_interaction_required();
+            }
             return Err(Error::Authn(format!("upstream error: {err}")));
         }
         let code = ctx
@@ -428,6 +441,31 @@ mod prompt_tests {
         let sp = backend();
         let mut ctx = Context::new(HttpRequestData::default(), State::new());
         assert!(sp.start_auth(&mut ctx, request).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn passive_login_required_callback_restores_interaction_marker() {
+        let sp = backend();
+        let mut request = InternalData::request("https://sp.example");
+        request.is_passive = true;
+        let mut start_ctx = Context::new(HttpRequestData::default(), State::new());
+        sp.start_auth(&mut start_ctx, request).await.unwrap();
+        let state = start_ctx
+            .state
+            .get_str("oidc", "oidc_state")
+            .expect("stored OIDC state");
+
+        let mut callback_request = HttpRequestData::default();
+        callback_request.query.insert("state".into(), state);
+        callback_request
+            .query
+            .insert("error".into(), "login_required".into());
+        let mut callback_ctx = Context::new(callback_request, start_ctx.state);
+        assert!(sp
+            .handle_endpoint(&mut callback_ctx, "callback")
+            .await
+            .is_err());
+        assert!(callback_ctx.interaction_required());
     }
 }
 

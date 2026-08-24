@@ -1565,9 +1565,9 @@ dependencies = [
 
 [[package]]
 name = "grindvakt"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8464776186b7a299e1ee037a29d58d2ea39de684afd442a5e768c20757136928"
+checksum = "b9f7f1454a583ba9f8da12caa1eebf6d293e77e20f9759e074faf8f4f94a7e29"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3905,7 +3905,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3925,7 +3925,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "grindvakt",
@@ -3943,14 +3943,14 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana-oidc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "grindvakt",
 ]
 
 [[package]]
 name = "tunnelbana-plugins"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "pyo3",

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
-use tunnelbana_core::error::Result;
+use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{
@@ -21,6 +21,38 @@ use tunnelbana_oidc::pkce;
 /// A backend that immediately "logs in" a fixed user.
 struct MockBackend {
     name: String,
+}
+
+/// Records prompt-derived constraints and fails passive requests as a backend
+/// that would otherwise need interactive discovery or authentication would.
+struct PromptProbeBackend {
+    seen: Arc<Mutex<Option<(bool, bool)>>>,
+}
+
+#[async_trait]
+impl Backend for PromptProbeBackend {
+    fn name(&self) -> &str {
+        "PromptProbe"
+    }
+
+    fn register_endpoints(&self) -> Vec<Route> {
+        Vec::new()
+    }
+
+    async fn start_auth(&self, ctx: &mut Context, req: InternalData) -> Result<Response> {
+        *self.seen.lock().unwrap() = Some((req.force_authn, req.is_passive));
+        if req.is_passive {
+            ctx.mark_interaction_required();
+            return Err(Error::Authn(
+                "passive request would require user interaction".into(),
+            ));
+        }
+        Ok(Response::redirect("https://idp.example.com/login"))
+    }
+
+    async fn handle_endpoint(&self, _ctx: &mut Context, _route_id: &str) -> Result<BackendAction> {
+        unreachable!("the prompt probe has no callback endpoint")
+    }
 }
 
 #[async_trait]
@@ -200,6 +232,40 @@ fn set_cookie(resp: &Response) -> String {
 fn query_param(url: &str, key: &str) -> Option<String> {
     let (_, q) = url.split_once(['?', '#'])?;
     form_parse(q).get(key).cloned()
+}
+
+/// Regression for SUNET/tunnelbana#23: `prompt=none` must reach the backend
+/// as a passive request and an authentication failure must return to the RP,
+/// not send the browser into interactive discovery.
+#[tokio::test]
+async fn prompt_none_returns_login_required_without_interactive_redirect() {
+    let seen = Arc::new(Mutex::new(None));
+    let frontend = build_frontend(attribute_mapper());
+    let backend: Box<dyn Backend> = Box::new(PromptProbeBackend { seen: seen.clone() });
+    let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
+    let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
+
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let challenge = pkce::s256_challenge(verifier);
+    let authz_url = format!(
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=silent-state&nonce=no-1&code_challenge={}&code_challenge_method=S256&prompt=none",
+        urlenc("https://rp.example.com/cb"),
+        challenge
+    );
+    let response = proxy.run(req(&authz_url, "GET", None)).await;
+
+    assert_eq!(response.status, 302);
+    assert_eq!(*seen.lock().unwrap(), Some((false, true)));
+    let redirect = location(&response);
+    assert!(redirect.starts_with("https://rp.example.com/cb?"));
+    assert_eq!(
+        query_param(&redirect, "error").as_deref(),
+        Some("login_required")
+    );
+    assert_eq!(
+        query_param(&redirect, "state").as_deref(),
+        Some("silent-state")
+    );
 }
 
 #[tokio::test]

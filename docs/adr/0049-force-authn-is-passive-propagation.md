@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-05
 - **Component:** `tunnelbana-core` (`InternalData`), `tunnelbana-plugins`
-  SAML2 frontend, SAML2 backend, OIDC backend, federation backend.
+  SAML2/OIDC frontends and SAML2/OIDC/federation backends.
 
 ## Context
 
@@ -18,14 +18,21 @@ behavior change the requester cannot detect.
 - `InternalData` carries `force_authn` / `is_passive` booleans (request
   path only; both default to `false`).
 - The SAML2 frontend populates them from the validated AuthnRequest.
+- The OIDC and federation frontends map `prompt=login` to `force_authn` and
+  `prompt=none` to `is_passive`. If passive authentication fails because UI
+  would be required, the frontend returns `login_required` with the original
+  state to the RP rather than starting an interactive flow.
 - The SAML2 backend forwards them as `ForceAuthn`/`IsPassive` on the
   outgoing AuthnRequest. The flags ride the flow state so the
   discovery-service return leg forwards them too; when IdP discovery would
   require user interaction, an `IsPassive` request fails instead of
-  silently dropping the constraint.
+  silently dropping the constraint. On the ACS return leg, a stored passive
+  flow maps the SAML `NoPassive` status back to `login_required`.
 - The OIDC backend maps `force_authn` → `prompt=login` and `is_passive` →
-  `prompt=none`. Both set is contradictory (`prompt` cannot be `login` and
-  `none` at once) and is rejected with an error.
+  `prompt=none`, persists the passive flag across the upstream round trip,
+  and maps an upstream `login_required` back to the downstream passive-flow
+  error. Both set is contradictory (`prompt` cannot be `login` and `none` at
+  once) and is rejected with an error.
 - The federation backend has no channel for the constraint (signed request
   object + discovery round-trip); it returns an error rather than ignoring
   the flags.
@@ -54,6 +61,9 @@ silently drop it.
 ## References
 
 - `crates/tunnelbana-core/src/internal.rs`
+- `crates/tunnelbana-plugins/src/oidc_common.rs`
+- `crates/tunnelbana-plugins/src/oidc_frontend.rs`
+- `crates/tunnelbana-plugins/src/federation_frontend.rs`
 - `crates/tunnelbana-plugins/src/saml2_frontend.rs` (`handle_sso`)
 - `crates/tunnelbana-plugins/src/saml2_backend.rs` (`start_auth`,
   `build_authn_redirect`)

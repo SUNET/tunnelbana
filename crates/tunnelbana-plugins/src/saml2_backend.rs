@@ -654,16 +654,38 @@ impl Saml2Backend {
             response.assertions.push(assertion);
         }
 
-        // 3) Status check. A non-success status (e.g. the user cancelled or the
-        //    login failed at the IdP) is surfaced as an authn error so the
-        //    frontend can return `access_denied` to the RP rather than looping.
+        // 3) Status check. Ordinary failures are surfaced as authentication
+        //    errors so the frontend returns `access_denied`. `NoPassive` on a
+        //    stored passive flow is marked separately and becomes
+        //    `login_required` instead.
         if !response.base.status.is_success() {
+            let status_code = &response.base.status.status_code;
+            let is_no_passive = status_code.value == constants::STATUS_NO_PASSIVE
+                || status_code
+                    .sub_status
+                    .as_deref()
+                    .is_some_and(|sub| sub.value == constants::STATUS_NO_PASSIVE);
+            let is_passive = ctx
+                .state
+                .get_value(&self.name, "is_passive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if is_passive && is_no_passive {
+                ctx.mark_interaction_required();
+            }
             let msg = response
                 .base
                 .status
                 .status_message
                 .clone()
-                .unwrap_or_else(|| response.base.status.status_code.value.clone());
+                .unwrap_or_else(|| {
+                    status_code
+                        .sub_status
+                        .as_deref()
+                        .unwrap_or(status_code)
+                        .value
+                        .clone()
+                });
             return Err(Error::Authn(format!(
                 "IdP returned a non-success SAML status: {msg}"
             )));
@@ -935,6 +957,7 @@ impl Backend for Saml2Backend {
                         if request.is_passive {
                             // Discovery needs user interaction; fail rather
                             // than silently drop IsPassive.
+                            ctx.mark_interaction_required();
                             return Err(Error::Authn(
                                 "IsPassive requested but IdP discovery requires user interaction"
                                     .into(),
