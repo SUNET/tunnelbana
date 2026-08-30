@@ -1,5 +1,6 @@
 //! OIDC frontend — the proxy acts as an OpenID Provider (OP) to downstream RPs.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -203,9 +204,27 @@ impl Frontend for OidcFrontend {
 
         let acr = response.auth_info.auth_class_ref.clone();
 
+        // Assert which upstream authority authenticated the user, taken from the
+        // validated assertion's issuer (`auth_info.issuer`) — never from anything
+        // the RP or end user supplied. Emitted as `authenticating_authority`,
+        // modeled on SAML's `<AuthenticatingAuthority>` and array-valued so a
+        // proxy chain longer than one hop does not force a later breaking widen
+        // from string to array. When the issuer is unknown the claim is omitted
+        // entirely rather than filled with a placeholder or a configured default.
+        // Passed as an OP-asserted extra claim (not through the attribute map), so
+        // a tenant's claim-mapping profile can rename or drop it but cannot set
+        // its value, and it keeps its array shape even for a single authority.
+        let mut extra_claims: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        if let Some(issuer) = &response.auth_info.issuer {
+            extra_claims.insert(
+                "authenticating_authority".into(),
+                serde_json::Value::Array(vec![serde_json::Value::String(issuer.clone())]),
+            );
+        }
+
         match self
             .provider
-            .authorization_redirect(&req, &sub, &external, acr)
+            .authorization_redirect_with_claims(&req, &sub, &external, acr, &extra_claims)
         {
             Ok(r) => Ok(r),
             Err(e) => Ok(e.to_redirect(&req.redirect_uri)),

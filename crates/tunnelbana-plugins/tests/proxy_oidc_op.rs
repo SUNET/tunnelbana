@@ -350,6 +350,13 @@ async fn oidc_op_full_flow_through_proxy() {
         claims.extra.get("email_verified"),
         Some(&serde_json::Value::Bool(true))
     );
+    // The OP names the upstream authority that authenticated the user, taken
+    // from the backend's `auth_info.issuer`, as an array-valued
+    // `authenticating_authority` claim.
+    assert_eq!(
+        claims.extra.get("authenticating_authority"),
+        Some(&serde_json::json!(["https://idp.mock"]))
+    );
 
     // 5) UserInfo with the access token.
     let mut ui_req = req("OIDC/userinfo", "GET", None);
@@ -436,6 +443,23 @@ async fn oidc_op_refresh_token_flow_through_proxy() {
         .expect("rotated refresh");
     assert_ne!(rotated, refresh, "refresh token should rotate");
     assert!(refreshed["id_token"].is_string(), "id_token on refresh");
+    // The authenticating authority is fixed at authentication time and carried
+    // through the refresh exchange unchanged, not recomputed.
+    let jwks_resp = proxy.run(req("OIDC/jwks", "GET", None)).await;
+    let jwks: jose_rs::jwk::JwkSet = serde_json::from_slice(&jwks_resp.body).unwrap();
+    let validation = jose_rs::jwt::Validation::new()
+        .with_issuer("https://proxy.example.com/OIDC")
+        .with_audience("rp-1");
+    let refreshed_claims = jose_rs::jwt::decode_with_jwkset(
+        &jwks,
+        refreshed["id_token"].as_str().unwrap(),
+        &validation,
+    )
+    .unwrap();
+    assert_eq!(
+        refreshed_claims.extra.get("authenticating_authority"),
+        Some(&serde_json::json!(["https://idp.mock"]))
+    );
 
     // The new access token works at userinfo.
     let mut ui_req = req("OIDC/userinfo", "GET", None);
