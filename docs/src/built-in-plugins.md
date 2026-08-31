@@ -1141,12 +1141,16 @@ type = "disco_to_target_issuer"
 name = "disco"
   [microservice.config]
   disco_endpoints = ["Saml2/disco"]
-  # Exactly one of the two keys below is required. Unmatched discovery
-  # issuers fail closed: either enumerate the selectable issuers...
-  allowed_issuers = [
+  # Exactly one of allowed_issuers / allow_any_issuer is required. Unmatched
+  # discovery issuers fail closed: either enumerate the selectable issuers
+  # per requester (exact requester id, else "" , else "default" - the usual
+  # rule-set levels; a requester with no applicable set is rejected)...
+  [microservice.config.allowed_issuers]
+  "https://sp.example.com" = [
     "https://spid-idp.example.org",
     "https://cie-idp.example.org",
   ]
+  # "" = [...]   # optional fallback set for requesters not listed above
   # ...or explicitly accept any well-formed entityID (SATOSA behavior) when
   # every reachable backend verifies the entity against signed federation
   # metadata, which then acts as the allowlist (e.g. eduGAIN-scale MDQ):

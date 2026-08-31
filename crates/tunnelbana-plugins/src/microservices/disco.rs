@@ -1,12 +1,16 @@
 //! `disco_to_target_issuer` - suspend a flow for external IdP discovery and
 //! resume it with the chosen issuer (SATOSA: `DiscoToTargetIssuer`).
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use tunnelbana_core::context::{Context, KEY_TARGET_ENTITYID};
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_core::plugin::{BuildContext, MicroService, MicroServiceAction, Route};
+
+use super::level;
 
 /// Key within this service's state namespace holding the suspended flow.
 const KEY_SNAPSHOT: &str = "snapshot";
@@ -34,15 +38,20 @@ struct DiscoToTargetIssuerConfig {
     /// divergence - the discovery service is configured with a fixed return
     /// URL, and exact routes cannot fail to compile.
     disco_endpoints: Vec<String>,
-    /// Allowlist of issuer entity ids the discovery return may select. A
-    /// returned `entityID` outside the list is rejected before the pipeline
-    /// resumes, so an unlisted issuer can never ride the target-entity
-    /// decoration through fallback routing into a backend's metadata
-    /// resolution. Exactly one of `allowed_issuers` and `allow_any_issuer`
-    /// must be configured: unmatched issuers fail closed unless the operator
-    /// explicitly opts out.
+    /// Allowlist of issuer entity ids the discovery return may select,
+    /// keyed by requester (the usual exact → `""` → `"default"` levels). The
+    /// resumed flow's requester picks its issuer set; a returned `entityID`
+    /// outside that set - or a requester with no applicable set - is
+    /// rejected before the pipeline resumes. The scoping is per
+    /// `(issuer, requester)` pair on purpose: the target-entity decoration
+    /// stays set through `custom_routing`'s requester/default fallback, so a
+    /// merely global list would let any requester reach any listed issuer
+    /// via the fallback backend's metadata resolution even when no issuer
+    /// rule authorizes the pair. Exactly one of `allowed_issuers` and
+    /// `allow_any_issuer` must be configured: unmatched issuers fail closed
+    /// unless the operator explicitly opts out.
     #[serde(default)]
-    allowed_issuers: Option<Vec<String>>,
+    allowed_issuers: Option<BTreeMap<String, Vec<String>>>,
     /// Explicitly accept any well-formed returned entityID (SATOSA's
     /// behavior). Only sound when every backend a discovery return can reach
     /// verifies the selected entity against signed federation metadata
@@ -61,7 +70,7 @@ struct DiscoToTargetIssuerConfig {
 pub struct DiscoToTargetIssuer {
     name: String,
     disco_endpoints: Vec<String>,
-    allowed_issuers: Option<Vec<String>>,
+    allowed_issuers: Option<BTreeMap<String, Vec<String>>>,
 }
 
 impl DiscoToTargetIssuer {
@@ -98,25 +107,34 @@ impl DiscoToTargetIssuer {
                     bx.name
                 )));
             }
-            (Some(issuers), false) => {
-                if issuers.is_empty() {
+            (Some(map), false) => {
+                if map.is_empty() {
                     return Err(Error::Config(format!(
                         "disco_to_target_issuer {}: allowed_issuers must not \
                          be empty",
                         bx.name
                     )));
                 }
-                if issuers.iter().any(|i| {
-                    i.is_empty()
-                        || i.len() > MAX_ENTITY_ID_LEN
-                        || i.chars().any(|c| c.is_ascii_control())
-                }) {
-                    return Err(Error::Config(format!(
-                        "disco_to_target_issuer {}: allowed_issuers entries \
-                         must be non-empty entity ids without control \
-                         characters",
-                        bx.name
-                    )));
+                for (requester, issuers) in map {
+                    if issuers.is_empty() {
+                        return Err(Error::Config(format!(
+                            "disco_to_target_issuer {}: allowed_issuers for \
+                             requester {requester:?} must not be empty",
+                            bx.name
+                        )));
+                    }
+                    if issuers.iter().any(|i| {
+                        i.is_empty()
+                            || i.len() > MAX_ENTITY_ID_LEN
+                            || i.chars().any(|c| c.is_ascii_control())
+                    }) {
+                        return Err(Error::Config(format!(
+                            "disco_to_target_issuer {}: allowed_issuers \
+                             entries for requester {requester:?} must be \
+                             non-empty entity ids without control characters",
+                            bx.name
+                        )));
+                    }
                 }
             }
             (None, true) => {}
@@ -181,37 +199,54 @@ impl MicroService for DiscoToTargetIssuer {
             // discovery again after a malformed return.
             .ok_or_else(|| Error::Authn("no valid entityID in the discovery response".into()))?;
 
-        if let Some(allowed) = &self.allowed_issuers {
-            if !allowed.iter().any(|a| a == &issuer) {
-                // Also before consuming the snapshot: the user can go back to
-                // the discovery page and pick a permitted issuer.
-                return Err(Error::Authn(
-                    "discovery response issuer is not in allowed_issuers".into(),
-                ));
-            }
-        }
-
         let snapshot = ctx
             .state
             .get_value(&self.name, KEY_SNAPSHOT)
             .cloned()
             .ok_or_else(|| Error::Authn("no discovery flow in progress".into()))?;
-        // Consume-once: the resealed cookie on this response (success or
-        // error) no longer carries the snapshot, so a replayed discovery
-        // return fails at the lookup above.
-        ctx.state.clear_namespace(&self.name);
 
         let target_frontend = snapshot
             .get("target_frontend")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let request: InternalData = snapshot
+        let request: InternalData = match snapshot
             .get("internal_data")
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|e| Error::State(format!("invalid discovery snapshot: {e}")))?
-            .ok_or_else(|| Error::State("invalid discovery snapshot".into()))?;
+            .map_err(|e| Error::State(format!("invalid discovery snapshot: {e}")))
+            .and_then(|d| d.ok_or_else(|| Error::State("invalid discovery snapshot".into())))
+        {
+            Ok(request) => request,
+            Err(e) => {
+                // A corrupt snapshot can never resume; drop it so the user
+                // restarts cleanly instead of replaying the same error.
+                ctx.state.clear_namespace(&self.name);
+                return Err(e);
+            }
+        };
+
+        if let Some(allowed) = &self.allowed_issuers {
+            // The allowlist authorizes `(issuer, requester)` pairs: the
+            // resumed flow's requester selects its issuer set. A global
+            // check would let a requester without an issuer rule keep the
+            // target-issuer decoration through `custom_routing`'s
+            // requester/default fallback and authenticate at any globally
+            // listed issuer via the fallback backend's metadata resolution.
+            // Checked before consuming the snapshot, so the user can go back
+            // to the discovery page and pick a permitted issuer.
+            let issuers = request.requester.as_deref().and_then(|r| level(allowed, r));
+            if !issuers.is_some_and(|list| list.iter().any(|a| a == &issuer)) {
+                return Err(Error::Authn(
+                    "discovery response issuer is not in allowed_issuers for this requester".into(),
+                ));
+            }
+        }
+
+        // Consume-once: the resealed cookie on this response no longer
+        // carries the snapshot, so a replayed discovery return fails at the
+        // lookup above.
+        ctx.state.clear_namespace(&self.name);
 
         ctx.target_frontend = target_frontend;
         ctx.decorate(KEY_TARGET_ENTITYID, serde_json::Value::String(issuer));
@@ -374,7 +409,7 @@ mod tests {
             "disco",
             serde_json::json!({
                 "disco_endpoints": ["Saml2/disco"],
-                "allowed_issuers": ["https://idp.example"],
+                "allowed_issuers": { "sp-a": ["https://idp.example"] },
                 "allow_any_issuer": true,
             }),
         ))
@@ -384,10 +419,11 @@ mod tests {
     #[test]
     fn build_validates_allowed_issuers() {
         for issuers in [
-            serde_json::json!([]),
-            serde_json::json!([""]),
-            serde_json::json!(["https://idp.example/\u{7}"]),
-            serde_json::json!(["a".repeat(MAX_ENTITY_ID_LEN + 1)]),
+            serde_json::json!({}),
+            serde_json::json!({ "sp-a": [] }),
+            serde_json::json!({ "sp-a": [""] }),
+            serde_json::json!({ "sp-a": ["https://idp.example/\u{7}"] }),
+            serde_json::json!({ "sp-a": ["a".repeat(MAX_ENTITY_ID_LEN + 1)] }),
         ] {
             assert!(
                 DiscoToTargetIssuer::build(&bx(
@@ -409,7 +445,9 @@ mod tests {
             "disco",
             serde_json::json!({
                 "disco_endpoints": ["Saml2/disco"],
-                "allowed_issuers": ["https://spid-idp.example", "https://cie-idp.example"],
+                "allowed_issuers": {
+                    "sp-a": ["https://spid-idp.example", "https://cie-idp.example"],
+                },
             }),
         ))
         .unwrap();
@@ -445,6 +483,93 @@ mod tests {
             ok.decoration(KEY_TARGET_ENTITYID).and_then(|v| v.as_str()),
             Some("https://cie-idp.example")
         );
+    }
+
+    #[tokio::test]
+    async fn allowed_issuers_is_requester_scoped() {
+        // sp-b's flows may only pick cie; an issuer allowed for sp-a is not
+        // globally allowed, and a requester with no rule set at all fails
+        // closed - otherwise the decoration would survive into fallback
+        // routing and the default backend could resolve the issuer anyway.
+        let svc = DiscoToTargetIssuer::build(&bx(
+            "disco",
+            serde_json::json!({
+                "disco_endpoints": ["Saml2/disco"],
+                "allowed_issuers": {
+                    "sp-a": ["https://spid-idp.example"],
+                    "sp-b": ["https://cie-idp.example"],
+                },
+            }),
+        ))
+        .unwrap();
+
+        for (requester, issuer, accepted) in [
+            ("sp-a", "https://spid-idp.example", true),
+            ("sp-b", "https://spid-idp.example", false),
+            ("sp-b", "https://cie-idp.example", true),
+            // No rule set for this requester: every issuer is rejected.
+            ("sp-c", "https://spid-idp.example", false),
+        ] {
+            let mut c = ctx();
+            let _ = svc
+                .process_request(&mut c, InternalData::request(requester))
+                .await
+                .unwrap();
+            let mut ret = ctx();
+            ret.state = c.state;
+            ret.request.query.insert("entityID".into(), issuer.into());
+            let result = svc.handle_endpoint(&mut ret, "Saml2/disco").await;
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "requester {requester} picking {issuer}"
+            );
+            if !accepted {
+                assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_some());
+                assert!(ret.decoration(KEY_TARGET_ENTITYID).is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_issuers_empty_key_is_the_default_rule_set() {
+        // SATOSA get_dict_defaults semantics: exact requester, else "",
+        // else "default".
+        let svc = DiscoToTargetIssuer::build(&bx(
+            "disco",
+            serde_json::json!({
+                "disco_endpoints": ["Saml2/disco"],
+                "allowed_issuers": {
+                    "": ["https://cie-idp.example"],
+                    "sp-a": ["https://spid-idp.example"],
+                },
+            }),
+        ))
+        .unwrap();
+
+        for (requester, issuer, accepted) in [
+            // Unlisted requesters get the "" rule set.
+            ("sp-other", "https://cie-idp.example", true),
+            ("sp-other", "https://spid-idp.example", false),
+            // The exact rule set is selected, not merged with the default.
+            ("sp-a", "https://spid-idp.example", true),
+            ("sp-a", "https://cie-idp.example", false),
+        ] {
+            let mut c = ctx();
+            let _ = svc
+                .process_request(&mut c, InternalData::request(requester))
+                .await
+                .unwrap();
+            let mut ret = ctx();
+            ret.state = c.state;
+            ret.request.query.insert("entityID".into(), issuer.into());
+            let result = svc.handle_endpoint(&mut ret, "Saml2/disco").await;
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "requester {requester} picking {issuer}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -21,9 +21,13 @@
   backends (the iam-proxy-italia SPID-vs-CIE shape). The snapshot is
   consume-once: replayed or forged discovery returns fail cleanly, and
   unmatched issuers fail closed - the config requires either an
-  `allowed_issuers` allowlist (checked before the resume) or an explicit
-  `allow_any_issuer = true`. A 2 KB snapshot cap fails oversized flows with
-  a protocol error before the discovery redirect (review findings on #26).
+  `allowed_issuers` allowlist (**requester-scoped**: a map from requester to
+  its issuer set with the usual exact/`""`/`"default"` levels, checked
+  against the resumed flow's requester before the resume, so a requester
+  without an issuer rule cannot reach a globally listed issuer through
+  fallback routing) or an explicit `allow_any_issuer = true`. A 2 KB
+  snapshot cap fails oversized flows with a protocol error before the
+  discovery redirect (review findings on #26).
 - **Seal failures now fail the request:** a response whose state cookie
   cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
   error with a state-clearing cookie, instead of being sent without a

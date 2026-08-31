@@ -56,7 +56,7 @@ paths, the decoration signals services exchange, a worked "writing your own"
 example, and how to scope a service to specific SPs/IdPs - see the
 [Micro-services](micro-services.md) chapter.
 
-The two return enums drive the proxy:
+The three return enums drive the proxy:
 
 ```rust
 pub enum FrontendAction {
@@ -67,7 +67,21 @@ pub enum BackendAction {
     Respond(Response),          // a finished HTTP response (e.g. SP metadata)
     AuthResponse(InternalData), // forward back to the originating frontend
 }
+pub enum MicroServiceAction {
+    Respond(Response),                       // a finished HTTP response (e.g. a consent page)
+    ResumeRequest { request: InternalData }, // resume the request-path pipeline
+}
 ```
+
+A micro-service only needs `handle_endpoint` (and therefore
+`MicroServiceAction`) when it registers its own routes - the default
+implementation returns an error. Most endpoints wrap their result in
+`MicroServiceAction::Respond`. `ResumeRequest` is for suspend/resume services
+(e.g. `disco_to_target_issuer`, ADR 0053): the proxy re-enters the
+request-path pipeline with the restored `InternalData`, running only the
+micro-services listed *after* the resuming one, then dispatches to a backend
+as usual. The resuming service must restore `ctx.target_frontend` (and set any
+routing decorations such as `KEY_TARGET_ENTITYID`) before returning it.
 
 ## Supporting types
 

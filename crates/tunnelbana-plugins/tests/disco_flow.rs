@@ -144,6 +144,11 @@ fn oidc_frontend() -> Box<dyn Frontend> {
             "redirect_uris": ["https://rp.example.com/cb"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none"
+        }, {
+            "client_id": "rp-2",
+            "redirect_uris": ["https://rp.example.com/cb"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none"
         }]
     });
     tunnelbana_plugins::oidc_frontend::OidcFrontend::build(&build_ctx("OIDC", config)).unwrap()
@@ -154,7 +159,9 @@ fn microservices() -> Vec<Box<dyn MicroService>> {
         "disco",
         serde_json::json!({
             "disco_endpoints": ["Saml2/disco"],
-            "allowed_issuers": [SPID_IDP, CIE_IDP],
+            // Requester-scoped: rp-1 may pick these issuers; a requester with
+            // no rule set fails closed at the disco return.
+            "allowed_issuers": { "rp-1": [SPID_IDP, CIE_IDP] },
         }),
     ))
     .unwrap();
@@ -326,10 +333,14 @@ fn signed_idp_response(req_id: &str, idp_entity: &str, sp_entity: &str, acs_url:
 }
 
 fn authz_url() -> String {
+    authz_url_for("rp-1")
+}
+
+fn authz_url_for(client_id: &str) -> String {
     let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
     let challenge = pkce::s256_challenge(verifier);
     format!(
-        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        "OIDC/authorization?client_id={client_id}&response_type=code&redirect_uri={}&scope=openid&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
         urlenc("https://rp.example.com/cb"),
         challenge
     )
@@ -459,4 +470,26 @@ async fn unlisted_issuer_fails_closed_at_the_disco_return() {
     let r3 = proxy.run(req(&retry, "GET", Some(&cookie2))).await;
     assert_eq!(r3.status, 302, "{}", String::from_utf8_lossy(&r3.body));
     assert!(location(&r3).starts_with(SPID_SSO_URL));
+}
+
+#[tokio::test]
+async fn issuer_allowed_for_another_requester_fails_closed() {
+    let proxy = proxy().await;
+
+    // rp-2 has no allowed_issuers rule set. An issuer that rp-1 may pick
+    // must not resume rp-2's flow: without the requester scoping the
+    // target-issuer decoration would survive into requester/default fallback
+    // routing and the default backend's MDQ metadata resolution.
+    let r1 = proxy.run(req(&authz_url_for("rp-2"), "GET", None)).await;
+    assert_eq!(r1.status, 302, "{}", String::from_utf8_lossy(&r1.body));
+    let cookie1 = set_cookie(&r1).expect("state cookie on disco redirect");
+
+    let disco_return = format!("Saml2/disco?entityID={}", urlenc(SPID_IDP));
+    let r2 = proxy.run(req(&disco_return, "GET", Some(&cookie1))).await;
+    if let Some(loc) = maybe_location(&r2) {
+        assert!(
+            !loc.starts_with(SPID_SSO_URL) && !loc.starts_with(CIE_SSO_URL),
+            "another requester's issuer reached a configured IdP: {loc}"
+        );
+    }
 }

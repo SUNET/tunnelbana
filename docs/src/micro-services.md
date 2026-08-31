@@ -750,15 +750,22 @@ their output must reach the backend on the resumed pass.
 The snapshot is consume-once: a replayed discovery return (same URL, post-
 resume cookie) and a forged return with no flow open both fail cleanly. The
 returned `entityID` is untrusted routing input, and unmatched issuers **fail
-closed**: exactly one of `allowed_issuers` (an enumerated allowlist - a
-return outside it is rejected before the pipeline resumes, and the snapshot
-survives so the user can pick again) or `allow_any_issuer = true` must be
-configured. The explicit opt-out is for deployments where enumerating
-issuers is impossible (an MDQ federation with thousands of IdPs) and every
-reachable backend verifies the selected entity against signed metadata,
-which then acts as the allowlist. Backend selection is additionally bounded
-by `custom_routing`'s `(issuer, requester)` rules. See the
-security-boundaries table in ADR 0053.
+closed**: exactly one of `allowed_issuers` or `allow_any_issuer = true` must
+be configured. `allowed_issuers` is an allowlist of issuers **per requester**
+(the standard rule-set levels: exact requester id, else `""`, else
+`"default"`); the resumed flow's requester selects its issuer set, and a
+return outside it - or a requester with no applicable set - is rejected
+before the pipeline resumes, with the snapshot kept so the user can pick
+again. The requester scoping matters because the target-entity decoration
+survives `custom_routing`'s requester/default *fallback*: a merely global
+list would let a requester without any issuer rule authenticate at any
+listed issuer through the fallback backend's (e.g. MDQ) metadata
+resolution. The explicit `allow_any_issuer` opt-out is for deployments where
+enumerating issuers is impossible (an MDQ federation with thousands of IdPs)
+and every reachable backend verifies the selected entity against signed
+metadata, which then acts as the allowlist. Backend selection is
+additionally bounded by `custom_routing`'s `(issuer, requester)` rules. See
+the security-boundaries table in ADR 0053.
 
 The service enforces a 2 KB cap on the serialized snapshot at
 `process_request` time and fails the flow with a normal protocol error when
@@ -772,8 +779,10 @@ type = "disco_to_target_issuer"
 name = "disco"
   [microservice.config]
   disco_endpoints = ["Saml2/disco"]
-  allowed_issuers = ["https://spid-idp.example.org", "https://cie-idp.example.org"]
-  # ...or instead: allow_any_issuer = true
+  # ...or instead of the per-requester allowlist: allow_any_issuer = true
+  [microservice.config.allowed_issuers]
+  "https://sp.example.com" = ["https://spid-idp.example.org", "https://cie-idp.example.org"]
+  # "" = [...]   # optional fallback set for unlisted requesters
 ```
 
 ## `custom_logging`: audit records
