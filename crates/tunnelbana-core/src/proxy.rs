@@ -147,6 +147,15 @@ impl Proxy {
                         ctx.target_frontend = Some(frontend_name.clone());
                         ctx.state
                             .set_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND, &frontend_name);
+                        // Persist the restored requester exactly as the
+                        // initial frontend dispatch does: backends answer with
+                        // `requester: None` and `dispatch_backend` refills it
+                        // from base state, so without this the response path
+                        // would run under a stale (or missing) requester while
+                        // the request path ran under the snapshot's.
+                        if let Some(req) = request.requester.clone() {
+                            ctx.set_requester(&req);
+                        }
                         // Resume with the micro-services *after* the resuming
                         // one (SATOSA parity: `super().process` continues the
                         // remaining chain), then dispatch to a backend.
@@ -516,6 +525,25 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .and_then(|d| d.requester.clone())
+                .as_deref(),
+            Some("sp-resumed")
+        );
+        // The restored requester was persisted to base state (as the initial
+        // frontend dispatch does): the backend's AuthResponse leg refills
+        // `response.requester` from there, so the response path must see the
+        // requester the resumed request path ran under.
+        let resumed_cookie = response
+            .headers
+            .iter()
+            .find(|(n, _)| n == "set-cookie")
+            .and_then(|(_, v)| v.split(';').next())
+            .and_then(|nv| nv.split_once('='))
+            .map(|(_, v)| v.to_string())
+            .expect("state cookie after resume");
+        let state = proxy.sealer().unseal(Some(&resumed_cookie));
+        assert_eq!(
+            state
+                .get_str(STATE_KEY_BASE, crate::context::KEY_REQUESTER)
                 .as_deref(),
             Some("sp-resumed")
         );

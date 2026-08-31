@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 [2026-08-31]
+## 0.4.0 [2026-09-01]
 
 - **OIDC authenticating authority:** the `oidc` and `oidc_federation` frontends
   can release the validated upstream IdP/OP issuer as an array-valued
