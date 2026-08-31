@@ -26,6 +26,20 @@ const AUTHZ_KEY: &str = "authz_request";
 /// Reserved internal attribute whose OpenID mapping controls release of the
 /// OP-asserted upstream authentication authority.
 const AUTHENTICATING_AUTHORITY_ATTRIBUTE: &str = "authenticating_authority";
+/// Claims whose canonical values are owned by the ID-token implementation and
+/// which grindvakt therefore refuses to accept through `extra_claims`.
+const RESERVED_ID_TOKEN_CLAIMS: &[&str] = &[
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "iat",
+    "nbf",
+    "jti",
+    "nonce",
+    "auth_time",
+    "acr",
+];
 
 #[derive(Debug, Deserialize)]
 struct OidcFrontendConfig {
@@ -86,6 +100,7 @@ pub struct OidcFrontend {
 impl OidcFrontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
         let cfg: OidcFrontendConfig = bx.parse_config()?;
+        validate_authenticating_authority_mapping(&bx.attribute_mapper, &bx.name)?;
         let module_base = bx.module_base();
         let issuer = module_base.clone();
 
@@ -454,6 +469,28 @@ fn presented_access_token(ctx: &Context) -> Option<String> {
     None
 }
 
+/// Reject authority-claim names that the provider reserves for canonical
+/// ID-token values. Accepting one would advertise the configured name while
+/// grindvakt silently omits the extra claim at issuance time.
+fn validate_authenticating_authority_mapping(
+    mapper: &AttributeMapper,
+    frontend_name: &str,
+) -> Result<()> {
+    let Some(claim_name) = mapper
+        .profile_attribute("openid", AUTHENTICATING_AUTHORITY_ATTRIBUTE)
+        .and_then(|mapping| mapping.names.first())
+    else {
+        return Ok(());
+    };
+
+    if RESERVED_ID_TOKEN_CLAIMS.contains(&claim_name.as_str()) {
+        return Err(Error::Config(format!(
+            "oidc frontend {frontend_name}: {AUTHENTICATING_AUTHORITY_ATTRIBUTE} cannot map to reserved ID-token claim {claim_name}"
+        )));
+    }
+    Ok(())
+}
+
 /// Build the trusted upstream-authority claim according to the tenant's
 /// OpenID attribute map.
 ///
@@ -501,6 +538,42 @@ fn mapper_openid_claims(mapper: &AttributeMapper) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tunnelbana_core::plugin::NullHttpClient;
+
+    #[test]
+    fn frontend_build_rejects_reserved_authenticating_authority_claim_names() {
+        for reserved in RESERVED_ID_TOKEN_CLAIMS {
+            let mapper = Arc::new(
+                AttributeMapper::from_toml(&format!(
+                    r#"
+                    [attributes.authenticating_authority]
+                    openid = ["{reserved}"]
+                    "#
+                ))
+                .unwrap(),
+            );
+            let bx = BuildContext {
+                name: "OIDC".to_string(),
+                base_url: "https://proxy.example.com".to_string(),
+                config: serde_json::json!({}),
+                attribute_mapper: mapper,
+                http_client: Arc::new(NullHttpClient),
+                secret: "test-secret".to_string(),
+                previous_secrets: Vec::new(),
+            };
+
+            let error = match OidcFrontend::build(&bx) {
+                Ok(_) => panic!("reserved claim {reserved} was accepted"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(&format!(
+                    "authenticating_authority cannot map to reserved ID-token claim {reserved}"
+                )),
+                "unexpected error for {reserved}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn authenticating_authority_uses_configured_name_and_trusted_value() {

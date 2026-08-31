@@ -154,6 +154,10 @@ exchanges. The configured OpenID name is also listed in discovery's
 
 - To **rename** the claim, change the first OpenID name, for example
   `openid = ["upstream_idp"]`.
+- The configured name cannot be a provider-owned ID-token claim (`iss`, `sub`,
+  `aud`, `exp`, `iat`, `nbf`, `jti`, `nonce`, `auth_time`, or `acr`). Such a
+  mapping is rejected at startup instead of being advertised and then silently
+  omitted from tokens.
 - To **suppress** the claim, omit the
   `[attributes.authenticating_authority]` mapping (or omit its `openid` entry).
 - If the backend has no validated issuer, the claim is omitted. tunnelbana also

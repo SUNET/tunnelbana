@@ -311,7 +311,9 @@ saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1
 `authenticating_authority` is a reserved release-control mapping for the OIDC
 frontend, not an ordinary attribute. Its OpenID name is populated only from the
 validated upstream issuer, advertised in discovery, and may be renamed by
-changing the first mapped name. Omit the mapping to suppress the claim. See
+changing the first mapped name. Provider-owned ID-token claim names such as
+`sub`, `iss`, `nonce`, and `acr` are rejected at startup. Omit the mapping to
+suppress the claim. See
 [Trusted upstream authentication authority](attributes.md#trusted-upstream-authentication-authority)
 for the trust and collision rules.
 

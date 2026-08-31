@@ -7,7 +7,8 @@
   The reserved attribute-map entry controls whether it is released and under
   which OpenID claim name; ordinary attributes cannot spoof its value. The
   configured name is advertised in discovery and survives code and refresh
-  exchanges unchanged.
+  exchanges unchanged. Mappings to provider-owned ID-token claims are rejected
+  at startup rather than accepted and silently omitted during issuance.
 - **Dependencies:** update `grindvakt` to 0.7.2 for typed OP-asserted claims.
 
 ## 0.3.1 [2026-08-24]
