@@ -27,8 +27,9 @@ pub trait MicroService: Send + Sync {
     /// Optional own endpoints (e.g. a consent callback page).
     fn register_endpoints(&self) -> Vec<Route> { Vec::new() }
 
-    /// Inbound hit on one of those endpoints.
-    async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<Response>;
+    /// Inbound hit on one of those endpoints. Default: "not implemented" error.
+    async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str)
+        -> Result<MicroServiceAction>;
 }
 ```
 
