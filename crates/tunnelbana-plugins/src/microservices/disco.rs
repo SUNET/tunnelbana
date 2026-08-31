@@ -29,6 +29,17 @@ const MAX_ENTITY_ID_LEN: usize = 1024;
 /// namespaces.
 const MAX_SNAPSHOT_BYTES: usize = 2048;
 
+/// A well-formed entity id: non-empty, at most [`MAX_ENTITY_ID_LEN`]
+/// *characters* (the SAML cap counts characters, not UTF-8 bytes, so a
+/// non-ASCII id must not be rejected early), and free of ASCII control
+/// characters. Shared by config validation and the discovery-return filter
+/// so both enforce the same rule.
+fn is_valid_entity_id(v: &str) -> bool {
+    !v.is_empty()
+        && v.chars().count() <= MAX_ENTITY_ID_LEN
+        && !v.chars().any(|c| c.is_ascii_control())
+}
+
 #[derive(Debug, Deserialize)]
 struct DiscoToTargetIssuerConfig {
     /// Literal request paths (no leading slash) the external discovery service
@@ -123,11 +134,7 @@ impl DiscoToTargetIssuer {
                             bx.name
                         )));
                     }
-                    if issuers.iter().any(|i| {
-                        i.is_empty()
-                            || i.len() > MAX_ENTITY_ID_LEN
-                            || i.chars().any(|c| c.is_ascii_control())
-                    }) {
+                    if issuers.iter().any(|i| !is_valid_entity_id(i)) {
                         return Err(Error::Config(format!(
                             "disco_to_target_issuer {}: allowed_issuers \
                              entries for requester {requester:?} must be \
@@ -192,8 +199,7 @@ impl MicroService for DiscoToTargetIssuer {
             .request
             .query
             .get(PARAM_ENTITY_ID)
-            .filter(|v| !v.is_empty())
-            .filter(|v| v.len() <= MAX_ENTITY_ID_LEN && !v.chars().any(|c| c.is_ascii_control()))
+            .filter(|v| is_valid_entity_id(v))
             .cloned()
             // The snapshot is left in place so the user can be sent through
             // discovery again after a malformed return.
@@ -383,6 +389,7 @@ mod tests {
             None,
             Some(String::new()),
             Some("a".repeat(MAX_ENTITY_ID_LEN + 1)),
+            Some("å".repeat(MAX_ENTITY_ID_LEN + 1)),
             Some("https://idp.example/\r\nX: y".into()),
         ] {
             let mut ret = ctx();
@@ -424,6 +431,7 @@ mod tests {
             serde_json::json!({ "sp-a": [""] }),
             serde_json::json!({ "sp-a": ["https://idp.example/\u{7}"] }),
             serde_json::json!({ "sp-a": ["a".repeat(MAX_ENTITY_ID_LEN + 1)] }),
+            serde_json::json!({ "sp-a": ["å".repeat(MAX_ENTITY_ID_LEN + 1)] }),
         ] {
             assert!(
                 DiscoToTargetIssuer::build(&bx(
@@ -595,6 +603,36 @@ mod tests {
             .await
             .is_ok());
         assert!(c.state.get_value("disco", KEY_SNAPSHOT).is_some());
+    }
+
+    #[tokio::test]
+    async fn entity_id_limit_counts_characters_not_bytes() {
+        // 1024 two-byte characters: within the SAML character cap even
+        // though it is 2048 UTF-8 bytes - accepted in config and at the
+        // discovery return alike.
+        let issuer = "å".repeat(MAX_ENTITY_ID_LEN);
+        let svc = DiscoToTargetIssuer::build(&bx(
+            "disco",
+            serde_json::json!({
+                "disco_endpoints": ["Saml2/disco"],
+                "allowed_issuers": { "sp-a": [issuer.clone()] },
+            }),
+        ))
+        .unwrap();
+
+        let mut c = ctx();
+        let _ = svc
+            .process_request(&mut c, InternalData::request("sp-a"))
+            .await
+            .unwrap();
+        let mut ret = ctx();
+        ret.state = c.state;
+        ret.request.query.insert("entityID".into(), issuer.clone());
+        assert!(svc.handle_endpoint(&mut ret, "Saml2/disco").await.is_ok());
+        assert_eq!(
+            ret.decoration(KEY_TARGET_ENTITYID).and_then(|v| v.as_str()),
+            Some(issuer.as_str())
+        );
     }
 
     #[tokio::test]

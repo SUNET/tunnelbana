@@ -62,7 +62,8 @@ flow the way frontend/backend endpoints do via `FrontendAction`/`BackendAction`.
   SATOSA achieves with `.*/disco`. The outbound hop to the IdP-picker page
   remains owned by the default backend's `disco_srv` (or the deployment).
 - On the discovery return it requires a well-formed `entityID` query
-  parameter (non-empty, ≤ 1024 bytes, no control characters), reads and
+  parameter (non-empty, ≤ 1024 characters - the SAML entityID cap counts
+  characters, not UTF-8 bytes - no control characters), reads and
   **consumes** the snapshot, restores `target_frontend`, decorates
   `KEY_TARGET_ENTITYID` (first-writer-wins holds trivially - decorations are
   per-request), and returns `ResumeRequest` so `custom_routing` re-picks the
@@ -98,7 +99,7 @@ issuer policy, are build-time config errors.
 | Replayed discovery return re-starting authentication | Consume-once: the snapshot is cleared from state before resuming, so the resealed cookie on the response no longer carries it and a repeat fails with "no discovery flow in progress" | A cookie *captured before* the resume still holds the snapshot - inherent to stateless state, bounded by the cookie's absolute TTL (same residual as the state-cookie replay row in ADR 0033) |
 | Forged cross-site disco return with no flow open | The endpoint can only *resume* an existing snapshot, never initiate; no snapshot ⇒ clean 4xx (contrast the forged-`/initiate` risk that motivated ADR 0025's verifier - here the return cannot create a flow) | - |
 | Attacker-chosen `entityID` steering an open flow | Unmatched issuers fail closed: exactly one of `allowed_issuers` (a **requester-scoped** allowlist - the resumed flow's requester selects its issuer set, checked before the resume, so neither an unlisted issuer nor a requester without an applicable set can ride the decoration through `custom_routing`'s requester/default fallback into a backend's metadata resolution) or an explicit `allow_any_issuer = true` must be configured. Backend selection is additionally gated by `custom_routing`'s mandatory `(issuer, requester)` rules and by signature-verified MDQ / federation metadata at `start_auth` | With `allow_any_issuer = true` (only sound when verified metadata is the effective allowlist), a forged return riding the SameSite=None cookie while a flow is open can pre-select a different *federation-trusted* IdP - the same exposure class as a forged `?idphint` (ADR 0016), surfaced to the user at the IdP login page. An `""`/`"default"` allowlist level extends its issuer set to every requester - an explicit operator choice |
-| Header/log injection via `entityID` | Length cap (1024 bytes) and ASCII-control-character rejection before the value reaches decorations or logs | - |
+| Header/log injection via `entityID` | Length cap (1024 characters, the SAML entityID limit) and ASCII-control-character rejection before the value reaches decorations or logs | - |
 | Oversized snapshot stranding the flow mid-discovery | Two layers: a 2048-byte cap on the serialized snapshot in `process_request` fails the flow with a protocol error *before* the disco redirect; and `Proxy::run` no longer sends any response whose state failed to seal - it returns an explicit error with a state-clearing cookie instead of a cookie-less redirect that could never resume | Operators stacking attribute-heavy request-path services before this one see the flow rejected; reorder the pipeline |
 
 Divergence from ADR 0025's one-time verifier is deliberate: tunnelbana does
