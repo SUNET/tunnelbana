@@ -16,6 +16,14 @@ const PARAM_ENTITY_ID: &str = "entityID";
 /// Reject absurdly long entity ids before they reach routing or logs. SAML
 /// metadata caps entityID at 1024 characters.
 const MAX_ENTITY_ID_LEN: usize = 1024;
+/// Upper bound on the serialized snapshot JSON. The sealed state cookie is
+/// hard-capped at 4096 bytes; a snapshot beyond this would be dropped at
+/// seal time *after* the browser was already redirected to the discovery
+/// service, leaving an unrecoverable flow. Failing here surfaces the problem
+/// as a normal protocol error before the redirect happens. Half the cookie
+/// budget leaves room for base64 expansion, JWE overhead and the other state
+/// namespaces.
+const MAX_SNAPSHOT_BYTES: usize = 2048;
 
 #[derive(Debug, Deserialize)]
 struct DiscoToTargetIssuerConfig {
@@ -26,6 +34,22 @@ struct DiscoToTargetIssuerConfig {
     /// divergence - the discovery service is configured with a fixed return
     /// URL, and exact routes cannot fail to compile.
     disco_endpoints: Vec<String>,
+    /// Allowlist of issuer entity ids the discovery return may select. A
+    /// returned `entityID` outside the list is rejected before the pipeline
+    /// resumes, so an unlisted issuer can never ride the target-entity
+    /// decoration through fallback routing into a backend's metadata
+    /// resolution. Exactly one of `allowed_issuers` and `allow_any_issuer`
+    /// must be configured: unmatched issuers fail closed unless the operator
+    /// explicitly opts out.
+    #[serde(default)]
+    allowed_issuers: Option<Vec<String>>,
+    /// Explicitly accept any well-formed returned entityID (SATOSA's
+    /// behavior). Only sound when every backend a discovery return can reach
+    /// verifies the selected entity against signed federation metadata
+    /// (MDQ/trust chain), which is then the effective allowlist - e.g. an
+    /// eduGAIN-scale proxy where enumerating issuers is impossible.
+    #[serde(default)]
+    allow_any_issuer: bool,
 }
 
 /// Snapshots the in-flight request into the encrypted state cookie on the
@@ -37,6 +61,7 @@ struct DiscoToTargetIssuerConfig {
 pub struct DiscoToTargetIssuer {
     name: String,
     disco_endpoints: Vec<String>,
+    allowed_issuers: Option<Vec<String>>,
 }
 
 impl DiscoToTargetIssuer {
@@ -60,9 +85,46 @@ impl DiscoToTargetIssuer {
             }
             disco_endpoints.push(path);
         }
+        // Fail closed by default: the operator either enumerates the issuers
+        // a discovery return may select, or explicitly accepts any (leaving
+        // backend metadata verification as the only gate).
+        match (&cfg.allowed_issuers, cfg.allow_any_issuer) {
+            (Some(_), true) | (None, false) => {
+                return Err(Error::Config(format!(
+                    "disco_to_target_issuer {}: configure exactly one of \
+                     allowed_issuers (enumerated issuers) or \
+                     allow_any_issuer = true (rely on backend metadata \
+                     verification)",
+                    bx.name
+                )));
+            }
+            (Some(issuers), false) => {
+                if issuers.is_empty() {
+                    return Err(Error::Config(format!(
+                        "disco_to_target_issuer {}: allowed_issuers must not \
+                         be empty",
+                        bx.name
+                    )));
+                }
+                if issuers.iter().any(|i| {
+                    i.is_empty()
+                        || i.len() > MAX_ENTITY_ID_LEN
+                        || i.chars().any(|c| c.is_ascii_control())
+                }) {
+                    return Err(Error::Config(format!(
+                        "disco_to_target_issuer {}: allowed_issuers entries \
+                         must be non-empty entity ids without control \
+                         characters",
+                        bx.name
+                    )));
+                }
+            }
+            (None, true) => {}
+        }
         Ok(Box::new(DiscoToTargetIssuer {
             name: bx.name.clone(),
             disco_endpoints,
+            allowed_issuers: cfg.allowed_issuers,
         }))
     }
 }
@@ -77,14 +139,22 @@ impl MicroService for DiscoToTargetIssuer {
         // Suspend-side bookkeeping: the outbound hop to the discovery service
         // itself is owned by the default backend (`disco_srv`) or the
         // deployment; this service only has to remember enough to resume.
-        ctx.state.set_value(
-            &self.name,
-            KEY_SNAPSHOT,
-            serde_json::json!({
-                "target_frontend": ctx.target_frontend,
-                "internal_data": data,
-            }),
-        );
+        let snapshot = serde_json::json!({
+            "target_frontend": ctx.target_frontend,
+            "internal_data": data,
+        });
+        // Reject a snapshot the state cookie cannot carry *now*, while a
+        // protocol error can still reach the requester. Discovering this at
+        // seal time would strand the user: the disco redirect would go out
+        // without the cookie and the return could never resume.
+        let size = snapshot.to_string().len();
+        if size > MAX_SNAPSHOT_BYTES {
+            return Err(Error::Authn(format!(
+                "discovery snapshot of {size} bytes exceeds the \
+                 {MAX_SNAPSHOT_BYTES}-byte state-cookie budget"
+            )));
+        }
+        ctx.state.set_value(&self.name, KEY_SNAPSHOT, snapshot);
         Ok(data)
     }
 
@@ -110,6 +180,16 @@ impl MicroService for DiscoToTargetIssuer {
             // The snapshot is left in place so the user can be sent through
             // discovery again after a malformed return.
             .ok_or_else(|| Error::Authn("no valid entityID in the discovery response".into()))?;
+
+        if let Some(allowed) = &self.allowed_issuers {
+            if !allowed.iter().any(|a| a == &issuer) {
+                // Also before consuming the snapshot: the user can go back to
+                // the discovery page and pick a permitted issuer.
+                return Err(Error::Authn(
+                    "discovery response issuer is not in allowed_issuers".into(),
+                ));
+            }
+        }
 
         let snapshot = ctx
             .state
@@ -147,7 +227,10 @@ mod tests {
     fn service() -> Box<dyn MicroService> {
         DiscoToTargetIssuer::build(&bx(
             "disco",
-            serde_json::json!({ "disco_endpoints": ["Saml2/disco"] }),
+            serde_json::json!({
+                "disco_endpoints": ["Saml2/disco"],
+                "allow_any_issuer": true,
+            }),
         ))
         .unwrap()
     }
@@ -155,12 +238,12 @@ mod tests {
     #[test]
     fn build_validates_endpoints() {
         for config in [
-            serde_json::json!({ "disco_endpoints": [] }),
-            serde_json::json!({ "disco_endpoints": [""] }),
-            serde_json::json!({ "disco_endpoints": ["/"] }),
-            serde_json::json!({ "disco_endpoints": ["a b"] }),
-            serde_json::json!({ "disco_endpoints": ["disco?x=1"] }),
-            serde_json::json!({}),
+            serde_json::json!({ "disco_endpoints": [], "allow_any_issuer": true }),
+            serde_json::json!({ "disco_endpoints": [""], "allow_any_issuer": true }),
+            serde_json::json!({ "disco_endpoints": ["/"], "allow_any_issuer": true }),
+            serde_json::json!({ "disco_endpoints": ["a b"], "allow_any_issuer": true }),
+            serde_json::json!({ "disco_endpoints": ["disco?x=1"], "allow_any_issuer": true }),
+            serde_json::json!({ "allow_any_issuer": true }),
         ] {
             assert!(
                 DiscoToTargetIssuer::build(&bx("disco", config.clone())).is_err(),
@@ -173,7 +256,10 @@ mod tests {
     fn registers_exact_routes_with_stripped_slash() {
         let svc = DiscoToTargetIssuer::build(&bx(
             "disco",
-            serde_json::json!({ "disco_endpoints": ["/Saml2/disco"] }),
+            serde_json::json!({
+                "disco_endpoints": ["/Saml2/disco"],
+                "allow_any_issuer": true,
+            }),
         ))
         .unwrap();
         let routes = svc.register_endpoints();
@@ -273,6 +359,117 @@ mod tests {
             // The user can still be sent through discovery again.
             assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_some());
         }
+    }
+
+    #[test]
+    fn build_requires_exactly_one_issuer_policy() {
+        // Neither knob: fail closed at config time.
+        assert!(DiscoToTargetIssuer::build(&bx(
+            "disco",
+            serde_json::json!({ "disco_endpoints": ["Saml2/disco"] }),
+        ))
+        .is_err());
+        // Both knobs: ambiguous, rejected.
+        assert!(DiscoToTargetIssuer::build(&bx(
+            "disco",
+            serde_json::json!({
+                "disco_endpoints": ["Saml2/disco"],
+                "allowed_issuers": ["https://idp.example"],
+                "allow_any_issuer": true,
+            }),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn build_validates_allowed_issuers() {
+        for issuers in [
+            serde_json::json!([]),
+            serde_json::json!([""]),
+            serde_json::json!(["https://idp.example/\u{7}"]),
+            serde_json::json!(["a".repeat(MAX_ENTITY_ID_LEN + 1)]),
+        ] {
+            assert!(
+                DiscoToTargetIssuer::build(&bx(
+                    "disco",
+                    serde_json::json!({
+                        "disco_endpoints": ["Saml2/disco"],
+                        "allowed_issuers": issuers,
+                    }),
+                ))
+                .is_err(),
+                "accepted allowed_issuers {issuers}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_issuers_gates_the_disco_return() {
+        let svc = DiscoToTargetIssuer::build(&bx(
+            "disco",
+            serde_json::json!({
+                "disco_endpoints": ["Saml2/disco"],
+                "allowed_issuers": ["https://spid-idp.example", "https://cie-idp.example"],
+            }),
+        ))
+        .unwrap();
+        let mut c = ctx();
+        let _ = svc
+            .process_request(&mut c, InternalData::request("sp-a"))
+            .await
+            .unwrap();
+
+        // An unlisted issuer is rejected and the snapshot survives, so the
+        // user can be sent through discovery again.
+        let mut ret = ctx();
+        ret.state = c.state.clone();
+        ret.request
+            .query
+            .insert("entityID".into(), "https://rogue-idp.example".into());
+        let err = match svc.handle_endpoint(&mut ret, "Saml2/disco").await {
+            Ok(_) => panic!("accepted an unlisted issuer"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("allowed_issuers"));
+        assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_some());
+        assert!(ret.decoration(KEY_TARGET_ENTITYID).is_none());
+
+        // A listed issuer resumes as usual.
+        let mut ok = ctx();
+        ok.state = c.state;
+        ok.request
+            .query
+            .insert("entityID".into(), "https://cie-idp.example".into());
+        assert!(svc.handle_endpoint(&mut ok, "Saml2/disco").await.is_ok());
+        assert_eq!(
+            ok.decoration(KEY_TARGET_ENTITYID).and_then(|v| v.as_str()),
+            Some("https://cie-idp.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_snapshot_is_rejected_before_the_disco_hop() {
+        let svc = service();
+        let mut c = ctx();
+        let mut data = InternalData::request("sp-a");
+        data.attributes
+            .insert("big".into(), vec!["x".repeat(MAX_SNAPSHOT_BYTES)]);
+
+        let err = match svc.process_request(&mut c, data).await {
+            Ok(_) => panic!("accepted an oversized snapshot"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("state-cookie budget"));
+        // Nothing was written: no half-started discovery flow.
+        assert!(c.state.get_value("disco", KEY_SNAPSHOT).is_none());
+
+        // A normal-sized request still snapshots fine.
+        let mut c = ctx();
+        assert!(svc
+            .process_request(&mut c, InternalData::request("sp-a"))
+            .await
+            .is_ok());
+        assert!(c.state.get_value("disco", KEY_SNAPSHOT).is_some());
     }
 
     #[tokio::test]

@@ -19,7 +19,16 @@
   resumes the request pipeline so `custom_routing` issuer rules can re-pick
   the backend - one discovery page routing between differently configured
   backends (the iam-proxy-italia SPID-vs-CIE shape). The snapshot is
-  consume-once: replayed or forged discovery returns fail cleanly.
+  consume-once: replayed or forged discovery returns fail cleanly, and
+  unmatched issuers fail closed - the config requires either an
+  `allowed_issuers` allowlist (checked before the resume) or an explicit
+  `allow_any_issuer = true`. A 2 KB snapshot cap fails oversized flows with
+  a protocol error before the discovery redirect (review findings on #26).
+- **Seal failures now fail the request:** a response whose state cookie
+  cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
+  error with a state-clearing cookie, instead of being sent without a
+  `Set-Cookie` header and stranding the multi-step flow it belongs to
+  (review finding on #26).
 - **Flow-resuming micro-service endpoints (API break):**
   `MicroService::handle_endpoint` now returns `MicroServiceAction`
   (`Respond(Response)` or `ResumeRequest { request }`) instead of a bare

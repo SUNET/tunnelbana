@@ -92,11 +92,21 @@ impl Proxy {
             Err(e) => self.render_error(&mut ctx, e).await,
         };
 
-        // Attach the (possibly cleared) state cookie.
+        // Attach the (possibly cleared) state cookie. A response whose state
+        // cannot be sealed (e.g. over the cookie size limit) must NOT go out
+        // without it: the client would continue a multi-step flow (discovery,
+        // ACS return) that can never resume. Fail the request explicitly and
+        // clear the broken state instead.
         match self.sealer.seal(&ctx.state) {
             Ok(cookie) => response.headers.push(("set-cookie".to_string(), cookie)),
             Err(e) => {
-                tracing::error!(error = %e, "failed to seal state cookie; state not persisted")
+                tracing::error!(error = %e, "failed to seal state cookie; failing the request");
+                response = Response::text(500, "request failed");
+                let mut cleared = crate::state::State::new();
+                cleared.delete = true;
+                if let Ok(cookie) = self.sealer.seal(&cleared) {
+                    response.headers.push(("set-cookie".to_string(), cookie));
+                }
             }
         }
         response
@@ -508,6 +518,55 @@ mod tests {
                 .and_then(|d| d.requester.clone())
                 .as_deref(),
             Some("sp-resumed")
+        );
+    }
+
+    struct StateStuffer;
+
+    #[async_trait::async_trait]
+    impl MicroService for StateStuffer {
+        fn name(&self) -> &str {
+            "stuffer"
+        }
+        fn register_endpoints(&self) -> Vec<crate::plugin::Route> {
+            vec![crate::plugin::Route::exact("stuff", "stuff")]
+        }
+        async fn handle_endpoint(
+            &self,
+            ctx: &mut Context,
+            _route_id: &str,
+        ) -> crate::error::Result<MicroServiceAction> {
+            ctx.state.set_str("stuffer", "big", "x".repeat(8192));
+            Ok(MicroServiceAction::Respond(Response::redirect(
+                "https://disco.example/ds",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn unsealable_state_fails_the_request_instead_of_dropping_the_cookie() {
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
+        let proxy = Proxy::new(vec![], vec![], vec![Box::new(StateStuffer)], sealer);
+        let request = HttpRequestData {
+            path: "stuff".to_string(),
+            ..Default::default()
+        };
+        let response = proxy.run(request).await;
+        // The redirect that could never resume is replaced by an explicit
+        // error, and the broken state is cleared rather than silently
+        // omitted.
+        assert_eq!(response.status, 500);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "request failed");
+        assert!(response.headers.iter().all(|(n, _)| n != "location"));
+        let cookie = response
+            .headers
+            .iter()
+            .find(|(n, _)| n == "set-cookie")
+            .map(|(_, v)| v.clone())
+            .expect("clearing cookie attached");
+        assert!(
+            cookie.contains("Max-Age=0"),
+            "not a clearing cookie: {cookie}"
         );
     }
 

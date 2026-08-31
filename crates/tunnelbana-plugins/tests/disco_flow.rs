@@ -152,7 +152,10 @@ fn oidc_frontend() -> Box<dyn Frontend> {
 fn microservices() -> Vec<Box<dyn MicroService>> {
     let disco = tunnelbana_plugins::microservices::DiscoToTargetIssuer::build(&build_ctx(
         "disco",
-        serde_json::json!({ "disco_endpoints": ["Saml2/disco"] }),
+        serde_json::json!({
+            "disco_endpoints": ["Saml2/disco"],
+            "allowed_issuers": [SPID_IDP, CIE_IDP],
+        }),
     ))
     .unwrap();
     let routing = tunnelbana_plugins::microservices::CustomRouting::build(&build_ctx(
@@ -430,15 +433,15 @@ async fn forged_disco_return_without_flow_fails_cleanly() {
 }
 
 #[tokio::test]
-async fn issuer_without_rule_does_not_reach_a_trusted_idp() {
+async fn unlisted_issuer_fails_closed_at_the_disco_return() {
     let proxy = proxy().await;
 
     let r1 = proxy.run(req(&authz_url(), "GET", None)).await;
     let cookie1 = set_cookie(&r1).unwrap();
 
-    // No issuer rule for this entityID: routing falls back to the default
-    // backend, whose (unreachable) MDQ cannot resolve it - the flow errors
-    // instead of reaching either configured IdP.
+    // The issuer is not in allowed_issuers: the return is rejected before
+    // the pipeline resumes, so the decoration never reaches fallback routing
+    // or any backend's metadata resolution.
     let disco_return = format!(
         "Saml2/disco?entityID={}",
         urlenc("https://unlisted-idp.example.org")
@@ -450,4 +453,10 @@ async fn issuer_without_rule_does_not_reach_a_trusted_idp() {
             "unlisted issuer reached a configured IdP: {loc}"
         );
     }
+    // The snapshot survives the rejection, so a subsequent valid pick works.
+    let cookie2 = set_cookie(&r2).unwrap_or(cookie1);
+    let retry = format!("Saml2/disco?entityID={}", urlenc(SPID_IDP));
+    let r3 = proxy.run(req(&retry, "GET", Some(&cookie2))).await;
+    assert_eq!(r3.status, 302, "{}", String::from_utf8_lossy(&r3.body));
+    assert!(location(&r3).starts_with(SPID_SSO_URL));
 }

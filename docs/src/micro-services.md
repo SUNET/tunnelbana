@@ -749,13 +749,22 @@ their output must reach the backend on the resumed pass.
 
 The snapshot is consume-once: a replayed discovery return (same URL, post-
 resume cookie) and a forged return with no flow open both fail cleanly. The
-returned `entityID` is routing input, not authorization - which backends it
-can select is bounded by `custom_routing`'s `(issuer, requester)` allowlist,
-and what the backend will actually talk to is bounded by its verified
-metadata. See the security-boundaries table in ADR 0053. Keep the whole
-snapshot-plus-flow state within the 4 KB cookie budget; stacking this service
-after request-path services that inflate the internal data will fail loudly
-at seal time.
+returned `entityID` is untrusted routing input, and unmatched issuers **fail
+closed**: exactly one of `allowed_issuers` (an enumerated allowlist - a
+return outside it is rejected before the pipeline resumes, and the snapshot
+survives so the user can pick again) or `allow_any_issuer = true` must be
+configured. The explicit opt-out is for deployments where enumerating
+issuers is impossible (an MDQ federation with thousands of IdPs) and every
+reachable backend verifies the selected entity against signed metadata,
+which then acts as the allowlist. Backend selection is additionally bounded
+by `custom_routing`'s `(issuer, requester)` rules. See the
+security-boundaries table in ADR 0053.
+
+The service enforces a 2 KB cap on the serialized snapshot at
+`process_request` time and fails the flow with a normal protocol error when
+exceeded - discovering the problem at seal time instead would redirect the
+browser to the discovery page without the cookie and strand the flow. If you
+hit the cap, move attribute-inflating request-path services after this one.
 
 ```toml
 [[microservice]]
@@ -763,6 +772,8 @@ type = "disco_to_target_issuer"
 name = "disco"
   [microservice.config]
   disco_endpoints = ["Saml2/disco"]
+  allowed_issuers = ["https://spid-idp.example.org", "https://cie-idp.example.org"]
+  # ...or instead: allow_any_issuer = true
 ```
 
 ## `custom_logging`: audit records
