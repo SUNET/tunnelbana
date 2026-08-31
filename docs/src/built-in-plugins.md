@@ -65,6 +65,7 @@ once the backend has produced attributes. See
 | `accr` | request + response | Filter, minimum-enforce, rewrite and validate the AuthnContextClassRef. |
 | `custom_routing` | request | Pick a backend by requester or target issuer. |
 | `idp_hinting` | request | Lift an IdP-hint query parameter into the flow. |
+| `disco_to_target_issuer` | request | Suspend the flow across an external IdP-discovery page and resume it with the chosen issuer. |
 
 All `signing_*` keys follow the [key-loading rules](configuration.md#keys-pem-or-jwk).
 The attribute transforms above have a narrative, worked-example walkthrough in
@@ -1122,4 +1123,34 @@ type = "idp_hinting"
 name = "hint"
   [microservice.config]
   allowed_params = ["idphint", "idp_hinting", "idp_hint"]
+```
+
+### `disco_to_target_issuer` - discovery-driven backend re-routing (request path, ADR 0053)
+
+```toml
+# Snapshots the in-flight request into the state cookie, then owns the
+# discovery return endpoint(s): when the IdP-picker page sends the browser
+# back with ?entityID=<issuer>, the flow resumes with the target-entity
+# decoration set, and custom_routing's issuer rules (listed AFTER this
+# service) can re-pick the backend. Endpoint paths are exact literals; a path
+# equal to the default SAML2 backend's disco return route (<name>/disco)
+# deliberately shadows it, which is how the backend's disco_srv redirect ends
+# up here.
+[[microservice]]
+type = "disco_to_target_issuer"
+name = "disco"
+  [microservice.config]
+  disco_endpoints = ["Saml2/disco"]
+
+[[microservice]]
+type = "custom_routing"
+name = "routing"
+  [[microservice.config.issuer_rule]]
+  issuer  = "https://spid-idp.example.org"
+  requesters = ["https://sp.example.com"]
+  backend = "SPID"
+  [[microservice.config.issuer_rule]]
+  issuer  = "https://cie-idp.example.org"
+  requesters = ["https://sp.example.com"]
+  backend = "CIE"
 ```

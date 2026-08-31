@@ -61,6 +61,10 @@ pub fn register_all(registry: &mut Registry) {
         microservices::PrimaryIdentifier::build,
     );
     registry.register_microservice("idp_hinting", microservices::IdpHinting::build);
+    registry.register_microservice(
+        "disco_to_target_issuer",
+        microservices::DiscoToTargetIssuer::build,
+    );
     registry.register_microservice("custom_logging", microservices::CustomLogging::build);
     registry.register_microservice("pairwiseid", microservices::PairwiseId::build);
     registry.register_microservice(

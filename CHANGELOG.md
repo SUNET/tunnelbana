@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 [2026-08-31]
 
 - **OIDC authenticating authority:** the `oidc` and `oidc_federation` frontends
   can release the validated upstream IdP/OP issuer as an array-valued
@@ -11,6 +11,22 @@
   exchanges unchanged. Mappings to provider-owned ID-token claims are rejected
   at startup rather than accepted and silently omitted during issuance.
 - **Dependencies:** update `grindvakt` to 0.7.2 for typed OP-asserted claims.
+- **`disco_to_target_issuer` micro-service (ADR 0053):** port of SATOSA's
+  `DiscoToTargetIssuer`. The service snapshots the in-flight request into the
+  encrypted state cookie, owns the discovery-return endpoint (exact paths that
+  deliberately shadow the default SAML2 backend's `disco_srv` return route),
+  and on `?entityID=…` restores the flow, decorates `KEY_TARGET_ENTITYID`, and
+  resumes the request pipeline so `custom_routing` issuer rules can re-pick
+  the backend - one discovery page routing between differently configured
+  backends (the iam-proxy-italia SPID-vs-CIE shape). The snapshot is
+  consume-once: replayed or forged discovery returns fail cleanly.
+- **Flow-resuming micro-service endpoints (API break):**
+  `MicroService::handle_endpoint` now returns `MicroServiceAction`
+  (`Respond(Response)` or `ResumeRequest { request }`) instead of a bare
+  `Response`. On resume the proxy runs the request-path micro-services after
+  the resuming one and dispatches to a backend under the normal precedence.
+  No in-tree service overrode the old signature; out-of-tree implementations
+  must wrap their response in `MicroServiceAction::Respond`.
 
 ## 0.3.1 [2026-08-24]
 

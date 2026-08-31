@@ -5,7 +5,10 @@
 use crate::context::{Context, STATE_KEY_BASE};
 use crate::error::{Error, Result};
 use crate::http::{HttpRequestData, Response};
-use crate::plugin::{Backend, BackendAction, Frontend, FrontendAction, MicroService};
+use crate::internal::InternalData;
+use crate::plugin::{
+    Backend, BackendAction, Frontend, FrontendAction, MicroService, MicroServiceAction,
+};
 use crate::router::{ModuleKind, Router};
 use crate::state::StateSealer;
 use std::collections::HashMap;
@@ -110,12 +113,36 @@ impl Proxy {
             ModuleKind::Frontend => self.dispatch_frontend(ctx, &m.module, &m.route_id).await,
             ModuleKind::Backend => self.dispatch_backend(ctx, &m.module, &m.route_id).await,
             ModuleKind::MicroService => {
-                let ms = self
+                let idx = self
                     .microservices
                     .iter()
-                    .find(|x| x.name() == m.module)
+                    .position(|x| x.name() == m.module)
                     .ok_or_else(|| Error::UnknownModule(m.module.clone()))?;
-                ms.handle_endpoint(ctx, &m.route_id).await
+                match self.microservices[idx]
+                    .handle_endpoint(ctx, &m.route_id)
+                    .await?
+                {
+                    MicroServiceAction::Respond(r) => Ok(r),
+                    MicroServiceAction::ResumeRequest { request } => {
+                        // The resuming service restored ctx.target_frontend from
+                        // its snapshot; fall back to the state cookie, and fail
+                        // cleanly when no originating frontend is recoverable.
+                        let frontend_name = ctx
+                            .target_frontend
+                            .clone()
+                            .or_else(|| ctx.state.get_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND))
+                            .ok_or_else(|| {
+                                Error::State("resume without an originating frontend".into())
+                            })?;
+                        ctx.target_frontend = Some(frontend_name.clone());
+                        ctx.state
+                            .set_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND, &frontend_name);
+                        // Resume with the micro-services *after* the resuming
+                        // one (SATOSA parity: `super().process` continues the
+                        // remaining chain), then dispatch to a backend.
+                        self.finish_request(ctx, request, idx + 1, None).await
+                    }
+                }
             }
         }
     }
@@ -135,7 +162,7 @@ impl Proxy {
         match frontend.handle_endpoint(ctx, route_id).await? {
             FrontendAction::Respond(r) => Ok(r),
             FrontendAction::StartAuth {
-                mut request,
+                request,
                 target_backend,
             } => {
                 // Record requester + originating frontend for the return path.
@@ -145,25 +172,38 @@ impl Proxy {
                 ctx.state
                     .set_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND, module);
 
-                // Request-path micro-services.
-                for ms in &self.microservices {
-                    request = ms.process_request(ctx, request).await?;
-                }
-
-                // Select backend: explicit pin > micro-service pin > default.
-                let backend_name = target_backend
-                    .or_else(|| ctx.target_backend.clone())
-                    .or_else(|| self.default_backend.clone())
-                    .ok_or_else(|| Error::Config("no backend configured".into()))?;
-                ctx.target_backend = Some(backend_name.clone());
-
-                let backend = self
-                    .backends
-                    .get(&backend_name)
-                    .ok_or_else(|| Error::UnknownModule(backend_name.clone()))?;
-                backend.start_auth(ctx, request).await
+                self.finish_request(ctx, request, 0, target_backend).await
             }
         }
+    }
+
+    /// Run the request-path micro-services from `start_index`, select a
+    /// backend and start authentication. Entered with `start_index == 0` from
+    /// frontend dispatch, or mid-chain when a micro-service endpoint resumes a
+    /// suspended flow ([`MicroServiceAction::ResumeRequest`]).
+    async fn finish_request(
+        &self,
+        ctx: &mut Context,
+        mut request: InternalData,
+        start_index: usize,
+        pinned_backend: Option<String>,
+    ) -> Result<Response> {
+        for ms in self.microservices.iter().skip(start_index) {
+            request = ms.process_request(ctx, request).await?;
+        }
+
+        // Select backend: explicit pin > micro-service pin > default.
+        let backend_name = pinned_backend
+            .or_else(|| ctx.target_backend.clone())
+            .or_else(|| self.default_backend.clone())
+            .ok_or_else(|| Error::Config("no backend configured".into()))?;
+        ctx.target_backend = Some(backend_name.clone());
+
+        let backend = self
+            .backends
+            .get(&backend_name)
+            .ok_or_else(|| Error::UnknownModule(backend_name.clone()))?;
+        backend.start_auth(ctx, request).await
     }
 
     async fn dispatch_backend(
@@ -325,6 +365,166 @@ mod tests {
             assert!(response.headers.iter().all(|(n, _)| n != "location"));
             assert_eq!(String::from_utf8(response.body).unwrap(), "request failed");
         }
+    }
+
+    struct RecordingService {
+        name: String,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        resume: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl MicroService for RecordingService {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn process_request(
+            &self,
+            _ctx: &mut Context,
+            data: crate::internal::InternalData,
+        ) -> crate::error::Result<crate::internal::InternalData> {
+            self.calls.lock().unwrap().push(self.name.clone());
+            Ok(data)
+        }
+
+        fn register_endpoints(&self) -> Vec<crate::plugin::Route> {
+            if self.resume {
+                vec![crate::plugin::Route::exact("resume-here", "resume")]
+            } else {
+                Vec::new()
+            }
+        }
+
+        async fn handle_endpoint(
+            &self,
+            ctx: &mut Context,
+            _route_id: &str,
+        ) -> crate::error::Result<MicroServiceAction> {
+            // Mimic a discovery-style service: restore the originating
+            // frontend (when one was recorded) and hand back the flow data.
+            ctx.target_frontend = ctx.state.get_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND);
+            Ok(MicroServiceAction::ResumeRequest {
+                request: crate::internal::InternalData::request("sp-resumed"),
+            })
+        }
+    }
+
+    struct RecordingBackend {
+        received: std::sync::Arc<std::sync::Mutex<Option<crate::internal::InternalData>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for RecordingBackend {
+        fn name(&self) -> &str {
+            "backend"
+        }
+        fn register_endpoints(&self) -> Vec<crate::plugin::Route> {
+            Vec::new()
+        }
+        async fn start_auth(
+            &self,
+            _ctx: &mut Context,
+            request: crate::internal::InternalData,
+        ) -> crate::error::Result<Response> {
+            *self.received.lock().unwrap() = Some(request);
+            Ok(Response::text(200, "auth started"))
+        }
+        async fn handle_endpoint(
+            &self,
+            _ctx: &mut Context,
+            _route_id: &str,
+        ) -> crate::error::Result<BackendAction> {
+            Ok(BackendAction::Respond(Response::text(200, "ok")))
+        }
+    }
+
+    fn resume_proxy(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        received: std::sync::Arc<std::sync::Mutex<Option<crate::internal::InternalData>>>,
+    ) -> Proxy {
+        let services: Vec<Box<dyn MicroService>> = vec![
+            Box::new(RecordingService {
+                name: "before".into(),
+                calls: calls.clone(),
+                resume: false,
+            }),
+            Box::new(RecordingService {
+                name: "resumer".into(),
+                calls: calls.clone(),
+                resume: true,
+            }),
+            Box::new(RecordingService {
+                name: "after".into(),
+                calls,
+                resume: false,
+            }),
+        ];
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
+        Proxy::new(
+            vec![],
+            vec![Box::new(RecordingBackend { received })],
+            services,
+            sealer,
+        )
+    }
+
+    #[tokio::test]
+    async fn resume_runs_only_later_services_and_reaches_backend() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let proxy = resume_proxy(calls.clone(), received.clone());
+
+        // Seed a state cookie that carries the originating frontend, as the
+        // first pass through the frontend would have.
+        let mut state = State::new();
+        state.set_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND, "frontend");
+        let cookie = proxy.sealer().seal(&state).unwrap();
+        let cookie_value = cookie
+            .split_once(';')
+            .map(|(nv, _)| nv)
+            .and_then(|nv| nv.split_once('='))
+            .map(|(_, v)| v.to_string())
+            .unwrap();
+
+        let mut request = HttpRequestData {
+            path: "resume-here".to_string(),
+            ..Default::default()
+        };
+        request
+            .cookies
+            .insert(proxy.sealer().cookie_name().to_string(), cookie_value);
+
+        let response = proxy.run(request).await;
+        assert_eq!(String::from_utf8(response.body).unwrap(), "auth started");
+        // Only the services after the resuming one ran.
+        assert_eq!(*calls.lock().unwrap(), vec!["after".to_string()]);
+        // The backend received the restored data.
+        assert_eq!(
+            received
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|d| d.requester.clone())
+                .as_deref(),
+            Some("sp-resumed")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_without_recoverable_frontend_fails_cleanly() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let proxy = resume_proxy(calls.clone(), received.clone());
+
+        let request = HttpRequestData {
+            path: "resume-here".to_string(),
+            ..Default::default()
+        };
+        let response = proxy.run(request).await;
+        assert_eq!(String::from_utf8(response.body).unwrap(), "request failed");
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(received.lock().unwrap().is_none());
     }
 
     #[tokio::test]

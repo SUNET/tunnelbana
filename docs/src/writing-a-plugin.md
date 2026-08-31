@@ -46,7 +46,7 @@ pub trait MicroService: Send + Sync {
     async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData>;
     async fn process_response(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData>;
     fn register_endpoints(&self) -> Vec<Route> { Vec::new() }
-    async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<Response>;
+    async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<MicroServiceAction>;
 }
 ```
 
