@@ -222,10 +222,13 @@ impl Frontend for OidcFrontend {
             );
         }
 
-        match self
-            .provider
-            .authorization_redirect_with_claims(&req, &sub, &external, acr, &extra_claims)
-        {
+        match self.provider.authorization_redirect_with_claims(
+            &req,
+            &sub,
+            &external,
+            acr,
+            &extra_claims,
+        ) {
             Ok(r) => Ok(r),
             Err(e) => Ok(e.to_redirect(&req.redirect_uri)),
         }
