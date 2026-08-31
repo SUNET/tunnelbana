@@ -23,6 +23,9 @@ use crate::keyload::{load_signing_key, scoped_secret};
 
 /// State namespace key under which the in-flight authorization request is held.
 const AUTHZ_KEY: &str = "authz_request";
+/// Reserved internal attribute whose OpenID mapping controls release of the
+/// OP-asserted upstream authentication authority.
+const AUTHENTICATING_AUTHORITY_ATTRIBUTE: &str = "authenticating_authority";
 
 #[derive(Debug, Deserialize)]
 struct OidcFrontendConfig {
@@ -193,7 +196,7 @@ impl Frontend for OidcFrontend {
             .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
 
         // Map internal attributes to OpenID claims.
-        let external = self.mapper.from_internal("openid", &response.attributes);
+        let mut external = self.mapper.from_internal("openid", &response.attributes);
 
         // Subject id: explicit, else composed from configured attrs, else error.
         let sub = response
@@ -204,23 +207,11 @@ impl Frontend for OidcFrontend {
 
         let acr = response.auth_info.auth_class_ref.clone();
 
-        // Assert which upstream authority authenticated the user, taken from the
-        // validated assertion's issuer (`auth_info.issuer`) — never from anything
-        // the RP or end user supplied. Emitted as `authenticating_authority`,
-        // modeled on SAML's `<AuthenticatingAuthority>` and array-valued so a
-        // proxy chain longer than one hop does not force a later breaking widen
-        // from string to array. When the issuer is unknown the claim is omitted
-        // entirely rather than filled with a placeholder or a configured default.
-        // Passed as an OP-asserted extra claim (not through the attribute map), so
-        // a tenant's claim-mapping profile can rename or drop it but cannot set
-        // its value, and it keeps its array shape even for a single authority.
-        let mut extra_claims: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        if let Some(issuer) = &response.auth_info.issuer {
-            extra_claims.insert(
-                "authenticating_authority".into(),
-                serde_json::Value::Array(vec![serde_json::Value::String(issuer.clone())]),
-            );
-        }
+        let extra_claims = authenticating_authority_claims(
+            &self.mapper,
+            &mut external,
+            response.auth_info.issuer.as_deref(),
+        );
 
         match self.provider.authorization_redirect_with_claims(
             &req,
@@ -463,12 +454,116 @@ fn presented_access_token(ctx: &Context) -> Option<String> {
     None
 }
 
-/// Collect the internal attribute names that have an `openid` mapping (for the
-/// discovery `claims_supported` list).
+/// Build the trusted upstream-authority claim according to the tenant's
+/// OpenID attribute map.
+///
+/// The reserved internal attribute is release configuration only: an ordinary
+/// backend attribute with the same mapping can never provide the claim value.
+/// Removing its mapped output before inserting the OP-asserted value also
+/// makes an unknown issuer omit the claim rather than releasing spoofed data.
+fn authenticating_authority_claims(
+    mapper: &AttributeMapper,
+    external: &mut BTreeMap<String, Vec<String>>,
+    issuer: Option<&str>,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut claims = BTreeMap::new();
+    // The standard name is reserved even when release is disabled or renamed,
+    // so another mapped internal attribute cannot fabricate the claim.
+    external.remove(AUTHENTICATING_AUTHORITY_ATTRIBUTE);
+    let Some(claim_name) = mapper
+        .profile_attribute("openid", AUTHENTICATING_AUTHORITY_ATTRIBUTE)
+        .and_then(|mapping| mapping.names.first())
+    else {
+        return claims;
+    };
+
+    external.remove(claim_name);
+    if let Some(issuer) = issuer {
+        claims.insert(
+            claim_name.clone(),
+            serde_json::Value::Array(vec![serde_json::Value::String(issuer.to_owned())]),
+        );
+    }
+    claims
+}
+
+/// Collect the external claim names that have an `openid` mapping (for the
+/// discovery `claims_supported` list), including any configured name for the
+/// trusted authenticating-authority claim.
 fn mapper_openid_claims(mapper: &AttributeMapper) -> Vec<String> {
     mapper
         .attributes()
         .filter_map(|(_, profiles)| profiles.get("openid"))
-        .flat_map(|mapping| mapping.names.clone())
+        .filter_map(|mapping| mapping.names.first().cloned())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authenticating_authority_uses_configured_name_and_trusted_value() {
+        let mapper = AttributeMapper::from_toml(
+            r#"
+            [attributes.authenticating_authority]
+            openid = ["upstream_idp", "inbound_alias"]
+            "#,
+        )
+        .unwrap();
+        let mut external = BTreeMap::from([
+            (
+                "authenticating_authority".to_string(),
+                vec!["https://spoofed-standard.example".to_string()],
+            ),
+            (
+                "upstream_idp".to_string(),
+                vec!["https://spoofed-renamed.example".to_string()],
+            ),
+        ]);
+
+        let claims = authenticating_authority_claims(
+            &mapper,
+            &mut external,
+            Some("https://trusted.example"),
+        );
+
+        assert!(!external.contains_key("authenticating_authority"));
+        assert!(!external.contains_key("upstream_idp"));
+        assert_eq!(
+            claims.get("upstream_idp"),
+            Some(&serde_json::json!(["https://trusted.example"]))
+        );
+        assert_eq!(mapper_openid_claims(&mapper), vec!["upstream_idp"]);
+    }
+
+    #[test]
+    fn authenticating_authority_is_omitted_without_issuer_or_mapping() {
+        let mapped = AttributeMapper::from_toml(
+            r#"
+            [attributes.authenticating_authority]
+            openid = ["authenticating_authority"]
+            "#,
+        )
+        .unwrap();
+        let mut external = BTreeMap::from([(
+            "authenticating_authority".to_string(),
+            vec!["https://spoofed.example".to_string()],
+        )]);
+        assert!(authenticating_authority_claims(&mapped, &mut external, None).is_empty());
+        assert!(external.is_empty());
+
+        let unmapped = AttributeMapper::default();
+        let mut external = BTreeMap::from([(
+            "authenticating_authority".to_string(),
+            vec!["https://spoofed.example".to_string()],
+        )]);
+        assert!(authenticating_authority_claims(
+            &unmapped,
+            &mut external,
+            Some("https://trusted.example")
+        )
+        .is_empty());
+        assert!(external.is_empty());
+    }
 }

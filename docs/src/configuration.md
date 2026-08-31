@@ -288,6 +288,9 @@ saml   = { names = ["mail", "email", "emailAddress"], oid = "urn:oid:0.9.2342.19
 openid = ["given_name"]
 saml   = ["givenName"]              # plain-list form, still valid
 
+[attributes.authenticating_authority]
+openid = ["authenticating_authority"] # trusted upstream issuer claim
+
 [attributes.edupersonprincipalname]
 openid = ["sub"]
 saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
@@ -304,6 +307,13 @@ saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1
   SWAMID SPs expect).
 - `user_id_from_attrs` lists the internal attributes used to compose the
   subject identifier when a backend does not supply one directly.
+
+`authenticating_authority` is a reserved release-control mapping for the OIDC
+frontend, not an ordinary attribute. Its OpenID name is populated only from the
+validated upstream issuer, advertised in discovery, and may be renamed by
+changing the first mapped name. Omit the mapping to suppress the claim. See
+[Trusted upstream authentication authority](attributes.md#trusted-upstream-authentication-authority)
+for the trust and collision rules.
 
 For the SAML backend in MDQ mode, `user_id_from_attrs` is also the preferred
 way to select a federation-stable primary identifier. If the configured

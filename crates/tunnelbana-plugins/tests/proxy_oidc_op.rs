@@ -72,6 +72,11 @@ impl Backend for MockBackend {
         attributes.insert("mail".to_string(), vec!["anna@example.com".to_string()]);
         attributes.insert("givenname".to_string(), vec!["Anna".to_string()]);
         attributes.insert("email_verified".to_string(), vec!["true".to_string()]);
+        // An ordinary attribute cannot spoof the OP-asserted authority claim.
+        attributes.insert(
+            "authenticating_authority".to_string(),
+            vec!["https://spoofed.example".to_string()],
+        );
         let response = InternalData {
             auth_info: AuthenticationInformation {
                 auth_class_ref: Some("urn:acr:mock".into()),
@@ -134,6 +139,8 @@ fn attribute_mapper() -> Arc<AttributeMapper> {
         openid = ["given_name"]
         [attributes.email_verified]
         openid = ["email_verified"]
+        [attributes.authenticating_authority]
+        openid = ["authenticating_authority"]
     "#;
     Arc::new(AttributeMapper::from_toml(toml_str).unwrap())
 }
@@ -368,6 +375,10 @@ async fn oidc_op_full_flow_through_proxy() {
     let userinfo: serde_json::Value = serde_json::from_slice(&r5.body).unwrap();
     assert_eq!(userinfo["sub"], "user-anna");
     assert_eq!(userinfo["email"], "anna@example.com");
+    assert_eq!(
+        userinfo["authenticating_authority"],
+        serde_json::json!(["https://idp.mock"])
+    );
 
     // 6) Discovery document is served.
     let r6 = proxy
@@ -380,6 +391,11 @@ async fn oidc_op_full_flow_through_proxy() {
         disco["token_endpoint"],
         "https://proxy.example.com/OIDC/token"
     );
+    assert!(disco["claims_supported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|claim| claim == "authenticating_authority"));
 }
 
 #[tokio::test]

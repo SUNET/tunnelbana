@@ -122,6 +122,47 @@ For SAML with `attribute_name_format = "uri"`, the attribute is named by its
 `oid` and tagged with the `friendly_name`; in `basic` mode the first plain name
 is used.
 
+## Trusted upstream authentication authority
+
+The OIDC frontend can emit an array-valued claim identifying the upstream IdP
+or OP that authenticated the user. Its value comes exclusively from
+`auth_info.issuer` after the trusted response pipeline; an ordinary upstream
+attribute, RP parameter, or end user cannot supply or replace it. Trusted
+in-process and Python micro-services can rewrite `auth_info` itself and must
+preserve the backend-validated issuer if this claim is enabled.
+
+Release is controlled by the reserved internal mapping key
+`authenticating_authority`:
+
+```toml
+[attributes.authenticating_authority]
+openid = ["authenticating_authority"]
+```
+
+With that mapping and an upstream issuer of `https://idp.example.org`, the ID
+token and UserInfo response contain:
+
+```json
+{
+  "authenticating_authority": ["https://idp.example.org"]
+}
+```
+
+The array shape is preserved through authorization-code and refresh-token
+exchanges. The configured OpenID name is also listed in discovery's
+`claims_supported` array.
+
+- To **rename** the claim, change the first OpenID name, for example
+  `openid = ["upstream_idp"]`.
+- To **suppress** the claim, omit the
+  `[attributes.authenticating_authority]` mapping (or omit its `openid` entry).
+- If the backend has no validated issuer, the claim is omitted. tunnelbana also
+  discards any ordinary mapped attribute that attempts to use the reserved
+  `authenticating_authority` name or its configured replacement.
+
+This mapping is deliberately different from an ordinary attribute mapping: it
+controls the claim's release and external name, but never its value.
+
 ## Composing the subject id (the OIDC `sub`)
 
 `user_id_from_attrs` lists the internal attributes that compose the stable
