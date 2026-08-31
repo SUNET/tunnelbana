@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- **OIDC authenticating authority:** OIDC frontends can release the validated
-  upstream IdP/OP issuer as an array-valued `authenticating_authority` claim.
+- **OIDC authenticating authority:** the `oidc` and `oidc_federation` frontends
+  can release the validated upstream IdP/OP issuer as an array-valued
+  `authenticating_authority` claim.
   The reserved attribute-map entry controls whether it is released and under
   which OpenID claim name; ordinary attributes cannot spoof its value. The
   configured name is advertised in discovery and survives code and refresh

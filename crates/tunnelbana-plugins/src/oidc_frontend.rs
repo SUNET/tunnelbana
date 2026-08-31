@@ -1,6 +1,5 @@
 //! OIDC frontend — the proxy acts as an OpenID Provider (OP) to downstream RPs.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,23 +22,6 @@ use crate::keyload::{load_signing_key, scoped_secret};
 
 /// State namespace key under which the in-flight authorization request is held.
 const AUTHZ_KEY: &str = "authz_request";
-/// Reserved internal attribute whose OpenID mapping controls release of the
-/// OP-asserted upstream authentication authority.
-const AUTHENTICATING_AUTHORITY_ATTRIBUTE: &str = "authenticating_authority";
-/// Claims whose canonical values are owned by the ID-token implementation and
-/// which grindvakt therefore refuses to accept through `extra_claims`.
-const RESERVED_ID_TOKEN_CLAIMS: &[&str] = &[
-    "iss",
-    "sub",
-    "aud",
-    "exp",
-    "iat",
-    "nbf",
-    "jti",
-    "nonce",
-    "auth_time",
-    "acr",
-];
 
 #[derive(Debug, Deserialize)]
 struct OidcFrontendConfig {
@@ -100,7 +82,10 @@ pub struct OidcFrontend {
 impl OidcFrontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
         let cfg: OidcFrontendConfig = bx.parse_config()?;
-        validate_authenticating_authority_mapping(&bx.attribute_mapper, &bx.name)?;
+        crate::oidc_common::validate_authenticating_authority_mapping(
+            &bx.attribute_mapper,
+            &bx.name,
+        )?;
         let module_base = bx.module_base();
         let issuer = module_base.clone();
 
@@ -122,12 +107,7 @@ impl OidcFrontend {
         if dpop.is_some() {
             metadata.dpop_signing_alg_values_supported = vec!["ES256".to_string()];
         }
-        // Surface mappable claims in discovery.
-        for internal in mapper_openid_claims(&bx.attribute_mapper) {
-            if !metadata.claims_supported.contains(&internal) {
-                metadata.claims_supported.push(internal);
-            }
-        }
+        crate::oidc_common::advertise_mapped_claims(&mut metadata, &bx.attribute_mapper);
         for (k, v) in cfg.extra_metadata {
             metadata.extra.insert(k, v);
         }
@@ -222,7 +202,7 @@ impl Frontend for OidcFrontend {
 
         let acr = response.auth_info.auth_class_ref.clone();
 
-        let extra_claims = authenticating_authority_claims(
+        let extra_claims = crate::oidc_common::authenticating_authority_claims(
             &self.mapper,
             &mut external,
             response.auth_info.issuer.as_deref(),
@@ -469,72 +449,6 @@ fn presented_access_token(ctx: &Context) -> Option<String> {
     None
 }
 
-/// Reject authority-claim names that the provider reserves for canonical
-/// ID-token values. Accepting one would advertise the configured name while
-/// grindvakt silently omits the extra claim at issuance time.
-fn validate_authenticating_authority_mapping(
-    mapper: &AttributeMapper,
-    frontend_name: &str,
-) -> Result<()> {
-    let Some(claim_name) = mapper
-        .profile_attribute("openid", AUTHENTICATING_AUTHORITY_ATTRIBUTE)
-        .and_then(|mapping| mapping.names.first())
-    else {
-        return Ok(());
-    };
-
-    if RESERVED_ID_TOKEN_CLAIMS.contains(&claim_name.as_str()) {
-        return Err(Error::Config(format!(
-            "oidc frontend {frontend_name}: {AUTHENTICATING_AUTHORITY_ATTRIBUTE} cannot map to reserved ID-token claim {claim_name}"
-        )));
-    }
-    Ok(())
-}
-
-/// Build the trusted upstream-authority claim according to the tenant's
-/// OpenID attribute map.
-///
-/// The reserved internal attribute is release configuration only: an ordinary
-/// backend attribute with the same mapping can never provide the claim value.
-/// Removing its mapped output before inserting the OP-asserted value also
-/// makes an unknown issuer omit the claim rather than releasing spoofed data.
-fn authenticating_authority_claims(
-    mapper: &AttributeMapper,
-    external: &mut BTreeMap<String, Vec<String>>,
-    issuer: Option<&str>,
-) -> BTreeMap<String, serde_json::Value> {
-    let mut claims = BTreeMap::new();
-    // The standard name is reserved even when release is disabled or renamed,
-    // so another mapped internal attribute cannot fabricate the claim.
-    external.remove(AUTHENTICATING_AUTHORITY_ATTRIBUTE);
-    let Some(claim_name) = mapper
-        .profile_attribute("openid", AUTHENTICATING_AUTHORITY_ATTRIBUTE)
-        .and_then(|mapping| mapping.names.first())
-    else {
-        return claims;
-    };
-
-    external.remove(claim_name);
-    if let Some(issuer) = issuer {
-        claims.insert(
-            claim_name.clone(),
-            serde_json::Value::Array(vec![serde_json::Value::String(issuer.to_owned())]),
-        );
-    }
-    claims
-}
-
-/// Collect the external claim names that have an `openid` mapping (for the
-/// discovery `claims_supported` list), including any configured name for the
-/// trusted authenticating-authority claim.
-fn mapper_openid_claims(mapper: &AttributeMapper) -> Vec<String> {
-    mapper
-        .attributes()
-        .filter_map(|(_, profiles)| profiles.get("openid"))
-        .filter_map(|mapping| mapping.names.first().cloned())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,7 +456,7 @@ mod tests {
 
     #[test]
     fn frontend_build_rejects_reserved_authenticating_authority_claim_names() {
-        for reserved in RESERVED_ID_TOKEN_CLAIMS {
+        for reserved in crate::oidc_common::RESERVED_ID_TOKEN_CLAIMS {
             let mapper = Arc::new(
                 AttributeMapper::from_toml(&format!(
                     r#"
@@ -573,70 +487,5 @@ mod tests {
                 "unexpected error for {reserved}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn authenticating_authority_uses_configured_name_and_trusted_value() {
-        let mapper = AttributeMapper::from_toml(
-            r#"
-            [attributes.authenticating_authority]
-            openid = ["upstream_idp", "inbound_alias"]
-            "#,
-        )
-        .unwrap();
-        let mut external = BTreeMap::from([
-            (
-                "authenticating_authority".to_string(),
-                vec!["https://spoofed-standard.example".to_string()],
-            ),
-            (
-                "upstream_idp".to_string(),
-                vec!["https://spoofed-renamed.example".to_string()],
-            ),
-        ]);
-
-        let claims = authenticating_authority_claims(
-            &mapper,
-            &mut external,
-            Some("https://trusted.example"),
-        );
-
-        assert!(!external.contains_key("authenticating_authority"));
-        assert!(!external.contains_key("upstream_idp"));
-        assert_eq!(
-            claims.get("upstream_idp"),
-            Some(&serde_json::json!(["https://trusted.example"]))
-        );
-        assert_eq!(mapper_openid_claims(&mapper), vec!["upstream_idp"]);
-    }
-
-    #[test]
-    fn authenticating_authority_is_omitted_without_issuer_or_mapping() {
-        let mapped = AttributeMapper::from_toml(
-            r#"
-            [attributes.authenticating_authority]
-            openid = ["authenticating_authority"]
-            "#,
-        )
-        .unwrap();
-        let mut external = BTreeMap::from([(
-            "authenticating_authority".to_string(),
-            vec!["https://spoofed.example".to_string()],
-        )]);
-        assert!(authenticating_authority_claims(&mapped, &mut external, None).is_empty());
-        assert!(external.is_empty());
-
-        let unmapped = AttributeMapper::default();
-        let mut external = BTreeMap::from([(
-            "authenticating_authority".to_string(),
-            vec!["https://spoofed.example".to_string()],
-        )]);
-        assert!(authenticating_authority_claims(
-            &unmapped,
-            &mut external,
-            Some("https://trusted.example")
-        )
-        .is_empty());
-        assert!(external.is_empty());
     }
 }

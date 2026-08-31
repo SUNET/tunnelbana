@@ -124,12 +124,12 @@ is used.
 
 ## Trusted upstream authentication authority
 
-The OIDC frontend can emit an array-valued claim identifying the upstream IdP
-or OP that authenticated the user. Its value comes exclusively from
-`auth_info.issuer` after the trusted response pipeline; an ordinary upstream
-attribute, RP parameter, or end user cannot supply or replace it. Trusted
-in-process and Python micro-services can rewrite `auth_info` itself and must
-preserve the backend-validated issuer if this claim is enabled.
+The `oidc` and `oidc_federation` frontends can emit an array-valued claim
+identifying the upstream IdP or OP that authenticated the user. Its value comes
+exclusively from `auth_info.issuer` after the trusted response pipeline; an
+ordinary upstream attribute, RP parameter, or end user cannot supply or replace
+it. Trusted in-process and Python micro-services can rewrite `auth_info` itself
+and must preserve the backend-validated issuer if this claim is enabled.
 
 Release is controlled by the reserved internal mapping key
 `authenticating_authority`:
@@ -165,7 +165,8 @@ exchanges. The configured OpenID name is also listed in discovery's
   `authenticating_authority` name or its configured replacement.
 
 This mapping is deliberately different from an ordinary attribute mapping: it
-controls the claim's release and external name, but never its value.
+controls the claim's release and external name, but never its value. Both OIDC
+frontend types enforce the same validation, discovery, and issuance rules.
 
 ## Composing the subject id (the OIDC `sub`)
 
