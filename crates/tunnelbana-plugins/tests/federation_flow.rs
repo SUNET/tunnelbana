@@ -199,8 +199,15 @@ impl Backend for MockBackend {
     async fn handle_endpoint(&self, _ctx: &mut Context, _id: &str) -> CoreResult<BackendAction> {
         let mut attributes = BTreeMap::new();
         attributes.insert("mail".to_string(), vec!["fed@example.com".to_string()]);
+        attributes.insert(
+            "authenticating_authority".to_string(),
+            vec!["https://spoofed.example".to_string()],
+        );
         Ok(BackendAction::AuthResponse(InternalData {
-            auth_info: AuthenticationInformation::default(),
+            auth_info: AuthenticationInformation {
+                issuer: Some("https://idp.fed.mock".to_string()),
+                ..Default::default()
+            },
             requester: None,
             requester_name: vec![],
             subject_id: Some("fed-user".into()),
@@ -218,6 +225,8 @@ fn mapper() -> Arc<AttributeMapper> {
             r#"
             [attributes.mail]
             openid = ["email"]
+            [attributes.authenticating_authority]
+            openid = ["authenticating_authority"]
         "#,
         )
         .unwrap(),
@@ -392,8 +401,41 @@ async fn auto_registration_and_private_key_jwt_flow() {
         String::from_utf8_lossy(&r3.body)
     );
     let body: serde_json::Value = serde_json::from_slice(&r3.body).unwrap();
-    assert!(body.get("id_token").is_some());
-    assert!(body.get("access_token").is_some());
+    let id_token = body["id_token"].as_str().expect("id_token");
+    let access_token = body["access_token"].as_str().expect("access_token");
+
+    let jwks_response = proxy.run(req("OIDFed/jwks", "GET", None)).await;
+    let jwks: jose_rs::jwk::JwkSet = serde_json::from_slice(&jwks_response.body).unwrap();
+    let validation = jose_rs::jwt::Validation::new()
+        .with_issuer("https://proxy.example.com/OIDFed")
+        .with_audience(RP_ID);
+    let claims = jose_rs::jwt::decode_with_jwkset(&jwks, id_token, &validation).unwrap();
+    assert_eq!(
+        claims.extra.get("authenticating_authority"),
+        Some(&serde_json::json!(["https://idp.fed.mock"]))
+    );
+
+    let mut userinfo_request = req("OIDFed/userinfo", "GET", None);
+    userinfo_request
+        .headers
+        .insert("authorization".into(), format!("Bearer {access_token}"));
+    let userinfo_response = proxy.run(userinfo_request).await;
+    assert_eq!(userinfo_response.status, 200);
+    let userinfo: serde_json::Value = serde_json::from_slice(&userinfo_response.body).unwrap();
+    assert_eq!(
+        userinfo["authenticating_authority"],
+        serde_json::json!(["https://idp.fed.mock"])
+    );
+
+    let discovery_response = proxy
+        .run(req("OIDFed/.well-known/openid-configuration", "GET", None))
+        .await;
+    let discovery: serde_json::Value = serde_json::from_slice(&discovery_response.body).unwrap();
+    assert!(discovery["claims_supported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|claim| claim == "authenticating_authority"));
 }
 
 #[tokio::test]

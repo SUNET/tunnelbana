@@ -72,6 +72,11 @@ impl Backend for MockBackend {
         attributes.insert("mail".to_string(), vec!["anna@example.com".to_string()]);
         attributes.insert("givenname".to_string(), vec!["Anna".to_string()]);
         attributes.insert("email_verified".to_string(), vec!["true".to_string()]);
+        // An ordinary attribute cannot spoof the OP-asserted authority claim.
+        attributes.insert(
+            "authenticating_authority".to_string(),
+            vec!["https://spoofed.example".to_string()],
+        );
         let response = InternalData {
             auth_info: AuthenticationInformation {
                 auth_class_ref: Some("urn:acr:mock".into()),
@@ -134,6 +139,8 @@ fn attribute_mapper() -> Arc<AttributeMapper> {
         openid = ["given_name"]
         [attributes.email_verified]
         openid = ["email_verified"]
+        [attributes.authenticating_authority]
+        openid = ["authenticating_authority"]
     "#;
     Arc::new(AttributeMapper::from_toml(toml_str).unwrap())
 }
@@ -350,6 +357,13 @@ async fn oidc_op_full_flow_through_proxy() {
         claims.extra.get("email_verified"),
         Some(&serde_json::Value::Bool(true))
     );
+    // The OP names the upstream authority that authenticated the user, taken
+    // from the backend's `auth_info.issuer`, as an array-valued
+    // `authenticating_authority` claim.
+    assert_eq!(
+        claims.extra.get("authenticating_authority"),
+        Some(&serde_json::json!(["https://idp.mock"]))
+    );
 
     // 5) UserInfo with the access token.
     let mut ui_req = req("OIDC/userinfo", "GET", None);
@@ -361,6 +375,10 @@ async fn oidc_op_full_flow_through_proxy() {
     let userinfo: serde_json::Value = serde_json::from_slice(&r5.body).unwrap();
     assert_eq!(userinfo["sub"], "user-anna");
     assert_eq!(userinfo["email"], "anna@example.com");
+    assert_eq!(
+        userinfo["authenticating_authority"],
+        serde_json::json!(["https://idp.mock"])
+    );
 
     // 6) Discovery document is served.
     let r6 = proxy
@@ -373,6 +391,11 @@ async fn oidc_op_full_flow_through_proxy() {
         disco["token_endpoint"],
         "https://proxy.example.com/OIDC/token"
     );
+    assert!(disco["claims_supported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|claim| claim == "authenticating_authority"));
 }
 
 #[tokio::test]
@@ -436,6 +459,23 @@ async fn oidc_op_refresh_token_flow_through_proxy() {
         .expect("rotated refresh");
     assert_ne!(rotated, refresh, "refresh token should rotate");
     assert!(refreshed["id_token"].is_string(), "id_token on refresh");
+    // The authenticating authority is fixed at authentication time and carried
+    // through the refresh exchange unchanged, not recomputed.
+    let jwks_resp = proxy.run(req("OIDC/jwks", "GET", None)).await;
+    let jwks: jose_rs::jwk::JwkSet = serde_json::from_slice(&jwks_resp.body).unwrap();
+    let validation = jose_rs::jwt::Validation::new()
+        .with_issuer("https://proxy.example.com/OIDC")
+        .with_audience("rp-1");
+    let refreshed_claims = jose_rs::jwt::decode_with_jwkset(
+        &jwks,
+        refreshed["id_token"].as_str().unwrap(),
+        &validation,
+    )
+    .unwrap();
+    assert_eq!(
+        refreshed_claims.extra.get("authenticating_authority"),
+        Some(&serde_json::json!(["https://idp.mock"]))
+    );
 
     // The new access token works at userinfo.
     let mut ui_req = req("OIDC/userinfo", "GET", None);

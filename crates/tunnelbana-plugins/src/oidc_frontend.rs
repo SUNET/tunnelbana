@@ -82,6 +82,10 @@ pub struct OidcFrontend {
 impl OidcFrontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
         let cfg: OidcFrontendConfig = bx.parse_config()?;
+        crate::oidc_common::validate_authenticating_authority_mapping(
+            &bx.attribute_mapper,
+            &bx.name,
+        )?;
         let module_base = bx.module_base();
         let issuer = module_base.clone();
 
@@ -103,12 +107,7 @@ impl OidcFrontend {
         if dpop.is_some() {
             metadata.dpop_signing_alg_values_supported = vec!["ES256".to_string()];
         }
-        // Surface mappable claims in discovery.
-        for internal in mapper_openid_claims(&bx.attribute_mapper) {
-            if !metadata.claims_supported.contains(&internal) {
-                metadata.claims_supported.push(internal);
-            }
-        }
+        crate::oidc_common::advertise_mapped_claims(&mut metadata, &bx.attribute_mapper);
         for (k, v) in cfg.extra_metadata {
             metadata.extra.insert(k, v);
         }
@@ -192,7 +191,7 @@ impl Frontend for OidcFrontend {
             .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
 
         // Map internal attributes to OpenID claims.
-        let external = self.mapper.from_internal("openid", &response.attributes);
+        let mut external = self.mapper.from_internal("openid", &response.attributes);
 
         // Subject id: explicit, else composed from configured attrs, else error.
         let sub = response
@@ -203,10 +202,19 @@ impl Frontend for OidcFrontend {
 
         let acr = response.auth_info.auth_class_ref.clone();
 
-        match self
-            .provider
-            .authorization_redirect(&req, &sub, &external, acr)
-        {
+        let extra_claims = crate::oidc_common::authenticating_authority_claims(
+            &self.mapper,
+            &mut external,
+            response.auth_info.issuer.as_deref(),
+        );
+
+        match self.provider.authorization_redirect_with_claims(
+            &req,
+            &sub,
+            &external,
+            acr,
+            &extra_claims,
+        ) {
             Ok(r) => Ok(r),
             Err(e) => Ok(e.to_redirect(&req.redirect_uri)),
         }
@@ -441,12 +449,43 @@ fn presented_access_token(ctx: &Context) -> Option<String> {
     None
 }
 
-/// Collect the internal attribute names that have an `openid` mapping (for the
-/// discovery `claims_supported` list).
-fn mapper_openid_claims(mapper: &AttributeMapper) -> Vec<String> {
-    mapper
-        .attributes()
-        .filter_map(|(_, profiles)| profiles.get("openid"))
-        .flat_map(|mapping| mapping.names.clone())
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tunnelbana_core::plugin::NullHttpClient;
+
+    #[test]
+    fn frontend_build_rejects_reserved_authenticating_authority_claim_names() {
+        for reserved in crate::oidc_common::RESERVED_ID_TOKEN_CLAIMS {
+            let mapper = Arc::new(
+                AttributeMapper::from_toml(&format!(
+                    r#"
+                    [attributes.authenticating_authority]
+                    openid = ["{reserved}"]
+                    "#
+                ))
+                .unwrap(),
+            );
+            let bx = BuildContext {
+                name: "OIDC".to_string(),
+                base_url: "https://proxy.example.com".to_string(),
+                config: serde_json::json!({}),
+                attribute_mapper: mapper,
+                http_client: Arc::new(NullHttpClient),
+                secret: "test-secret".to_string(),
+                previous_secrets: Vec::new(),
+            };
+
+            let error = match OidcFrontend::build(&bx) {
+                Ok(_) => panic!("reserved claim {reserved} was accepted"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(&format!(
+                    "authenticating_authority cannot map to reserved ID-token claim {reserved}"
+                )),
+                "unexpected error for {reserved}: {error}"
+            );
+        }
+    }
 }

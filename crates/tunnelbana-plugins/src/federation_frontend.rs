@@ -172,6 +172,10 @@ pub struct FederationFrontend {
 impl FederationFrontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
         let cfg: FederationFrontendConfig = bx.parse_config()?;
+        crate::oidc_common::validate_authenticating_authority_mapping(
+            &bx.attribute_mapper,
+            &bx.name,
+        )?;
         let module_base = bx.module_base();
         // The entity identifier (iss/sub of the entity configuration, and the OP
         // issuer) defaults to the module base but may be overridden — e.g. to the
@@ -197,6 +201,7 @@ impl FederationFrontend {
 
         let mut metadata = ProviderMetadata::new(issuer.clone(), &module_base);
         metadata.id_token_signing_alg_values_supported = vec![op_key.alg().as_str().to_string()];
+        crate::oidc_common::advertise_mapped_claims(&mut metadata, &bx.attribute_mapper);
         // Federation OP advertises automatic registration + request objects.
         metadata.extra.insert(
             "client_registration_types_supported".into(),
@@ -619,17 +624,25 @@ impl Frontend for FederationFrontend {
         let req = self
             .load_authz_request(ctx)
             .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
-        let external = self.mapper.from_internal("openid", &response.attributes);
+        let mut external = self.mapper.from_internal("openid", &response.attributes);
         let sub = response
             .subject_id
             .clone()
             .or_else(|| self.mapper.compose_subject_id(&response.attributes))
             .ok_or_else(|| Error::Authn("no subject identifier available".into()))?;
         let acr = response.auth_info.auth_class_ref.clone();
-        match self
-            .provider
-            .authorization_redirect(&req, &sub, &external, acr)
-        {
+        let extra_claims = crate::oidc_common::authenticating_authority_claims(
+            &self.mapper,
+            &mut external,
+            response.auth_info.issuer.as_deref(),
+        );
+        match self.provider.authorization_redirect_with_claims(
+            &req,
+            &sub,
+            &external,
+            acr,
+            &extra_claims,
+        ) {
             Ok(r) => Ok(r),
             Err(e) => Ok(e.to_redirect(&req.redirect_uri)),
         }
@@ -652,6 +665,40 @@ impl Frontend for FederationFrontend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tunnelbana_core::plugin::NullHttpClient;
+
+    #[test]
+    fn frontend_build_rejects_reserved_authenticating_authority_claim_name() {
+        let mapper = Arc::new(
+            AttributeMapper::from_toml(
+                r#"
+                [attributes.authenticating_authority]
+                openid = ["sub"]
+                "#,
+            )
+            .unwrap(),
+        );
+        let bx = BuildContext {
+            name: "OIDFed".to_string(),
+            base_url: "https://proxy.example.com".to_string(),
+            config: serde_json::json!({ "federation": {} }),
+            attribute_mapper: mapper,
+            http_client: Arc::new(NullHttpClient),
+            secret: "test-secret".to_string(),
+            previous_secrets: Vec::new(),
+        };
+
+        let error = match FederationFrontend::build(&bx) {
+            Ok(_) => panic!("reserved claim was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("authenticating_authority cannot map to reserved ID-token claim sub"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn federation_cache_never_outlives_signed_trust() {
