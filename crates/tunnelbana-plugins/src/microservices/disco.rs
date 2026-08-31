@@ -138,7 +138,9 @@ impl DiscoToTargetIssuer {
                         return Err(Error::Config(format!(
                             "disco_to_target_issuer {}: allowed_issuers \
                              entries for requester {requester:?} must be \
-                             non-empty entity ids without control characters",
+                             non-empty, at most {MAX_ENTITY_ID_LEN} \
+                             characters, and contain no ASCII control \
+                             characters",
                             bx.name
                         )));
                     }
