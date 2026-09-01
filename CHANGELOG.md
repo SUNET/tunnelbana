@@ -42,6 +42,17 @@
   change and has to log in again. Plan the rollout accordingly (the state
   cookie only spans an in-flight login/discovery flow, so the practical
   blast radius is flows crossing the deploy).
+- **Micro-service state namespaces are kind-prefixed** (review finding on
+  #26): `disco_to_target_issuer` and `accr` store their per-flow state under
+  `disco_to_target_issuer:{name}` / `accr:{name}` instead of the bare
+  instance name. Config only deduplicates names within the micro-service
+  list and the router deliberately supports reusing a name across plugin
+  kinds, so a micro-service named like a frontend (e.g. `OIDC`) previously
+  shared that frontend's state namespace - and the consume-once
+  `clear_namespace` on the discovery return (or the ACCR response leg)
+  deleted the frontend's own flow data, breaking final response rendering.
+  Only transient in-flight state is affected by the rename; flows crossing
+  the deploy restart their discovery/ACCR hop.
 - **Seal failures now fail the request:** a response whose state cookie
   cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
   error with a state-clearing cookie, instead of being sent without a

@@ -52,6 +52,14 @@ struct AccrConfig {
     allow_stronger_accr_fallback: bool,
 }
 
+/// Prefix for this service's state namespace (`{prefix}{instance name}`, not
+/// the bare instance name): config only deduplicates names within the
+/// microservice list and the router supports name reuse across plugin kinds,
+/// so a bare-name namespace could collide with a same-named frontend/backend
+/// and the whole-namespace `clear_namespace` on the response leg would wipe
+/// that module's flow state too.
+const NAMESPACE_PREFIX: &str = "accr:";
+
 /// Negotiates AuthnContextClassRef between the SP request and the upstream IdP
 /// (SATOSA/eduID: `accr`).
 pub struct Accr {
@@ -66,6 +74,11 @@ pub struct Accr {
 }
 
 impl Accr {
+    /// This instance's state namespace: see [`NAMESPACE_PREFIX`].
+    fn state_namespace(&self) -> String {
+        format!("{NAMESPACE_PREFIX}{}", self.name)
+    }
+
     pub fn build(bx: &BuildContext) -> Result<Box<dyn MicroService>> {
         let cfg: AccrConfig = bx.parse_config()?;
         if cfg.supported_accr_sorted_by_prio.is_empty() {
@@ -216,7 +229,7 @@ impl MicroService for Accr {
 
         // Save the filtered request for the response leg.
         ctx.state.set_value(
-            &self.name,
+            &self.state_namespace(),
             "requested_accr",
             json_strings(&requested_filtered),
         );
@@ -230,7 +243,7 @@ impl MicroService for Accr {
     ) -> Result<InternalData> {
         let requested: Vec<String> = ctx
             .state
-            .get_value(&self.name, "requested_accr")
+            .get_value(&self.state_namespace(), "requested_accr")
             .and_then(|v| v.as_array())
             .map(|a| {
                 a.iter()
@@ -293,7 +306,7 @@ impl MicroService for Accr {
             }
         }
 
-        ctx.state.clear_namespace(&self.name);
+        ctx.state.clear_namespace(&self.state_namespace());
         Ok(data)
     }
 }

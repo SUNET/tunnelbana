@@ -14,6 +14,15 @@ use super::level;
 
 /// Key within this service's state namespace holding the suspended flow.
 const KEY_SNAPSHOT: &str = "snapshot";
+/// Prefix for this service's state namespace. The namespace is
+/// `{prefix}{instance name}` rather than the bare instance name: config only
+/// deduplicates names *within* the microservice list, and the router
+/// deliberately supports reusing a name across plugin kinds - so a disco
+/// instance named like a frontend (e.g. `OIDC`) would otherwise share that
+/// frontend's namespace, and the whole-namespace `clear_namespace` on resume
+/// would wipe the frontend's own flow state (its `authz_request`) along with
+/// the snapshot.
+const NAMESPACE_PREFIX: &str = "disco_to_target_issuer:";
 /// Discovery services return the chosen IdP in this query parameter
 /// (SAML IdP Discovery Protocol).
 const PARAM_ENTITY_ID: &str = "entityID";
@@ -85,6 +94,11 @@ pub struct DiscoToTargetIssuer {
 }
 
 impl DiscoToTargetIssuer {
+    /// This instance's state namespace: see [`NAMESPACE_PREFIX`].
+    fn state_namespace(&self) -> String {
+        format!("{NAMESPACE_PREFIX}{}", self.name)
+    }
+
     pub fn build(bx: &BuildContext) -> Result<Box<dyn MicroService>> {
         let cfg: DiscoToTargetIssuerConfig = bx.parse_config()?;
         if cfg.disco_endpoints.is_empty() {
@@ -181,7 +195,8 @@ impl MicroService for DiscoToTargetIssuer {
                  {MAX_SNAPSHOT_BYTES}-byte state-cookie budget"
             )));
         }
-        ctx.state.set_value(&self.name, KEY_SNAPSHOT, snapshot);
+        ctx.state
+            .set_value(&self.state_namespace(), KEY_SNAPSHOT, snapshot);
         Ok(data)
     }
 
@@ -209,7 +224,7 @@ impl MicroService for DiscoToTargetIssuer {
 
         let snapshot = ctx
             .state
-            .get_value(&self.name, KEY_SNAPSHOT)
+            .get_value(&self.state_namespace(), KEY_SNAPSHOT)
             .cloned()
             .ok_or_else(|| Error::Authn("no discovery flow in progress".into()))?;
 
@@ -229,7 +244,7 @@ impl MicroService for DiscoToTargetIssuer {
             Err(e) => {
                 // A corrupt snapshot can never resume; drop it so the user
                 // restarts cleanly instead of replaying the same error.
-                ctx.state.clear_namespace(&self.name);
+                ctx.state.clear_namespace(&self.state_namespace());
                 return Err(e);
             }
         };
@@ -254,7 +269,7 @@ impl MicroService for DiscoToTargetIssuer {
         // Consume-once: the resealed cookie on this response no longer
         // carries the snapshot, so a replayed discovery return fails at the
         // lookup above.
-        ctx.state.clear_namespace(&self.name);
+        ctx.state.clear_namespace(&self.state_namespace());
 
         ctx.target_frontend = target_frontend;
         ctx.decorate(KEY_TARGET_ENTITYID, serde_json::Value::String(issuer));
@@ -323,7 +338,10 @@ mod tests {
         assert_eq!(out.requester.as_deref(), Some("sp-a"));
         assert!(out.is_passive);
 
-        let snapshot = c.state.get_value("disco", KEY_SNAPSHOT).unwrap();
+        let snapshot = c
+            .state
+            .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+            .unwrap();
         assert_eq!(
             snapshot.get("target_frontend").and_then(|v| v.as_str()),
             Some("OIDC")
@@ -363,7 +381,10 @@ mod tests {
             Some("https://idp.example")
         );
         // Consume-once: the snapshot is gone.
-        assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_none());
+        assert!(ret
+            .state
+            .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+            .is_none());
 
         // A replay with the post-resume state fails.
         let mut replay = ctx();
@@ -376,6 +397,43 @@ mod tests {
             .handle_endpoint(&mut replay, "Saml2/disco")
             .await
             .is_err());
+    }
+
+    /// The state namespace is `disco_to_target_issuer:{name}`, never the bare
+    /// instance name: config only dedupes names within the microservice list
+    /// and the router supports cross-kind name reuse, so a disco instance
+    /// named like a frontend would otherwise share that frontend's namespace
+    /// and the consume-once `clear_namespace` on resume would wipe the
+    /// frontend's own flow state (e.g. the OIDC frontend's `authz_request`).
+    #[tokio::test]
+    async fn namespace_does_not_collide_with_same_named_module() {
+        let svc = service(); // instance name: "disco"
+        let mut c = ctx();
+        // A same-named module of another kind stored its own flow state under
+        // the bare instance name before disco ran.
+        c.state.set_str("disco", "authz_request", "frontend-data");
+
+        let _ = svc
+            .process_request(&mut c, InternalData::request("sp-a"))
+            .await
+            .unwrap();
+
+        let mut ret = ctx();
+        ret.state = c.state;
+        ret.request
+            .query
+            .insert("entityID".into(), "https://idp.example".into());
+        svc.handle_endpoint(&mut ret, "Saml2/disco").await.unwrap();
+
+        // The snapshot was consumed, the sibling module's state survived.
+        assert!(ret
+            .state
+            .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+            .is_none());
+        assert_eq!(
+            ret.state.get_str("disco", "authz_request").as_deref(),
+            Some("frontend-data")
+        );
     }
 
     #[tokio::test]
@@ -401,7 +459,10 @@ mod tests {
             }
             assert!(svc.handle_endpoint(&mut ret, "Saml2/disco").await.is_err());
             // The user can still be sent through discovery again.
-            assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_some());
+            assert!(ret
+                .state
+                .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+                .is_some());
         }
     }
 
@@ -483,7 +544,10 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("allowed_issuers"));
-        assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_some());
+        assert!(ret
+            .state
+            .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+            .is_some());
         assert!(ret.decoration(KEY_TARGET_ENTITYID).is_none());
 
         // A listed issuer resumes as usual.
@@ -544,7 +608,10 @@ mod tests {
                 "requester {requester} picking {issuer}"
             );
             if !accepted {
-                assert!(ret.state.get_value("disco", KEY_SNAPSHOT).is_some());
+                assert!(ret
+                    .state
+                    .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+                    .is_some());
                 assert!(ret.decoration(KEY_TARGET_ENTITYID).is_none());
             }
         }
@@ -608,7 +675,10 @@ mod tests {
         };
         assert!(err.to_string().contains("state-cookie budget"));
         // Nothing was written: no half-started discovery flow.
-        assert!(c.state.get_value("disco", KEY_SNAPSHOT).is_none());
+        assert!(c
+            .state
+            .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+            .is_none());
 
         // A normal-sized request still snapshots fine.
         let mut c = ctx();
@@ -616,7 +686,10 @@ mod tests {
             .process_request(&mut c, InternalData::request("sp-a"))
             .await
             .is_ok());
-        assert!(c.state.get_value("disco", KEY_SNAPSHOT).is_some());
+        assert!(c
+            .state
+            .get_value(&format!("{NAMESPACE_PREFIX}disco"), KEY_SNAPSHOT)
+            .is_some());
     }
 
     /// The SAML entityID cap is 1024 *characters*; `is_valid_entity_id` must

@@ -50,7 +50,10 @@ flow the way frontend/backend endpoints do via `FrontendAction`/`BackendAction`.
 **Service:** `disco_to_target_issuer` ports SATOSA's `DiscoToTargetIssuer`:
 
 - On `process_request` it snapshots `{target_frontend, internal_data}` into
-  its own state-cookie namespace and passes the data through unchanged. The
+  its own state-cookie namespace (`disco_to_target_issuer:{instance name}` -
+  kind-prefixed, because instance names may be reused across plugin kinds and
+  the consume-once namespace clear on resume must never wipe a same-named
+  frontend/backend's flow state) and passes the data through unchanged. The
   snapshot rides the cookie that the default backend's discovery redirect
   already sets.
 - `disco_endpoints` is a list of **exact literal paths** (deliberate
