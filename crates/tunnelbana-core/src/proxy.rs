@@ -488,6 +488,13 @@ mod tests {
         )
     }
 
+    /// The happy-path resume contract: a `ResumeRequest` from a mid-chain
+    /// micro-service endpoint (1) runs only the request-path services listed
+    /// *after* the resuming one, (2) hands the restored `InternalData` to
+    /// the backend, and (3) persists the restored requester into base state
+    /// - the same bookkeeping the initial frontend dispatch performs - so
+    /// the later response path (which refills `response.requester` from base
+    /// state) sees the requester the resumed request ran under.
     #[tokio::test]
     async fn resume_runs_only_later_services_and_reaches_backend() {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -564,7 +571,18 @@ mod tests {
             ctx: &mut Context,
             _route_id: &str,
         ) -> crate::error::Result<MicroServiceAction> {
-            ctx.state.set_str("stuffer", "big", "x".repeat(8192));
+            // Incompressible filler (hex of a hash chain): the deflate step
+            // inside the sealer must not squeeze it under the cookie limit.
+            use sha2::{Digest, Sha256};
+            let mut chunk: [u8; 32] = [0; 32];
+            let mut big = String::new();
+            while big.len() < 16 * 1024 {
+                chunk = Sha256::digest(chunk).into();
+                for b in chunk {
+                    big.push_str(&format!("{b:02x}"));
+                }
+            }
+            ctx.state.set_str("stuffer", "big", big);
             Ok(MicroServiceAction::Respond(Response::redirect(
                 "https://disco.example/ds",
             )))

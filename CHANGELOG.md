@@ -28,6 +28,13 @@
   fallback routing) or an explicit `allow_any_issuer = true`. A 2 KB
   snapshot cap fails oversized flows with a protocol error before the
   discovery redirect (review findings on #26).
+- **State cookie compression (ADR 0054):** the sealed state envelope is
+  deflate-compressed before JWE encryption (typically 40-60% smaller),
+  roughly doubling the effective headroom under the 4 KB browser cookie cap.
+  Compression is inside the seal, not the JWE `zip` header (which grindvakt
+  rejects); AEAD authentication runs before inflation and a 64 KB inflation
+  cap adds defense in depth. Cookies sealed by earlier versions keep
+  unsealing until they expire - no flag day.
 - **Seal failures now fail the request:** a response whose state cookie
   cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
   error with a state-clearing cookie, instead of being sent without a

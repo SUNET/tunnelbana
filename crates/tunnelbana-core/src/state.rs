@@ -3,8 +3,13 @@
 //! All per-flow session data lives in the cookie — there is no server-side
 //! store, so any worker can serve any request (matching SATOSA's design, but
 //! with a clean modern AEAD scheme instead of LZMA+AES-CBC). The state is a
-//! JSON object encrypted as a JWE compact token (`dir` + `A256GCM`) using a
-//! 256-bit key derived from the configured encryption secret via HKDF-SHA256.
+//! JSON object, deflate-compressed and then encrypted as a JWE compact token
+//! (`dir` + `A256GCM`) using a 256-bit key derived from the configured
+//! encryption secret via HKDF-SHA256. Compression happens *inside* the seal
+//! (not via the JWE `zip` header, which grindvakt rejects for tokens crossing
+//! trust boundaries): AEAD authentication runs before decompression, so only
+//! self-sealed bytes ever reach the decompressor, and inflation is capped as
+//! defense in depth.
 //!
 //! The sealed payload is an [`Envelope`] carrying an `iat` timestamp and a
 //! format version alongside the state map, so a captured cookie is only valid
@@ -31,6 +36,18 @@ const MAX_COOKIE_BYTES: usize = 4096;
 
 /// Current sealed-envelope format version.
 const ENVELOPE_VERSION: u8 = 1;
+
+/// Plaintext format tag prefixed to a deflate-compressed envelope. Legacy
+/// (pre-compression) plaintexts are bare JSON and start with `{`, so the two
+/// formats are distinguishable byte-for-byte and cookies sealed before a
+/// deploy keep unsealing.
+const PLAINTEXT_TAG_DEFLATE: u8 = 0x02;
+
+/// Upper bound on the decompressed envelope size. The decompressor only ever
+/// sees AEAD-authenticated bytes this proxy sealed itself, so this is defense
+/// in depth against a decompression bomb, not a load-bearing control; the
+/// cookie transport already caps the compressed input at ~4 KB.
+const MAX_INFLATED_BYTES: usize = 64 * 1024;
 
 /// Maximum accepted clock skew for an envelope `iat` ahead of the local clock.
 /// A state cookie dated further into the future than this is rejected rather
@@ -137,6 +154,49 @@ fn derive_key(secret: &str) -> Vec<u8> {
     hk.expand(HKDF_INFO, &mut okm)
         .expect("32 is a valid HKDF-SHA256 output length");
     okm.to_vec()
+}
+
+/// Deflate-compress a serialized envelope for sealing (ADR 0054).
+///
+/// Returns `[PLAINTEXT_TAG_DEFLATE] || deflate(json)`. The tag byte is what
+/// lets [`StateSealer::decode_envelope`] tell this format apart from a legacy
+/// bare-JSON plaintext (which always starts with `{`), so both formats can be
+/// unsealed during a rolling upgrade. The result is what gets JWE-encrypted;
+/// compression is deliberately *inside* the seal rather than a JWE `zip`
+/// header, which grindvakt rejects.
+fn compress_envelope(json: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut encoder = flate2::write::DeflateEncoder::new(
+        vec![PLAINTEXT_TAG_DEFLATE],
+        flate2::Compression::default(),
+    );
+    encoder
+        .write_all(json)
+        .and_then(|()| encoder.finish())
+        .map_err(|e| Error::State(format!("state compression failed: {e}")))
+}
+
+/// Inflate a deflate-compressed envelope back to its JSON bytes.
+///
+/// The input is the decrypted plaintext with the format tag already stripped.
+/// Reading stops at [`MAX_INFLATED_BYTES`] + 1: the `take` bounds how much a
+/// (theoretically) pathological stream could allocate, and landing past the
+/// cap is reported as an error rather than truncated - a truncated envelope
+/// must never parse as a smaller, valid one. Errors are returned as strings
+/// because the caller only logs them and falls back to an empty state.
+fn inflate_envelope(deflated: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut json = Vec::new();
+    flate2::read::DeflateDecoder::new(deflated)
+        .take(MAX_INFLATED_BYTES as u64 + 1)
+        .read_to_end(&mut json)
+        .map_err(|e| e.to_string())?;
+    if json.len() > MAX_INFLATED_BYTES {
+        return Err(format!(
+            "decompressed state exceeds the {MAX_INFLATED_BYTES}-byte cap"
+        ));
+    }
+    Ok(json)
 }
 
 /// Current time as Unix seconds (saturating at 0 if the clock is before epoch).
@@ -274,7 +334,25 @@ impl StateSealer {
     /// Parse a decrypted envelope, enforcing version and freshness. Any problem
     /// yields a fresh empty state (fail-closed to "unauthenticated").
     fn decode_envelope(&self, plaintext: &[u8]) -> State {
-        let envelope: Envelope = match serde_json::from_slice(plaintext) {
+        // Dispatch on the plaintext format: legacy (pre-compression) cookies
+        // are bare JSON and start with `{`; current cookies carry the deflate
+        // tag. The bytes are AEAD-authenticated, so only self-sealed data is
+        // ever inflated.
+        let json: std::borrow::Cow<'_, [u8]> = match plaintext.first() {
+            Some(b'{') => std::borrow::Cow::Borrowed(plaintext),
+            Some(&PLAINTEXT_TAG_DEFLATE) => match inflate_envelope(&plaintext[1..]) {
+                Ok(json) => std::borrow::Cow::Owned(json),
+                Err(e) => {
+                    tracing::debug!(error = %e, "state cookie decrypted but failed to inflate");
+                    return State::new();
+                }
+            },
+            _ => {
+                tracing::debug!("state cookie decrypted but plaintext format unrecognized");
+                return State::new();
+            }
+        };
+        let envelope: Envelope = match serde_json::from_slice(&json) {
             Ok(e) => e,
             Err(e) => {
                 tracing::debug!(error = %e, "state cookie decrypted but envelope invalid");
@@ -326,7 +404,8 @@ impl StateSealer {
             iat: issued_at,
             data: state.data.clone(),
         };
-        let plaintext = serde_json::to_vec(&envelope)?;
+        let json = serde_json::to_vec(&envelope)?;
+        let plaintext = compress_envelope(&json)?;
         let token = jose_rs::jwe::encrypt(
             &self.keys[0],
             &plaintext,
@@ -578,6 +657,137 @@ mod tests {
         // Dropped when not secure (so the prefix's Secure requirement holds).
         let insecure = secure.with_secure(false);
         assert_eq!(insecure.cookie_name(), "TB_STATE");
+    }
+
+    /// Rolling-upgrade compatibility (ADR 0054): a cookie sealed by a
+    /// pre-compression proxy contains a bare JSON envelope (first byte `{`).
+    /// `unseal` must recognize that legacy plaintext and restore the state,
+    /// so in-flight logins survive a deploy that introduces compression.
+    #[test]
+    fn legacy_uncompressed_cookie_still_unseals() {
+        let sealer = StateSealer::new("a-long-enough-test-secret-value", "TB_STATE")
+            .with_secure(false)
+            .with_ttl_seconds(Some(3600));
+
+        // A cookie sealed before compression landed: bare JSON plaintext.
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            iat: now_unix(),
+            data: {
+                let mut m = Map::new();
+                m.insert("ns".to_string(), serde_json::json!({ "k": "v" }));
+                m
+            },
+        };
+        let plaintext = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(plaintext[0], b'{');
+        let token = jose_rs::jwe::encrypt(
+            &sealer.keys[0],
+            &plaintext,
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
+
+        let restored = sealer.unseal(Some(&token));
+        assert_eq!(restored.get_str("ns", "k").as_deref(), Some("v"));
+    }
+
+    /// The point of ADR 0054: state whose bare-JSON JWE would exceed the
+    /// 4096-byte browser cookie cap seals successfully once deflated, and
+    /// still round-trips intact. The payload mimics real state (many long,
+    /// similar URLs), which is exactly what deflate compresses well.
+    #[test]
+    fn compression_shrinks_the_sealed_cookie() {
+        let sealer =
+            StateSealer::new("a-long-enough-test-secret-value", "TB_STATE").with_secure(false);
+        // Repetitive, URL-heavy state whose bare-JSON JWE would blow the 4 KB
+        // cookie budget; deflated it seals and round-trips.
+        let mut state = State::new();
+        for i in 0..40 {
+            state.set_str(
+                "requests",
+                &format!("entity-{i}"),
+                format!("https://very-long-idp-hostname-{i}.federation.example.org/idp/profile/SAML2/Redirect/SSO"),
+            );
+        }
+        let uncompressed_len = serde_json::to_vec(state.get("requests").unwrap())
+            .unwrap()
+            .len();
+        assert!(
+            uncompressed_len > 3500,
+            "payload too small: {uncompressed_len}"
+        );
+
+        let cookie = sealer.seal(&state).unwrap();
+        assert!(cookie.len() < uncompressed_len, "no compression win");
+        let token = cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("TB_STATE=")
+            .unwrap();
+        let restored = sealer.unseal(Some(token));
+        assert_eq!(
+            restored.get_str("requests", "entity-39").as_deref(),
+            Some("https://very-long-idp-hostname-39.federation.example.org/idp/profile/SAML2/Redirect/SSO")
+        );
+    }
+
+    /// Defense-in-depth check on the inflation cap: a correctly tagged,
+    /// correctly encrypted plaintext that would decompress past
+    /// `MAX_INFLATED_BYTES` is discarded (empty, unauthenticated state)
+    /// instead of being buffered without bound. Only the proxy itself could
+    /// ever produce such a token (AEAD blocks forgeries), so this guards
+    /// against our own bugs, not attackers.
+    #[test]
+    fn oversized_inflation_yields_empty_state() {
+        use std::io::Write;
+        let sealer =
+            StateSealer::new("a-long-enough-test-secret-value", "TB_STATE").with_secure(false);
+
+        // A (self-sealed-format) plaintext that inflates past the cap must be
+        // dropped, not buffered without bound.
+        let bomb_json = format!(
+            r#"{{"v":1,"iat":{},"data":{{"ns":{{"k":"{}"}}}}}}"#,
+            now_unix(),
+            "x".repeat(MAX_INFLATED_BYTES)
+        );
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            vec![PLAINTEXT_TAG_DEFLATE],
+            flate2::Compression::default(),
+        );
+        encoder.write_all(bomb_json.as_bytes()).unwrap();
+        let plaintext = encoder.finish().unwrap();
+        let token = jose_rs::jwe::encrypt(
+            &sealer.keys[0],
+            &plaintext,
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
+
+        let restored = sealer.unseal(Some(&token));
+        assert!(restored.get_str("ns", "k").is_none());
+    }
+
+    /// A decrypted plaintext that is neither legacy JSON (`{`) nor the
+    /// deflate format (`0x02`) - e.g. sealed by some future version - is
+    /// treated like any other bad envelope: fail closed to an empty state
+    /// rather than guessing at the format.
+    #[test]
+    fn unrecognized_plaintext_format_yields_empty_state() {
+        let sealer =
+            StateSealer::new("a-long-enough-test-secret-value", "TB_STATE").with_secure(false);
+        let token = jose_rs::jwe::encrypt(
+            &sealer.keys[0],
+            &[0x7f, 1, 2, 3],
+            JweAlgorithm::Dir,
+            JweEncryption::A256GCM,
+        )
+        .unwrap();
+        let restored = sealer.unseal(Some(&token));
+        assert!(restored.get_str("ns", "k").is_none());
     }
 
     #[test]

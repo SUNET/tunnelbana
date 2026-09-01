@@ -52,3 +52,4 @@ accepted — supersede with a new record rather than editing history.
 | [0051](0051-saml-frontend-sanitized-rejections.md) | Sanitized rejection output in the SAML2 frontend | Accepted |
 | [0052](0052-embedded-cpython-microservices.md) | Embedded CPython micro-services | Accepted |
 | [0053](0053-disco-to-target-issuer-flow-resume.md) | `disco_to_target_issuer` and flow-resuming micro-service endpoints | Accepted |
+| [0054](0054-state-cookie-deflate-compression.md) | Deflate compression inside the sealed state cookie | Accepted |

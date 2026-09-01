@@ -449,6 +449,10 @@ mod tests {
         }
     }
 
+    /// Basic allowlist behavior for a requester *with* a rule set: an issuer
+    /// outside it is rejected before the resume - leaving the snapshot in
+    /// place so the user can pick again, and the decoration unset - while a
+    /// listed issuer resumes and decorates `KEY_TARGET_ENTITYID`.
     #[tokio::test]
     async fn allowed_issuers_gates_the_disco_return() {
         let svc = DiscoToTargetIssuer::build(&bx(
@@ -495,12 +499,17 @@ mod tests {
         );
     }
 
+    /// The allowlist authorizes `(issuer, requester)` pairs, not issuers
+    /// globally: each requester may only resume with an issuer from its own
+    /// rule set, and a requester with no rule set at all is rejected for
+    /// every issuer. Without this scoping, the target-issuer decoration
+    /// would survive `custom_routing`'s requester/default fallback and let
+    /// any requester authenticate at any listed issuer via the fallback
+    /// backend's metadata resolution (see the field docs on
+    /// `allowed_issuers`).
     #[tokio::test]
     async fn allowed_issuers_is_requester_scoped() {
-        // sp-b's flows may only pick cie; an issuer allowed for sp-a is not
-        // globally allowed, and a requester with no rule set at all fails
-        // closed - otherwise the decoration would survive into fallback
-        // routing and the default backend could resolve the issuer anyway.
+        // sp-a and sp-b each get one issuer; sp-c is deliberately absent.
         let svc = DiscoToTargetIssuer::build(&bx(
             "disco",
             serde_json::json!({
@@ -541,10 +550,13 @@ mod tests {
         }
     }
 
+    /// The requester lookup follows the shared `level()` convention (SATOSA's
+    /// `get_dict_defaults`): exact requester key, else `""`, else
+    /// `"default"`. An unlisted requester therefore inherits the `""` rule
+    /// set, while a requester with an exact entry gets *only* that entry -
+    /// rule sets are selected, never merged with the default.
     #[tokio::test]
     async fn allowed_issuers_empty_key_is_the_default_rule_set() {
-        // SATOSA get_dict_defaults semantics: exact requester, else "",
-        // else "default".
         let svc = DiscoToTargetIssuer::build(&bx(
             "disco",
             serde_json::json!({
@@ -607,11 +619,16 @@ mod tests {
         assert!(c.state.get_value("disco", KEY_SNAPSHOT).is_some());
     }
 
+    /// The SAML entityID cap is 1024 *characters*; `is_valid_entity_id` must
+    /// not measure UTF-8 bytes (`String::len`), which would reject valid
+    /// non-ASCII issuers early. Exercises the full path: a 1024-character
+    /// two-byte-per-character issuer (2048 bytes) is accepted both by config
+    /// validation and by the discovery-return filter, and ends up in the
+    /// target-entity decoration. The over-limit counterparts live in
+    /// `build_validates_allowed_issuers` and
+    /// `missing_or_invalid_entity_id_is_rejected_and_snapshot_kept`.
     #[tokio::test]
     async fn entity_id_limit_counts_characters_not_bytes() {
-        // 1024 two-byte characters: within the SAML character cap even
-        // though it is 2048 UTF-8 bytes - accepted in config and at the
-        // discovery return alike.
         let issuer = "å".repeat(MAX_ENTITY_ID_LEN);
         let svc = DiscoToTargetIssuer::build(&bx(
             "disco",

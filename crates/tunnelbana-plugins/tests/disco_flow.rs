@@ -332,10 +332,14 @@ fn signed_idp_response(req_id: &str, idp_entity: &str, sp_entity: &str, acs_url:
     base64::engine::general_purpose::STANDARD.encode(signed.as_bytes())
 }
 
+/// OIDC authorization URL for the default test client `rp-1`.
 fn authz_url() -> String {
     authz_url_for("rp-1")
 }
 
+/// OIDC authorization URL (code + PKCE) for the given registered client.
+/// Both test clients share the redirect URI; only the requester identity
+/// differs, which is what the requester-scoped allowlist tests need.
 fn authz_url_for(client_id: &str) -> String {
     let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
     let challenge = pkce::s256_challenge(verifier);
@@ -472,14 +476,18 @@ async fn unlisted_issuer_fails_closed_at_the_disco_return() {
     assert!(location(&r3).starts_with(SPID_SSO_URL));
 }
 
+/// End-to-end proof that the `allowed_issuers` allowlist is enforced per
+/// `(issuer, requester)` pair, not globally. `rp-2` is a registered client
+/// with no `allowed_issuers` rule set; an issuer that `rp-1` may pick must
+/// not resume `rp-2`'s flow. Without the requester scoping, the
+/// target-issuer decoration would survive into `custom_routing`'s
+/// requester/default fallback and the default backend's MDQ metadata
+/// resolution would authenticate `rp-2` at that issuer anyway.
 #[tokio::test]
 async fn issuer_allowed_for_another_requester_fails_closed() {
     let proxy = proxy().await;
 
-    // rp-2 has no allowed_issuers rule set. An issuer that rp-1 may pick
-    // must not resume rp-2's flow: without the requester scoping the
-    // target-issuer decoration would survive into requester/default fallback
-    // routing and the default backend's MDQ metadata resolution.
+    // Start a flow as rp-2, reaching the discovery redirect as usual.
     let r1 = proxy.run(req(&authz_url_for("rp-2"), "GET", None)).await;
     assert_eq!(r1.status, 302, "{}", String::from_utf8_lossy(&r1.body));
     let cookie1 = set_cookie(&r1).expect("state cookie on disco redirect");
