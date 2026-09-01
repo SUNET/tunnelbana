@@ -405,6 +405,19 @@ impl StateSealer {
             data: state.data.clone(),
         };
         let json = serde_json::to_vec(&envelope)?;
+        // Enforce the inflation cap at seal time too: a highly compressible
+        // envelope past the cap could still deflate under the cookie budget,
+        // seal "successfully", and then be unconditionally dropped by the next
+        // unseal - a silently unusable cookie that strands the flow. Failing
+        // here turns that into an explicit error on the response that caused
+        // it.
+        if json.len() > MAX_INFLATED_BYTES {
+            return Err(Error::State(format!(
+                "state envelope is {} bytes, exceeds the {MAX_INFLATED_BYTES}-byte \
+                 inflation cap; reduce the amount of state stored in the flow",
+                json.len()
+            )));
+        }
         let plaintext = compress_envelope(&json)?;
         let token = jose_rs::jwe::encrypt(
             &self.keys[0],
@@ -769,6 +782,25 @@ mod tests {
 
         let restored = sealer.unseal(Some(&token));
         assert!(restored.get_str("ns", "k").is_none());
+    }
+
+    /// The inflation cap is enforced at seal time too: a highly compressible
+    /// envelope past `MAX_INFLATED_BYTES` (e.g. ~64 KiB of repeated data
+    /// deflates to a handful of bytes) would otherwise seal under the cookie
+    /// budget and then be unconditionally dropped by the next unseal - a
+    /// silently unusable cookie. Sealing it must fail loudly instead.
+    #[test]
+    fn oversized_envelope_fails_at_seal_time() {
+        let sealer =
+            StateSealer::new("a-long-enough-test-secret-value", "TB_STATE").with_secure(false);
+        let mut state = State::new();
+        // Repeated data past the cap: compresses to well under 4 KB.
+        state.set_str("ns", "k", "x".repeat(MAX_INFLATED_BYTES + 1));
+        let err = sealer.seal(&state).unwrap_err();
+        assert!(
+            err.to_string().contains("inflation cap"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A decrypted plaintext that is neither legacy JSON (`{`) nor the
