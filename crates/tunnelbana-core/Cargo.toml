@@ -20,6 +20,7 @@ regex.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
 time.workspace = true
+flate2 = "1"
 
 [dev-dependencies]
 tokio.workspace = true

@@ -27,8 +27,9 @@ pub trait MicroService: Send + Sync {
     /// Optional own endpoints (e.g. a consent callback page).
     fn register_endpoints(&self) -> Vec<Route> { Vec::new() }
 
-    /// Inbound hit on one of those endpoints.
-    async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<Response>;
+    /// Inbound hit on one of those endpoints. Default: "not implemented" error.
+    async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str)
+        -> Result<MicroServiceAction>;
 }
 ```
 
@@ -88,8 +89,13 @@ Key facts that follow from this:
   that; don't reach into protocol-specific structures.
 - **Own endpoints are dispatched directly.** If a micro-service registers
   routes, an inbound hit goes straight to its `handle_endpoint` (the request/
-  response transform chain is not involved). This is how a consent service would
-  serve and handle its own approval page.
+  response transform chain is not involved). The handler returns a
+  `MicroServiceAction`: `Respond(response)` for a complete HTTP response (how
+  a consent service would serve its approval page), or
+  `ResumeRequest { request }` to re-enter the request path with restored flow
+  data - the proxy then runs the micro-services listed *after* the resuming
+  one and dispatches to a backend as usual. `disco_to_target_issuer` uses the
+  resume action to route a flow after an external discovery hop.
 
 ## Decorations: passing signals between services
 
@@ -100,9 +106,9 @@ current HTTP request. Two well-known keys exist (ADR 0013), exported from
 `tunnelbana_core::context`:
 
 - **`KEY_TARGET_ENTITYID`** - "the user wants to authenticate at this
-  upstream entity". Written by `idp_hinting` (or a future discovery-style
-  service); read by `custom_routing`'s issuer rules and by the SAML2
-  backend's MDQ mode when picking the target IdP. First writer wins.
+  upstream entity". Written by `idp_hinting` or `disco_to_target_issuer`;
+  read by `custom_routing`'s issuer rules and by the SAML2 backend's MDQ mode
+  when picking the target IdP. First writer wins.
 - **`KEY_ERROR_REDIRECT`** - an absolute URL. If any later step fails, the
   proxy answers with a **302 to this URL** instead of rendering a protocol
   error. Set it together with returning `Err(..)` to implement a
@@ -135,6 +141,7 @@ and worth reading as templates. Full config examples are in the
 | `accr` | request + response | Negotiates the AuthnContextClassRef (LoA). See [below](#accr-authncontextclassref-loa-negotiation). |
 | `custom_routing` | request | Pins `ctx.target_backend` from the target issuer or the `requester`, with an optional default. See [below](#routing-the-flow-custom_routing-and-idp_hinting). |
 | `idp_hinting` | request | Lifts an IdP-hint query parameter into `KEY_TARGET_ENTITYID`. See [below](#routing-the-flow-custom_routing-and-idp_hinting). |
+| `disco_to_target_issuer` | request | Suspends the flow across an external IdP-discovery page and resumes it with the chosen issuer in `KEY_TARGET_ENTITYID`. See [below](#disco_to_target_issuer-discovery-driven-backend-re-routing). |
 
 For instance, `filter_attributes` is the whole pattern in a few lines:
 
@@ -710,6 +717,74 @@ overrides the backend selected by `custom_routing` / `idp_hinting` and the
 default backend. Other request-path effects, such as a target-entity decoration
 that the pinned backend itself consumes, still apply. Leave the frontend
 unpinned when you want request-time backend routing.
+
+## `disco_to_target_issuer`: discovery-driven backend re-routing
+
+`idp_hinting` covers the RP that already knows its IdP, and the SAML2
+backend's `disco_srv` mode (ADR 0007) covers discovery *within one backend*.
+When the choice of IdP must pick between **differently configured backends**
+- the iam-proxy-italia shape, where SPID and CIE are separate SAML backends
+behind one discovery page - use `disco_to_target_issuer` (ADR 0053, SATOSA:
+`DiscoToTargetIssuer`):
+
+1. On the first pass through the request path, the service snapshots the
+   in-flight request (internal data + originating frontend) into its own
+   namespace of the encrypted state cookie and passes the data through. The
+   flow then reaches the default backend, whose `disco_srv` redirect sends
+   the browser to the IdP-picker page - with the snapshot riding the cookie.
+2. The service registers the configured `disco_endpoints` as its own routes.
+   Micro-service routes take precedence over backend routes, so listing the
+   default backend's disco return path (e.g. `Saml2/disco`) intercepts the
+   picker's return before the backend sees it.
+3. On the return (`?entityID=<issuer>`), the snapshot is restored and
+   **consumed**, `KEY_TARGET_ENTITYID` is decorated, and the request pipeline
+   *resumes* with the services listed after this one - so `custom_routing`'s
+   issuer rules can send the flow to the matching backend, which resolves the
+   chosen IdP through its own (MDQ/federation-verified) metadata.
+
+Configuration order matters twice: list `disco_to_target_issuer` **before**
+`custom_routing` (the resume only runs later services), and remember that
+decorations written by services *before* the discovery hop are per-request
+and do not survive it - put decoration-writing services after this one when
+their output must reach the backend on the resumed pass.
+
+The snapshot is consume-once: a replayed discovery return (same URL, post-
+resume cookie) and a forged return with no flow open both fail cleanly. The
+returned `entityID` is untrusted routing input, and unmatched issuers **fail
+closed**: exactly one of `allowed_issuers` or `allow_any_issuer = true` must
+be configured. `allowed_issuers` is an allowlist of issuers **per requester**
+(the standard rule-set levels: exact requester id, else `""`, else
+`"default"`); the resumed flow's requester selects its issuer set, and a
+return outside it - or a requester with no applicable set - is rejected
+before the pipeline resumes, with the snapshot kept so the user can pick
+again. The requester scoping matters because the target-entity decoration
+survives `custom_routing`'s requester/default *fallback*: a merely global
+list would let a requester without any issuer rule authenticate at any
+listed issuer through the fallback backend's (e.g. MDQ) metadata
+resolution. The explicit `allow_any_issuer` opt-out is for deployments where
+enumerating issuers is impossible (an MDQ federation with thousands of IdPs)
+and every reachable backend verifies the selected entity against signed
+metadata, which then acts as the allowlist. Backend selection is
+additionally bounded by `custom_routing`'s `(issuer, requester)` rules. See
+the security-boundaries table in ADR 0053.
+
+The service enforces a 2 KB cap on the serialized snapshot at
+`process_request` time and fails the flow with a normal protocol error when
+exceeded - discovering the problem at seal time instead would redirect the
+browser to the discovery page without the cookie and strand the flow. If you
+hit the cap, move attribute-inflating request-path services after this one.
+
+```toml
+[[microservice]]
+type = "disco_to_target_issuer"
+name = "disco"
+  [microservice.config]
+  disco_endpoints = ["Saml2/disco"]
+  # ...or instead of the per-requester allowlist: allow_any_issuer = true
+  [microservice.config.allowed_issuers]
+  "https://sp.example.com" = ["https://spid-idp.example.org", "https://cie-idp.example.org"]
+  # "" = [...]   # optional fallback set for unlisted requesters
+```
 
 ## `custom_logging`: audit records
 

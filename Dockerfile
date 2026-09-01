@@ -47,8 +47,12 @@ RUN apt-get update \
       ca-certificates curl less python3.13 libpython3.13 \
  && rm -rf /var/lib/apt/lists/*
 
-# Run as an unprivileged system user.
-RUN useradd --system --uid 10001 --user-group --no-create-home tunnelbana
+# Run as an unprivileged system user. The gid is pinned to match the uid:
+# `--user-group` alone lets useradd allocate an arbitrary system gid (e.g.
+# 999), which operators cannot rely on when granting group access to
+# bind-mounted key files.
+RUN groupadd --system --gid 10001 tunnelbana \
+ && useradd --system --uid 10001 --gid tunnelbana --no-create-home tunnelbana
 
 WORKDIR /app
 COPY --from=build /usr/local/bin/tunnelbana /usr/local/bin/tunnelbana

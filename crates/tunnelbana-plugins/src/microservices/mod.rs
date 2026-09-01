@@ -41,9 +41,14 @@
 //! - `idp_hinting` — lift an IdP hint query parameter into the target-entity
 //!   decoration (SATOSA: `IdpHinting`). List it *before* `custom_routing` in
 //!   the config so the hint is visible to issuer-based routing rules.
+//! - `disco_to_target_issuer` — suspend the flow across an external IdP
+//!   discovery service and resume it with the chosen issuer in the
+//!   target-entity decoration (SATOSA: `DiscoToTargetIssuer`). List it
+//!   *before* `custom_routing` so the chosen issuer can re-route the backend.
 
 mod accr;
 mod authorization;
+mod disco;
 mod generation;
 mod hasher;
 mod legacy_eptid;
@@ -59,6 +64,7 @@ mod values;
 
 pub use accr::Accr;
 pub use authorization::AttributeAuthorization;
+pub use disco::DiscoToTargetIssuer;
 pub use generation::AttributeGeneration;
 pub use hasher::Hasher;
 pub use legacy_eptid::LegacyEptid;

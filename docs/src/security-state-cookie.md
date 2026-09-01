@@ -28,6 +28,13 @@ is hardened against that.
   96-bit nonce is generated per seal, so there is no nonce-reuse exposure in
   practice. The SATOSA original used LZMA + AES-256-**CBC with no MAC**, which is
   malleable and offers no integrity - tunnelbana replaces it with an AEAD scheme.
+- **Deflate compression inside the seal** (ADR 0054). The envelope JSON is
+  deflate-compressed before encryption (typically 40-60% smaller), *not* via
+  the JWE `zip` header, which grindvakt rejects for tokens crossing trust
+  boundaries. Because AEAD authentication runs before decompression, only
+  self-sealed bytes ever reach the decompressor; a 64 KB inflation cap adds
+  defense in depth. Cookies sealed before compression landed (bare-JSON
+  plaintext) keep unsealing until they expire.
 - **Key derivation via HKDF-SHA256**, not a bare hash:
   `HKDF(salt = "tunnelbana-state-cookie-v1", ikm = state_encryption_key,
   info = "…dir+A256GCM")` → a 32-byte key. The salt/info are fixed public
@@ -82,8 +89,9 @@ previous_state_encryption_keys = ["${TUNNELBANA_STATE_KEY_OLD}"]
   cross-site SSO POST-back works. See the CSRF note below.
 - **Size guard.** If the `name=value` pair would exceed 4096 bytes (the browser's
   per-cookie limit), `seal` returns a hard error instead of letting the client
-  silently drop an oversized cookie. Plugins must keep what they stash in the
-  flow small.
+  silently drop an oversized cookie. The guard measures the *compressed* token,
+  so the effective state budget is well beyond 4 KB of JSON - but plugins must
+  still keep what they stash in the flow small.
 
 ## Fail-closed behaviour and observability
 
@@ -112,6 +120,8 @@ under a key only the server holds.
 | Algorithm substitution | `alg`/`enc` allow-list pinned to `dir`+`A256GCM` | None for this construction |
 | Cross-site / script exfiltration | `HttpOnly`, `Secure`, `__Host-`, `SameSite` | `SameSite=None` (needed for SSO) means CSRF protection rests on the per-flow `state`/`nonce`, not the cookie |
 | Silent oversize-cookie loss | 4096-byte `name=value` guard → hard error | - |
+| Decompression bomb via the deflated envelope | AEAD authenticates before inflation (only self-sealed bytes are decompressed) + 64 KB inflation cap | - |
+| Plaintext structure leaking through ciphertext length (compress-then-encrypt) | The cookie carries one user's own flow data; no cross-user secret shares a cookie with attacker-chosen input | An on-path observer can gauge relative state size - accepted (ADR 0054) |
 | Mass session loss on key change | Multi-key rotation via `previous_state_encryption_keys` | - |
 
 ### Out of scope (handled elsewhere)

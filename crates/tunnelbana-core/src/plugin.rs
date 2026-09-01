@@ -85,6 +85,18 @@ pub enum BackendAction {
     AuthResponse(InternalData),
 }
 
+/// What a micro-service endpoint produced.
+pub enum MicroServiceAction {
+    /// A complete HTTP response (e.g. a consent page).
+    Respond(Response),
+    /// Resume the request-path pipeline with restored flow data: the proxy
+    /// runs the request-path micro-services *after* the resuming service,
+    /// then dispatches to a backend as usual. The service must restore
+    /// `ctx.target_frontend` (and set any routing decorations such as
+    /// [`crate::context::KEY_TARGET_ENTITYID`]) before returning this.
+    ResumeRequest { request: InternalData },
+}
+
 /// A frontend speaks a protocol to downstream RPs/SPs.
 #[async_trait::async_trait]
 pub trait Frontend: Send + Sync {
@@ -156,7 +168,11 @@ pub trait MicroService: Send + Sync {
     }
 
     /// Handle an inbound hit on one of this micro-service's endpoints.
-    async fn handle_endpoint(&self, _ctx: &mut Context, _route_id: &str) -> Result<Response> {
+    async fn handle_endpoint(
+        &self,
+        _ctx: &mut Context,
+        _route_id: &str,
+    ) -> Result<MicroServiceAction> {
         Err(crate::error::Error::NoBoundEndpoint(
             "micro-service endpoint not implemented".into(),
         ))

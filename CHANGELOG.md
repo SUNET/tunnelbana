@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 [2026-09-01]
 
 - **OIDC authenticating authority:** the `oidc` and `oidc_federation` frontends
   can release the validated upstream IdP/OP issuer as an array-valued
@@ -11,6 +11,60 @@
   exchanges unchanged. Mappings to provider-owned ID-token claims are rejected
   at startup rather than accepted and silently omitted during issuance.
 - **Dependencies:** update `grindvakt` to 0.7.2 for typed OP-asserted claims.
+- **`disco_to_target_issuer` micro-service (ADR 0053):** port of SATOSA's
+  `DiscoToTargetIssuer`. The service snapshots the in-flight request into the
+  encrypted state cookie, owns the discovery-return endpoint (exact paths that
+  deliberately shadow the default SAML2 backend's `disco_srv` return route),
+  and on `?entityID=…` restores the flow, decorates `KEY_TARGET_ENTITYID`, and
+  resumes the request pipeline so `custom_routing` issuer rules can re-pick
+  the backend - one discovery page routing between differently configured
+  backends (the iam-proxy-italia SPID-vs-CIE shape). The snapshot is
+  consume-once: replayed or forged discovery returns fail cleanly, and
+  unmatched issuers fail closed - the config requires either an
+  `allowed_issuers` allowlist (**requester-scoped**: a map from requester to
+  its issuer set with the usual exact/`""`/`"default"` levels, checked
+  against the resumed flow's requester before the resume, so a requester
+  without an issuer rule cannot reach a globally listed issuer through
+  fallback routing) or an explicit `allow_any_issuer = true`. A 2 KB
+  snapshot cap fails oversized flows with a protocol error before the
+  discovery redirect (review findings on #26).
+- **State cookie compression (ADR 0054) - BREAKING:** the sealed state
+  envelope is deflate-compressed before JWE encryption (typically 40-60%
+  smaller), roughly doubling the effective headroom under the 4 KB browser
+  cookie cap. Compression is inside the seal, not the JWE `zip` header
+  (which grindvakt rejects); AEAD authentication runs before inflation, a
+  64 KB inflation cap adds defense in depth, and an envelope past that cap
+  now fails at seal time with an explicit error instead of producing a
+  cookie the next unseal would silently drop. **Upgrade impact:** state
+  cookies sealed by pre-0.4.0 releases do not survive this change - after
+  deploying 0.4.0, every user with an in-flight session sealed by an older
+  release gets an empty (unauthenticated) state due to the deflate format
+  change and has to log in again. Plan the rollout accordingly (the state
+  cookie only spans an in-flight login/discovery flow, so the practical
+  blast radius is flows crossing the deploy).
+- **Micro-service state namespaces are kind-prefixed** (review finding on
+  #26): `disco_to_target_issuer` and `accr` store their per-flow state under
+  `disco_to_target_issuer:{name}` / `accr:{name}` instead of the bare
+  instance name. Config only deduplicates names within the micro-service
+  list and the router deliberately supports reusing a name across plugin
+  kinds, so a micro-service named like a frontend (e.g. `OIDC`) previously
+  shared that frontend's state namespace - and the consume-once
+  `clear_namespace` on the discovery return (or the ACCR response leg)
+  deleted the frontend's own flow data, breaking final response rendering.
+  Only transient in-flight state is affected by the rename; flows crossing
+  the deploy restart their discovery/ACCR hop.
+- **Seal failures now fail the request:** a response whose state cookie
+  cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
+  error with a state-clearing cookie, instead of being sent without a
+  `Set-Cookie` header and stranding the multi-step flow it belongs to
+  (review finding on #26).
+- **Flow-resuming micro-service endpoints (API break):**
+  `MicroService::handle_endpoint` now returns `MicroServiceAction`
+  (`Respond(Response)` or `ResumeRequest { request }`) instead of a bare
+  `Response`. On resume the proxy runs the request-path micro-services after
+  the resuming one and dispatches to a backend under the normal precedence.
+  No in-tree service overrode the old signature; out-of-tree implementations
+  must wrap their response in `MicroServiceAction::Respond`.
 
 ## 0.3.1 [2026-08-24]
 
