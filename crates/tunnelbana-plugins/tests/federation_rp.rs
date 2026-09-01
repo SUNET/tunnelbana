@@ -30,6 +30,7 @@ enum KeyDistribution {
 struct NetworkConfig {
     resolve_issuer: &'static str,
     ta_ec_subject: &'static str,
+    provider_issuer: Option<&'static str>,
     key_distribution: KeyDistribution,
     /// Serve the OP's endpoints over plain http in the resolved metadata.
     insecure_op_endpoints: bool,
@@ -40,6 +41,7 @@ impl Default for NetworkConfig {
         Self {
             resolve_issuer: TA_ID,
             ta_ec_subject: TA_ID,
+            provider_issuer: Some(OP_ID),
             key_distribution: KeyDistribution::Inline,
             insecure_op_endpoints: false,
         }
@@ -260,12 +262,14 @@ fn provider_metadata(op_key: &SigningKey, config: &NetworkConfig) -> serde_json:
     };
     let op_url = OP_ID.replacen("https", scheme, 1);
     let mut metadata = serde_json::json!({
-        "issuer": OP_ID,
         "authorization_endpoint": format!("{op_url}/authorize"),
         "token_endpoint": format!("{op_url}/token"),
         "client_registration_types_supported": ["automatic"]
     });
     let object = metadata.as_object_mut().unwrap();
+    if let Some(issuer) = config.provider_issuer {
+        object.insert("issuer".into(), serde_json::Value::String(issuer.into()));
+    }
     match config.key_distribution {
         KeyDistribution::Inline => {
             object.insert(
@@ -982,6 +986,49 @@ async fn start_auth_rejects_wrong_resolve_response_issuer() {
         .start_auth(&mut ctx(), InternalData::request("https://sp.example"))
         .await;
     assert!(err.is_err(), "unexpected resolve response issuer must fail");
+}
+
+#[tokio::test]
+async fn start_auth_rejects_provider_issuer_mismatched_with_federation_entity() {
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network_with(
+        &rp_fed_jwk,
+        NetworkConfig {
+            provider_issuer: Some("https://victim.example.org"),
+            ..Default::default()
+        },
+    );
+    let backend = build_backend(net, fed_jwk, ta_pub);
+
+    let err = backend
+        .start_auth(&mut ctx(), InternalData::request("https://sp.example"))
+        .await
+        .expect_err("provider issuer mismatch must fail");
+    assert!(
+        err.to_string()
+            .contains("issuer does not match federation entity"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn start_auth_uses_resolved_subject_when_provider_issuer_is_missing() {
+    let rp_fed_jwk = ec_jwk("rp-fed-1");
+    let (net, fed_jwk, ta_pub) = network_with(
+        &rp_fed_jwk,
+        NetworkConfig {
+            provider_issuer: None,
+            ..Default::default()
+        },
+    );
+    let backend = build_backend(net, fed_jwk, ta_pub);
+
+    let response = backend
+        .start_auth(&mut ctx(), InternalData::request("https://sp.example"))
+        .await
+        .expect("missing provider issuer should use the resolved subject");
+    assert_eq!(response.status, 302);
+    assert!(location(&response).starts_with(&format!("{OP_ID}/authorize?")));
 }
 
 #[tokio::test]

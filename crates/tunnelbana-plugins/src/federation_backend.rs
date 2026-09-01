@@ -437,6 +437,17 @@ impl FederationBackend {
         let get = |key: &str| -> Option<String> {
             op_meta.get(key).and_then(|v| v.as_str()).map(String::from)
         };
+        // The federation subject owns the protocol metadata and keys.  Never
+        // let it claim another OP's issuer: that would verify the attacker's
+        // token with the attacker's keys, then misattribute the authentication
+        // to the claimed issuer downstream.  Keep the existing safe fallback
+        // for metadata that omits the issuer.
+        let issuer = get("issuer").unwrap_or_else(|| resolved.subject.clone());
+        if issuer != resolved.subject {
+            return Err(Error::Authn(
+                "resolved OP metadata issuer does not match federation entity".into(),
+            ));
+        }
         let authorization_endpoint = get("authorization_endpoint").ok_or_else(|| {
             Error::Authn("resolved OP metadata has no authorization_endpoint".into())
         })?;
@@ -462,7 +473,7 @@ impl FederationBackend {
         let op = ResolvedOp {
             entity_id: resolved.subject,
             provider: ProviderInfo {
-                issuer: get("issuer").unwrap_or_else(|| op_entity_id.to_string()),
+                issuer,
                 authorization_endpoint,
                 token_endpoint,
                 userinfo_endpoint,
