@@ -5,7 +5,6 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use async_trait::async_trait;
@@ -176,42 +175,26 @@ where
     }
 }
 
-struct TrustedScopeEntry {
-    scopes: Vec<String>,
-    fetched_sequence: u64,
-}
-
 #[derive(Default)]
 struct TrustedScopeCache {
-    entries: BTreeMap<String, TrustedScopeEntry>,
+    entries: BTreeMap<String, Vec<String>>,
 }
 
 impl TrustedScopeCache {
-    fn insert(&mut self, entity_id: String, scopes: Vec<String>, fetched_sequence: u64) {
-        if !self.entries.contains_key(&entity_id) && self.entries.len() >= MDQ_CACHE_CAPACITY {
-            if let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.fetched_sequence)
-                .map(|(entity_id, _)| entity_id.clone())
-            {
-                self.entries.remove(&oldest);
-            }
-        }
-        self.entries.insert(
-            entity_id,
-            TrustedScopeEntry {
-                scopes,
-                fetched_sequence,
-            },
-        );
+    fn requires_reset(&self, entity_id: &str, capacity: usize) -> bool {
+        !self.entries.contains_key(entity_id) && self.entries.len() >= capacity
+    }
+
+    fn insert(&mut self, entity_id: String, scopes: Vec<String>) {
+        self.entries.insert(entity_id, scopes);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
     }
 
     fn get(&self, entity_id: &str) -> Vec<String> {
-        self.entries
-            .get(entity_id)
-            .map(|entry| entry.scopes.clone())
-            .unwrap_or_default()
+        self.entries.get(entity_id).cloned().unwrap_or_default()
     }
 }
 
@@ -223,11 +206,13 @@ impl TrustedScopeCache {
 /// (and only after) the normal MDQ client has accepted that same fetch. Capture
 /// is task-local so unrelated network lookups remain concurrent. Weakly held
 /// per-entity locks make each entity/scopes cache update atomic without
-/// accumulating a second persistent entity map.
+/// accumulating a second persistent entity map. The scope cache may retain an
+/// entry after MDQ purges it, but scopes are never removed independently while
+/// MDQ still retains the corresponding entity.
 struct ScopeAwareMdqClient<F = ReqwestFetcher> {
     client: MdqClient<CapturingMetadataFetcher<F>>,
     trusted_scopes: StdMutex<TrustedScopeCache>,
-    next_fetch_sequence: AtomicU64,
+    cache_capacity: usize,
     lookup_locks: StdMutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -236,9 +221,8 @@ impl ScopeAwareMdqClient<ReqwestFetcher> {
         let inner = ReqwestFetcher::try_default()
             .map_err(|e| Error::Config(format!("building MDQ HTTP client: {e}")))?;
         let fetcher = CapturingMetadataFetcher { inner };
-        let client =
-            build_mdq_client_with_fetcher(config, fetcher)?.with_cache_capacity(MDQ_CACHE_CAPACITY);
-        Ok(Self::new(client))
+        let client = build_mdq_client_with_fetcher(config, fetcher)?;
+        Ok(Self::new(client, MDQ_CACHE_CAPACITY))
     }
 }
 
@@ -246,11 +230,12 @@ impl<F> ScopeAwareMdqClient<F>
 where
     F: MetadataFetcher + Sync,
 {
-    fn new(client: MdqClient<CapturingMetadataFetcher<F>>) -> Self {
+    fn new(client: MdqClient<CapturingMetadataFetcher<F>>, cache_capacity: usize) -> Self {
+        assert!(cache_capacity > 0, "MDQ cache capacity must be non-zero");
         Self {
-            client,
+            client: client.with_cache_capacity(cache_capacity),
             trusted_scopes: StdMutex::new(TrustedScopeCache::default()),
-            next_fetch_sequence: AtomicU64::new(0),
+            cache_capacity,
             lookup_locks: StdMutex::new(BTreeMap::new()),
         }
     }
@@ -261,7 +246,17 @@ where
     ) -> std::result::Result<(EntityDescriptor, Vec<String>), MdqError> {
         let lookup_lock = self.lookup_lock(entity_id);
         let _lookup = lookup_lock.lock().await;
-        let fetched_sequence = self.next_fetch_sequence.fetch_add(1, Ordering::Relaxed);
+        // Keep a request-local copy because a concurrent lookup for another
+        // entity may reset both shared caches after this lookup hits MDQ's
+        // cache but before it returns here.
+        let cached_scopes = {
+            let mut trusted_scopes = lock_unpoisoned(&self.trusted_scopes);
+            if trusted_scopes.requires_reset(entity_id, self.cache_capacity) {
+                self.client.clear_cache();
+                trusted_scopes.clear();
+            }
+            trusted_scopes.get(entity_id)
+        };
         let (entity, captured_bytes) = CAPTURED_MDQ_METADATA
             .scope(RefCell::new(None), async {
                 let entity = self.client.get(entity_id).await?;
@@ -270,19 +265,23 @@ where
             })
             .await?;
 
-        // Promote only bytes fetched and accepted by this lookup. Cache hits
-        // reuse the scopes promoted with the cached entity.
-        if let Some(captured_bytes) = captured_bytes {
-            let scopes = std::str::from_utf8(&captured_bytes)
-                .map(|xml| trusted_scopes_from_metadata_xml(xml, entity_id))
-                .unwrap_or_default();
-            lock_unpoisoned(&self.trusted_scopes).insert(
-                entity_id.to_string(),
-                scopes,
-                fetched_sequence,
-            );
+        let Some(captured_bytes) = captured_bytes else {
+            return Ok((entity, cached_scopes));
+        };
+
+        // Promote only bytes fetched and accepted by this lookup. The MDQ
+        // cache can purge expired entries without exposing their IDs. Never
+        // evict a scope entry alone: at the shared bound, clear both caches so
+        // every entity retained by MDQ continues to have matching scopes.
+        let scopes = std::str::from_utf8(&captured_bytes)
+            .map(|xml| trusted_scopes_from_metadata_xml(xml, entity_id))
+            .unwrap_or_default();
+        let mut trusted_scopes = lock_unpoisoned(&self.trusted_scopes);
+        if trusted_scopes.requires_reset(entity_id, self.cache_capacity) {
+            self.client.clear_cache();
+            trusted_scopes.clear();
         }
-        let scopes = lock_unpoisoned(&self.trusted_scopes).get(entity_id);
+        trusted_scopes.insert(entity_id.to_string(), scopes.clone());
         Ok((entity, scopes))
     }
 
@@ -1649,7 +1648,7 @@ fn idp_verifier_from_metadata(entity: &EntityDescriptor) -> Result<SamlVerifier>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use gamlastan_mdq::RequiredRole;
@@ -1841,44 +1840,37 @@ mod tests {
     }
 
     #[test]
-    fn trusted_scope_cache_matches_mdq_capacity() {
+    fn trusted_scope_cache_requests_a_coupled_reset_at_capacity() {
         let mut cache = TrustedScopeCache::default();
-        for sequence in 0..=MDQ_CACHE_CAPACITY as u64 {
-            cache.insert(
-                format!("https://idp-{sequence}.example.org"),
-                vec![format!("scope-{sequence}.example.org")],
-                sequence,
-            );
-        }
+        cache.insert("first".into(), vec!["first.scope.example.org".into()]);
+        cache.insert("second".into(), vec!["second.scope.example.org".into()]);
 
-        assert_eq!(cache.entries.len(), MDQ_CACHE_CAPACITY);
-        assert!(cache.get("https://idp-0.example.org").is_empty());
-        assert_eq!(
-            cache.get(&format!("https://idp-{}.example.org", MDQ_CACHE_CAPACITY)),
-            [format!("scope-{}.example.org", MDQ_CACHE_CAPACITY)]
-        );
+        assert!(!cache.requires_reset("first", 2));
+        assert!(cache.requires_reset("third", 2));
+        cache.clear();
+        cache.insert("third".into(), vec!["third.scope.example.org".into()]);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.get("third"), ["third.scope.example.org"]);
     }
 
     #[derive(Clone)]
     struct ConcurrentMetadataFetcher {
-        first_entity_id: String,
-        second_entity_id: String,
         active: Arc<AtomicUsize>,
         max_active: Arc<AtomicUsize>,
+        fetch_count: Arc<AtomicUsize>,
+        delay: Duration,
     }
 
     impl MetadataFetcher for ConcurrentMetadataFetcher {
         async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(self.delay).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
 
-            let (entity_id, scope) = if url.contains("first.example.org") {
-                (&self.first_entity_id, "first.scope.example.org")
-            } else {
-                (&self.second_entity_id, "second.scope.example.org")
-            };
+            let entity_id = url.rsplit('/').next().expect("MDQ entity path");
+            let scope = format!("{entity_id}.scope.example.org");
             Ok(Bytes::from(format!(
                 r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:scope="urn:mace:shibboleth:metadata:1.0" entityID="{entity_id}"><md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:Extensions><scope:Scope>{scope}</scope:Scope></md:Extensions><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.org/sso"/></md:IDPSSODescriptor></md:EntityDescriptor>"#
             )))
@@ -1887,28 +1879,68 @@ mod tests {
 
     #[tokio::test]
     async fn scope_aware_mdq_lookups_are_concurrent_and_request_scoped() {
-        let first_entity_id = "https://first.example.org/idp".to_string();
-        let second_entity_id = "https://second.example.org/idp".to_string();
+        let first_entity_id = "first".to_string();
+        let second_entity_id = "second".to_string();
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
+        let fetch_count = Arc::new(AtomicUsize::new(0));
         let fetcher = CapturingMetadataFetcher {
             inner: ConcurrentMetadataFetcher {
-                first_entity_id: first_entity_id.clone(),
-                second_entity_id: second_entity_id.clone(),
                 active: Arc::clone(&active),
                 max_active: Arc::clone(&max_active),
+                fetch_count,
+                delay: Duration::from_millis(25),
             },
         };
         let client = MdqClient::with_fetcher("https://mdq.example.org/", fetcher)
             .require_role(RequiredRole::Idp)
-            .allow_unverified()
-            .with_cache_capacity(MDQ_CACHE_CAPACITY);
-        let client = ScopeAwareMdqClient::new(client);
+            .allow_unverified();
+        let client = ScopeAwareMdqClient::new(client, MDQ_CACHE_CAPACITY);
 
         let (first, second) =
             tokio::join!(client.get(&first_entity_id), client.get(&second_entity_id));
         assert_eq!(first.unwrap().1, ["first.scope.example.org"]);
         assert_eq!(second.unwrap().1, ["second.scope.example.org"]);
         assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn scope_cache_reset_clears_mdq_cache_and_refetches_with_scopes() {
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetcher = CapturingMetadataFetcher {
+            inner: ConcurrentMetadataFetcher {
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                fetch_count: Arc::clone(&fetch_count),
+                delay: Duration::ZERO,
+            },
+        };
+        let client = MdqClient::with_fetcher("https://mdq.example.org/", fetcher)
+            .require_role(RequiredRole::Idp)
+            .allow_unverified();
+        let client = ScopeAwareMdqClient::new(client, 2);
+
+        assert_eq!(
+            client.get("first").await.unwrap().1,
+            ["first.scope.example.org"]
+        );
+        assert_eq!(
+            client.get("second").await.unwrap().1,
+            ["second.scope.example.org"]
+        );
+        assert_eq!(client.client.cache_len(), 2);
+
+        assert_eq!(
+            client.get("third").await.unwrap().1,
+            ["third.scope.example.org"]
+        );
+        assert_eq!(client.client.cache_len(), 1);
+        assert_eq!(lock_unpoisoned(&client.trusted_scopes).entries.len(), 1);
+
+        assert_eq!(
+            client.get("first").await.unwrap().1,
+            ["first.scope.example.org"]
+        );
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 4);
     }
 }
