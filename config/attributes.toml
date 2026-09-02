@@ -33,6 +33,12 @@ openid = ["authenticating_authority"]
 openid = ["sub"]
 saml = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
 
+# Assurance values asserted by the initial and linked-account IdPs. The
+# step-up service maps and merges this attribute before the frontend releases
+# it under its normal policy.
+[attributes.edupersonassurance]
+saml = { names = ["eduPersonAssurance"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.11", friendly_name = "eduPersonAssurance" }
+
 # SAML subject-id (released by IdPs under the REFEDS Personalized Access
 # entity category instead of eduPersonPrincipalName). The internal name matches
 # eduID's literal `subject-id` so the `pairwiseid`/`nameid` micro-services see it.

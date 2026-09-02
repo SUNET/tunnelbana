@@ -95,6 +95,19 @@ pub enum MicroServiceAction {
     /// `ctx.target_frontend` (and set any routing decorations such as
     /// [`crate::context::KEY_TARGET_ENTITYID`]) before returning this.
     ResumeRequest { request: InternalData },
+    /// Resume the response-path pipeline with a restored authentication
+    /// response. The proxy runs response micro-services *after* the resuming
+    /// service and then renders through the originating frontend.
+    ResumeResponse { response: InternalData },
+}
+
+/// What a response-path micro-service produced.
+pub enum MicroServiceResponseAction {
+    /// Continue through the remaining response micro-services.
+    Continue(InternalData),
+    /// Suspend the response pipeline and return an HTTP response to the user
+    /// agent (for example, a redirect to a step-up identity provider).
+    Respond(Response),
 }
 
 /// A frontend speaks a protocol to downstream RPs/SPs.
@@ -160,6 +173,19 @@ pub trait MicroService: Send + Sync {
         data: InternalData,
     ) -> Result<InternalData> {
         Ok(data)
+    }
+
+    /// Transform or suspend the response path. Existing transform-only
+    /// services implement [`MicroService::process_response`]; endpoint-owning
+    /// services may override this method to return a browser challenge.
+    async fn process_response_action(
+        &self,
+        ctx: &mut Context,
+        data: InternalData,
+    ) -> Result<MicroServiceResponseAction> {
+        self.process_response(ctx, data)
+            .await
+            .map(MicroServiceResponseAction::Continue)
     }
 
     /// Optional endpoints (e.g. a consent callback).

@@ -34,6 +34,8 @@
 //! Request + response (Level of Assurance):
 //! - `accr` — filter, minimum-enforce, rewrite and validate the
 //!   AuthnContextClassRef (eduID: `accr`).
+//! - `stepup` — suspend an MFA-required response for a subject-bound SAML
+//!   exchange with a SCIM-linked account provider (eduID: `stepup`).
 //!
 //! Request-path routing:
 //! - `custom_routing` — pick the backend by requester and/or target issuer
@@ -60,6 +62,7 @@ mod primary_identifier;
 mod processor;
 mod routing;
 mod static_virtual_idp;
+mod stepup;
 mod values;
 
 pub use accr::Accr;
@@ -76,6 +79,7 @@ pub use primary_identifier::PrimaryIdentifier;
 pub use processor::AttributeProcessor;
 pub use routing::{CustomRouting, IdpHinting};
 pub use static_virtual_idp::StaticAttributesForVirtualIdp;
+pub use stepup::StepUp;
 pub use values::{FilterAttributeValues, RenameAttributes};
 
 use std::collections::BTreeMap;

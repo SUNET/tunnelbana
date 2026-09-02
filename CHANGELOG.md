@@ -2,12 +2,28 @@
 
 ## Unreleased
 
+- **eduID MFA step-up (ADR 0056):** add the native `stepup` micro-service,
+  consuming the optional Python SCIM adapter's linked-account decoration. It
+  sends a signed, subject-bound exact-LoA SAML request; reuses the hardened
+  SAML backend for metadata, signature, audience, time, correlation and replay
+  validation; verifies the linked issuer and identifier; merges assurance
+  values from the same authenticated assertion; and resumes the original
+  response chain. The core now supports
+  response-path interruption/resumption. Trusted requester/provider entity
+  categories and assurance certifications support eduID's LoA policy mappings.
+  `behavior = "eduid"` reproduces the pinned eduID policy/output semantics;
+  the default `hardened` mode retains fail-closed Tunnelbana behavior. Initial
+  provider policy now overrides the ordinary backend's ACCR after trusted
+  metadata resolution, synthesized fallback policy cannot elevate a weaker
+  sibling ACCR, malformed linked accounts fail closed, discovery policy state
+  is bounded at startup, and resumed flows restore their original backend.
+  Configure services in `ScimAttributes`, `stepup`, `accr` order.
 - **eduID SCIM response attributes (ADR 0055):** add the bundled
   `ScimAttributes` Python adapter, an opt-in detached attribute-map constructor
   argument, and trusted SAML IdP scope publication for SCIM data-owner
   selection. The adapter enriches profiles and group entitlements and publishes
-  linked MFA accounts as JSON for a later step-up implementation; it does not
-  add step-up routing or endpoints. Provider scopes are read-only to Python and
+  linked MFA accounts as JSON for the separately configured native step-up
+  service; the adapter itself adds no routing or endpoints. Provider scopes are read-only to Python and
   become available only after successful SAML response validation. An
   explicitly configured adapter imports its eduID database classes during
   startup and fails fast when the optional dependency is unavailable.
@@ -177,8 +193,9 @@
 
 - **Security (SAML):** `passthrough_unmapped_attributes` can no longer merge
   into or fabricate mapped internal attributes (case-insensitive known
-  check, ADR 0047); the SAML backend's `security` value must be `strict` or
-  `permissive` (ADR 0050); attacker-controlled entity IDs are escaped in
+  check, ADR 0047); the SAML backend rejects unknown `security` values
+  (ADR 0050), and adds a secure interoperable `production` preset for step-up
+  (ADR 0056); attacker-controlled entity IDs are escaped in
   logs and no longer reflected in 403 bodies (ADR 0051); `ForceAuthn` /
   `IsPassive` are propagated upstream (`prompt=login`/`prompt=none` for the
   OIDC backend) or rejected when the backend cannot honor them (ADR 0049).

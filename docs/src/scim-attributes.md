@@ -4,9 +4,9 @@ Tunnelbana includes a Python adapter for eduID's SATOSA `ScimAttributes`
 micro-service. It enriches a validated upstream authentication response from
 the eduID SCIM database before the originating frontend renders it.
 
-This page covers SCIM attribute enrichment only. The adapter publishes linked
-MFA-account information for a future step-up service, but Tunnelbana does not
-yet initiate that second SAML authentication.
+This page covers SCIM attribute enrichment. The adapter publishes linked
+MFA-account information consumed by the optional native
+[step-up service](stepup.md).
 
 ## Runtime and files
 
@@ -68,8 +68,8 @@ EntraFrontend = "no-scim"
 [microservice.config.settings.scope_to_data_owner]
 "example.org" = "example.org"
 
-# Used only to prepare data for the later step-up feature. It does not cause a
-# redirect in the current release.
+# Maps database issuer values to entity IDs accepted by the optional step-up
+# service. ScimAttributes alone still performs no redirect.
 [microservice.config.settings.mfa_stepup_issuer_to_entity_id]
 "eduid.se" = "https://login.idp.eduid.se/idp.xml"
 

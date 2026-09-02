@@ -63,6 +63,7 @@ once the backend has produced attributes. See
 | `static_attributes_for_virtual_idp` | response | Inject/append static attributes keyed by `(requester, virtual_idp)`. |
 | `nameid` | response | Set the SAML subject id from `pairwise-id`/`mail` per requested NameID format. |
 | `accr` | request + response | Filter, minimum-enforce, rewrite and validate the AuthnContextClassRef. |
+| `stepup` | request + response | Perform a second SAML authentication through a SCIM-linked MFA account. |
 | `custom_routing` | request | Pick a backend by requester or target issuer. |
 | `idp_hinting` | request | Lift an IdP-hint query parameter into the flow. |
 | `disco_to_target_issuer` | request | Suspend the flow across an external IdP-discovery page and resume it with the chosen issuer. |
@@ -560,6 +561,12 @@ startup). The `initiate` route is only registered in discovery mode.
 
 Static single-IdP mode:
 
+`production` uses gamlastan's secure SP-friendly defaults, including signed
+assertions and Destination/Recipient validation. `strict` additionally
+requires encrypted assertions and the other high-security checks. The
+historical ordinary-backend default remains `permissive` for compatibility;
+new production deployments should select `production` or `strict` explicitly.
+
 ```toml
 [[backend]]
 type = "saml2"
@@ -577,9 +584,10 @@ name = "Saml2"
   # idp_scopes          = ["example.org"]
   sign_authn_requests = true               # default false
   name_id_format      = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
-  security            = "permissive"       # "permissive" (default) or "strict"
+  security            = "permissive"       # "permissive" (default), "production", or "strict"
   # Clock-skew tolerance towards the IdP in seconds, overriding the preset
-  # (SATOSA: accepted_time_diff). Permissive defaults to 600, strict to 180.
+  # (SATOSA: accepted_time_diff). Permissive defaults to 600; production and
+  # strict default to 180.
   # accepted_time_diff_secs = 300
   # Keep inbound attributes the attribute map does not know, under a
   # lowercased FriendlyName-or-Name key (SATOSA: allow_unknown_attributes).
@@ -1096,6 +1104,37 @@ only a supported, stronger assertion down to a requested level. Missing,
 unknown, or weaker assertions still fail the authentication flow. Because this
 check uses `supported_accr_sorted_by_prio` as an assurance ordering, keep that
 list ordered from strongest to weakest.
+
+### `stepup` - SCIM-linked MFA authentication (request + response, ADR 0056)
+
+```toml
+# List after the Python ScimAttributes service and before accr. The SAML
+# options are shared with the saml2 backend. Signed requests and correlated
+# responses are mandatory; static mode pins one provider, while MDQ mode can
+# resolve the entity ID carried by any eligible linked account.
+[[microservice]]
+type = "stepup"
+name = "stepup"
+  [microservice.config]
+  sp_entity_id = "https://proxy.example.org/stepup/metadata"
+  sp_key_path = "keys/stepup.key"
+  sp_cert_path = "keys/stepup.crt"
+  sign_authn_requests = true
+  security = "production" # secure default for step-up; permissive is rejected
+  idp_entity_id = "https://accounts.example.org/idp"
+  idp_sso_url = "https://accounts.example.org/sso"
+  idp_cert_path = "keys/accounts.crt"
+
+  [microservice.config.mfa.by_entity_id."https://service.example.org/sp"]
+  requested = ["https://refeds.org/profile/mfa"]
+  returned = "https://refeds.org/profile/mfa"
+```
+
+The service owns `<base_url>/<name>/acs` and
+`<base_url>/<name>/metadata`. See [eduID MFA step-up](stepup.md) for MDQ,
+entity-category/assurance-certification policy, ordering, attribute mapping,
+and the complete validation behavior. Step-up MDQ configuration also rejects
+the test-only `allow_unverified` mode.
 
 ### `custom_routing` - backend selection (request path, ADR 0033; original ADR 0015)
 

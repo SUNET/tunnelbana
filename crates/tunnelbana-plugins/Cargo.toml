@@ -14,6 +14,7 @@ gamlastan-mdq.workspace = true
 jose-rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+indexmap.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tera.workspace = true

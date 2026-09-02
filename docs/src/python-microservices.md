@@ -257,9 +257,11 @@ not just by your own services. Treat them as security-sensitive:
   value; that would let a client pick the upstream identity provider.
   `mfa_stepup_accounts` is SCIM-derived output, so later Python services may
   read but not replace it.
-- `provider_scopes` - trusted SAML metadata input. It is fully read-only to
-  Python: a Python service cannot create, replace, or remove it. The native
-  SAML backend publishes the authoritative array after response validation.
+- `provider_scopes`, `provider_assurance_certifications`, and
+  `requester_entity_categories` - trusted SAML metadata input. These are fully
+  read-only to Python: a Python service cannot create, replace, or remove them.
+  The native SAML frontend/backend publishes the authoritative arrays only
+  after the relevant protocol validation.
 
 The restricted snapshot deliberately excludes the complete URI, headers,
 cookies, request body, encrypted or persistent state, secrets, HTTP client

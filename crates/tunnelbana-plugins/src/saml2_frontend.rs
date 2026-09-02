@@ -133,6 +133,8 @@ struct SpEntry {
     /// Kept for the future IdP-side assertion-encryption feature (F6).
     #[allow(dead_code)]
     encryption_certs_der: Vec<Vec<u8>>,
+    entity_categories: Vec<String>,
+    assurance_certifications: Vec<String>,
 }
 
 /// Where registered SPs are looked up.
@@ -177,10 +179,38 @@ impl SpStore {
 /// Build an [`SpEntry`] from an entity's first SPSSODescriptor, if it has one.
 fn sp_entry_from_entity(entity: &EntityDescriptor) -> Option<SpEntry> {
     let sp_sso = entity.sp_sso_descriptors().first()?;
+    let mut entity_categories = Vec::new();
+    let mut assurance_certifications = Vec::new();
+    for extensions in [
+        entity.extensions.as_ref(),
+        sp_sso.sso_base.base.extensions.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for category in gamlastan::metadata::types::MdExtensions::from_extensions(extensions)
+            .entity_categories()
+        {
+            if !entity_categories.contains(&category) {
+                entity_categories.push(category);
+            }
+        }
+        for certification in gamlastan::metadata::types::MdExtensions::from_extensions(extensions)
+            .entity_attribute_values(
+                gamlastan::profiles::swedenconnect::constants::ASSURANCE_CERTIFICATION_ATTR,
+            )
+        {
+            if !assurance_certifications.contains(&certification) {
+                assurance_certifications.push(certification);
+            }
+        }
+    }
     Some(SpEntry {
         sp_sso: sp_sso.clone(),
         signing_certs_der: sp_sso.signing_certificates_der(),
         encryption_certs_der: sp_sso.encryption_certificates_der(),
+        entity_categories,
+        assurance_certifications,
     })
 }
 
@@ -627,6 +657,35 @@ impl Saml2Frontend {
         );
         if let Some(rs) = &relay_state {
             ctx.state.set_str(&self.name, "relay_state", rs);
+        }
+
+        // Publish requester categories only after the entity and request have
+        // passed metadata lookup, endpoint validation, and signature policy.
+        // Step-up policy consumes this on the same request leg and persists
+        // only the selected LoA settings, not the metadata object.
+        if let Some(entry) = &entry {
+            ctx.decorate(
+                tunnelbana_core::context::KEY_REQUESTER_ENTITY_CATEGORIES,
+                serde_json::Value::Array(
+                    entry
+                        .entity_categories
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            ctx.decorate(
+                tunnelbana_core::context::KEY_REQUESTER_ASSURANCE_CERTIFICATIONS,
+                serde_json::Value::Array(
+                    entry
+                        .assurance_certifications
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
         }
 
         // Surface the SP's RequestedAuthnContext for a request-path
@@ -1079,4 +1138,50 @@ fn insert_signature_after_element(xml: &str, element_name: &str, sig: &str) -> R
         .ok_or_else(|| Error::Internal(format!("malformed <{element_name}> tag")))?;
     let pos = tag_start + rel;
     Ok(format!("{}{}{}", &xml[..=pos], sig, &xml[pos + 1..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requester_policy_values_come_from_entity_and_first_sp_role() {
+        let xml = r#"
+        <md:EntityDescriptor
+            xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+            xmlns:mdattr="urn:oasis:names:tc:SAML:metadata:attribute"
+            xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+            entityID="https://sp.example.org">
+          <md:Extensions><mdattr:EntityAttributes>
+            <saml:Attribute Name="http://macedir.org/entity-category">
+              <saml:AttributeValue>category:entity</saml:AttributeValue>
+            </saml:Attribute>
+          </mdattr:EntityAttributes></md:Extensions>
+          <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:Extensions><mdattr:EntityAttributes>
+              <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+                <saml:AttributeValue>certification:active</saml:AttributeValue>
+              </saml:Attribute>
+            </mdattr:EntityAttributes></md:Extensions>
+            <md:AssertionConsumerService index="0" Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://sp.example.org/active"/>
+          </md:SPSSODescriptor>
+          <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:Extensions><mdattr:EntityAttributes>
+              <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+                <saml:AttributeValue>certification:later</saml:AttributeValue>
+              </saml:Attribute>
+            </mdattr:EntityAttributes></md:Extensions>
+            <md:AssertionConsumerService index="0" Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://sp.example.org/later"/>
+          </md:SPSSODescriptor>
+        </md:EntityDescriptor>
+        "#;
+        let doc = gamlastan::xml::uppsala::parse(xml).unwrap();
+        let entity = gamlastan::xml::deserialize::parse_saml::<EntityDescriptorRef<'_>>(&doc)
+            .unwrap()
+            .to_owned();
+        let entry = sp_entry_from_entity(&entity).unwrap();
+
+        assert_eq!(entry.entity_categories, ["category:entity"]);
+        assert_eq!(entry.assurance_certifications, ["certification:active"]);
+    }
 }

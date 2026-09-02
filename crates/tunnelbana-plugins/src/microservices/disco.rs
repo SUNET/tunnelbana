@@ -373,6 +373,7 @@ mod tests {
         let request = match action {
             MicroServiceAction::ResumeRequest { request } => request,
             MicroServiceAction::Respond(_) => panic!("expected a resume"),
+            MicroServiceAction::ResumeResponse { .. } => panic!("expected a request resume"),
         };
         assert_eq!(request.requester.as_deref(), Some("sp-a"));
         assert_eq!(ret.target_frontend.as_deref(), Some("OIDC"));

@@ -13,10 +13,10 @@ use bytes::Bytes;
 use chrono::Utc;
 use serde::Deserialize;
 
-use gamlastan::core::assertion::attribute::AttributeValue;
-#[cfg(test)]
-use gamlastan::core::assertion::name_id::NameId;
-use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
+use gamlastan::core::assertion::attribute::{Attribute, AttributeValue};
+use gamlastan::core::assertion::name_id::{NameId, NameIdOrEncryptedId};
+use gamlastan::core::assertion::subject::Subject;
+use gamlastan::core::assertion::types::Assertion;
 use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
 use gamlastan::crypto::{
@@ -32,7 +32,10 @@ use gamlastan::xml::serialize::SamlSerialize;
 use gamlastan_mdq::{MdqClient, MdqError, MetadataFetcher, ReqwestFetcher};
 
 use tunnelbana_core::attributes::AttributeMapper;
-use tunnelbana_core::context::{Context, KEY_PROVIDER_SCOPES};
+use tunnelbana_core::context::{
+    Context, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS, KEY_PROVIDER_ENTITY_CATEGORIES,
+    KEY_PROVIDER_SCOPES, KEY_STEPUP_INITIAL_POLICY,
+};
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
@@ -42,12 +45,18 @@ use tunnelbana_core::util::now_rfc3339;
 use crate::saml_common::{
     build_mdq_client_with_fetcher, extract_cert_b64, verifier_from_cert_ders, MdqConfig,
 };
+use crate::stepup_policy::{
+    resolve_policy, InitialPolicyHandoff, MetadataPolicyValues, PolicySubject,
+};
 
 /// XML-DSig RSA-SHA256 signature algorithm URI (for signed redirect requests).
 const SIGALG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
 const SAML_ASSERTION_NS: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
 const XMLDSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
 const MDQ_CACHE_CAPACITY: usize = 1024;
+const STATE_INITIAL_STEPUP_POLICY: &str = "initial_stepup_policy";
+const STATE_TARGET_ACCR: &str = "target_accr";
+const STATE_TARGET_ACCR_COMPARISON: &str = "target_accr_comparison";
 
 tokio::task_local! {
     static CAPTURED_MDQ_METADATA: RefCell<Option<Bytes>>;
@@ -85,6 +94,14 @@ struct Saml2BackendConfig {
     /// backends obtain these from the selected IdP's signed metadata.
     #[serde(default)]
     idp_scopes: Vec<String>,
+    /// Trusted assurance-certification values for a statically configured
+    /// IdP. MDQ mode reads these from accepted metadata.
+    #[serde(default)]
+    idp_assurance_certifications: Vec<String>,
+    /// Trusted entity-category values for a statically configured IdP. MDQ
+    /// mode reads these from the accepted entity and active IdP role.
+    #[serde(default)]
+    idp_entity_categories: Vec<String>,
     /// When present, resolve the IdP's SSO endpoint and signing cert on demand
     /// from an MDQ server instead of the static `idp_sso_url` / `idp_cert_path`.
     #[serde(default)]
@@ -93,7 +110,9 @@ struct Saml2BackendConfig {
     sign_authn_requests: bool,
     #[serde(default)]
     name_id_format: Option<String>,
-    /// Use "strict" or "permissive" security validation (default permissive).
+    /// Validation preset: "production", "strict", or "permissive". Ordinary
+    /// backends retain the historical permissive default; step-up defaults to
+    /// production and rejects permissive.
     #[serde(default)]
     security: Option<String>,
     /// Accepted clock skew (seconds) between this SP and the IdP; overrides
@@ -152,9 +171,16 @@ enum IdpMetadata {
     Static {
         sso_url: String,
         verifier: SamlVerifier,
+        policy_values: MetadataPolicyValues,
     },
     /// Resolved per request from an MDQ server, keyed by `idp_entity_id`.
     Mdq(ScopeAwareMdqClient),
+}
+
+struct ResolvedIdpMetadata {
+    entity: EntityDescriptor,
+    scopes: Vec<String>,
+    policy_values: MetadataPolicyValues,
 }
 
 #[derive(Clone)]
@@ -240,10 +266,7 @@ where
         }
     }
 
-    async fn get(
-        &self,
-        entity_id: &str,
-    ) -> std::result::Result<(EntityDescriptor, Vec<String>), MdqError> {
+    async fn get(&self, entity_id: &str) -> std::result::Result<ResolvedIdpMetadata, MdqError> {
         let lookup_lock = self.lookup_lock(entity_id);
         let _lookup = lookup_lock.lock().await;
         // Keep a request-local copy because a concurrent lookup for another
@@ -266,7 +289,12 @@ where
             .await?;
 
         let Some(captured_bytes) = captured_bytes else {
-            return Ok((entity, cached_scopes));
+            let policy_values = trusted_idp_policy_values(&entity);
+            return Ok(ResolvedIdpMetadata {
+                entity,
+                scopes: cached_scopes,
+                policy_values,
+            });
         };
 
         // Promote only bytes fetched and accepted by this lookup. The MDQ
@@ -282,7 +310,12 @@ where
             trusted_scopes.clear();
         }
         trusted_scopes.insert(entity_id.to_string(), scopes.clone());
-        Ok((entity, scopes))
+        let policy_values = trusted_idp_policy_values(&entity);
+        Ok(ResolvedIdpMetadata {
+            entity,
+            scopes,
+            policy_values,
+        })
     }
 
     fn lookup_lock(&self, entity_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -360,6 +393,7 @@ struct DecodedAcsResponse {
 
 pub struct Saml2Backend {
     name: String,
+    state_namespace: String,
     sp_entity_id: String,
     acs_url: String,
     idp_entity_id: Option<String>,
@@ -371,7 +405,7 @@ pub struct Saml2Backend {
     sign_requests: bool,
     name_id_format: Option<String>,
     sp_cert_b64: Option<String>,
-    strict: bool,
+    security: SecurityPreset,
     accepted_time_diff_secs: Option<u64>,
     passthrough_unmapped_attributes: bool,
     scope_subject_id_by_issuer: bool,
@@ -393,10 +427,96 @@ pub struct Saml2Backend {
     /// Certs published with `use="encryption"` in SP metadata.
     encryption_certs_b64: Vec<String>,
     mapper: Arc<AttributeMapper>,
+    /// Include `InternalData.subject_id` as an unspecified NameID in the
+    /// outbound AuthnRequest. Enabled only for the step-up micro-SP.
+    request_subject: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecurityPreset {
+    /// gamlastan's test-only compatibility policy.
+    Permissive,
+    /// Secure, interoperable SP defaults: signed assertions plus destination,
+    /// recipient, time, audience, correlation, replay, and E91 checks.
+    Production,
+    /// High-security policy requiring signed responses, directly signed and
+    /// encrypted assertions, and client-address validation as applicable.
+    Strict,
+}
+
+fn consumed_saml_attributes(
+    response: &gamlastan::core::protocol::response::Response,
+    authenticated_assertion: &Assertion,
+    require_authn_provenance: bool,
+) -> Vec<Attribute> {
+    if require_authn_provenance {
+        web_browser::extract_attributes(&authenticated_assertion.attribute_statements)
+    } else {
+        response
+            .assertions
+            .iter()
+            .flat_map(|assertion| web_browser::extract_attributes(&assertion.attribute_statements))
+            .collect()
+    }
 }
 
 impl Saml2Backend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
+        Self::build_concrete(bx, false, bx.name.clone())
+            .map(|backend| Box::new(backend) as Box<dyn Backend>)
+    }
+
+    pub(crate) fn build_stepup(bx: &BuildContext) -> Result<Self> {
+        let backend = Self::build_concrete(bx, true, format!("stepup_saml:{}", bx.name))?;
+        if backend.security == SecurityPreset::Permissive {
+            return Err(Error::Config(format!(
+                "stepup {}: security=permissive is test-only and is not allowed; use production or strict",
+                bx.name
+            )));
+        }
+        if !backend.sign_requests {
+            return Err(Error::Config(format!(
+                "stepup {}: sign_authn_requests must be true",
+                bx.name
+            )));
+        }
+        if backend.allow_unsolicited {
+            return Err(Error::Config(format!(
+                "stepup {}: allow_unsolicited must be false",
+                bx.name
+            )));
+        }
+        if backend.disco_srv.is_some() {
+            return Err(Error::Config(format!(
+                "stepup {}: disco_srv is not supported; the linked account selects the provider",
+                bx.name
+            )));
+        }
+        Ok(backend)
+    }
+
+    pub(crate) fn validate_stepup_target(&self, entity_id: &str) -> Result<()> {
+        if entity_id.is_empty()
+            || entity_id.chars().count() > 1024
+            || entity_id.chars().any(char::is_control)
+        {
+            return Err(Error::Authn("step-up provider entity id is invalid".into()));
+        }
+        if matches!(self.idp_metadata, IdpMetadata::Static { .. })
+            && self.idp_entity_id.as_deref() != Some(entity_id)
+        {
+            return Err(Error::Authn(
+                "linked step-up provider does not match the statically configured IdP".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn build_concrete(
+        bx: &BuildContext,
+        request_subject: bool,
+        state_namespace: String,
+    ) -> Result<Self> {
         let cfg: Saml2BackendConfig = bx.parse_config()?;
         let module_base = bx.module_base();
         let sp_entity_id = cfg
@@ -412,6 +532,26 @@ impl Saml2Backend {
         {
             return Err(Error::Config(format!(
                 "saml2 backend {}: idp_scopes entries must be non-empty and contain no control characters",
+                bx.name
+            )));
+        }
+        if cfg
+            .idp_assurance_certifications
+            .iter()
+            .any(|value| value.is_empty() || value.chars().any(char::is_control))
+        {
+            return Err(Error::Config(format!(
+                "saml2 backend {}: idp_assurance_certifications entries must be non-empty and contain no control characters",
+                bx.name
+            )));
+        }
+        if cfg
+            .idp_entity_categories
+            .iter()
+            .any(|value| value.is_empty() || value.chars().any(char::is_control))
+        {
+            return Err(Error::Config(format!(
+                "saml2 backend {}: idp_entity_categories entries must be non-empty and contain no control characters",
                 bx.name
             )));
         }
@@ -431,12 +571,21 @@ impl Saml2Backend {
         // is present, else the static idp_sso_url + idp_cert_path pair.
         let idp_metadata = match &cfg.mdq {
             Some(mdq_cfg) => {
-                if !cfg.idp_scopes.is_empty() {
+                if request_subject && mdq_cfg.allow_unverified {
+                    return Err(Error::Config(format!(
+                        "stepup {}: mdq.allow_unverified is not allowed; step-up metadata must be signature-verified",
+                        bx.name
+                    )));
+                }
+                if !cfg.idp_scopes.is_empty()
+                    || !cfg.idp_assurance_certifications.is_empty()
+                    || !cfg.idp_entity_categories.is_empty()
+                {
                     return Err(Error::Config(
-                        "saml2 backend idp_scopes is only valid in static mode; MDQ mode reads scopes from trusted metadata".into(),
+                        "saml2 backend idp_scopes, idp_entity_categories, and idp_assurance_certifications are only valid in static mode; MDQ mode reads them from trusted metadata".into(),
                     ));
                 }
-                if cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
+                if !request_subject && cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
                     return Err(Error::Config(
                         "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv".into(),
                     ));
@@ -470,7 +619,14 @@ impl Saml2Backend {
                     .decode(extract_cert_b64(&idp_cert))
                     .map_err(|e| Error::Crypto(format!("decoding idp cert: {e}")))?;
                 let verifier = verifier_from_cert_ders(&[idp_cert_der])?;
-                IdpMetadata::Static { sso_url, verifier }
+                IdpMetadata::Static {
+                    sso_url,
+                    verifier,
+                    policy_values: MetadataPolicyValues {
+                        entity_categories: cfg.idp_entity_categories,
+                        assurance_certifications: cfg.idp_assurance_certifications,
+                    },
+                }
             }
         };
 
@@ -506,21 +662,24 @@ impl Saml2Backend {
 
         // Fail closed on a typo'd security preset instead of silently
         // selecting the permissive one.
-        let strict = match cfg.security.as_deref() {
-            None => false,
-            Some(v) if v.eq_ignore_ascii_case("strict") => true,
-            Some(v) if v.eq_ignore_ascii_case("permissive") => false,
+        let security = match cfg.security.as_deref() {
+            None if request_subject => SecurityPreset::Production,
+            None => SecurityPreset::Permissive,
+            Some(v) if v.eq_ignore_ascii_case("production") => SecurityPreset::Production,
+            Some(v) if v.eq_ignore_ascii_case("strict") => SecurityPreset::Strict,
+            Some(v) if v.eq_ignore_ascii_case("permissive") => SecurityPreset::Permissive,
             Some(other) => {
                 return Err(Error::Config(format!(
                     "saml2 backend {}: unknown security value {other:?} \
-                     (expected \"strict\" or \"permissive\")",
+                     (expected \"production\", \"strict\", or \"permissive\")",
                     bx.name
                 )))
             }
         };
 
-        Ok(Box::new(Saml2Backend {
+        Ok(Saml2Backend {
             name: bx.name.clone(),
+            state_namespace,
             sp_entity_id,
             acs_url,
             idp_entity_id: cfg.idp_entity_id,
@@ -531,7 +690,7 @@ impl Saml2Backend {
             sign_requests: cfg.sign_authn_requests,
             name_id_format: cfg.name_id_format,
             sp_cert_b64,
-            strict,
+            security,
             accepted_time_diff_secs: cfg.accepted_time_diff_secs,
             passthrough_unmapped_attributes: cfg.passthrough_unmapped_attributes,
             scope_subject_id_by_issuer: cfg.scope_subject_id_by_issuer,
@@ -543,7 +702,8 @@ impl Saml2Backend {
             decryptors,
             encryption_certs_b64,
             mapper: bx.attribute_mapper.clone(),
-        }))
+            request_subject,
+        })
     }
 
     /// Try each configured decryptor in turn (key rotation): bergshamra only
@@ -568,11 +728,11 @@ impl Saml2Backend {
         )))
     }
 
-    fn security_config(&self) -> SecurityConfig {
-        let mut cfg = if self.strict {
-            SecurityConfig::strict()
-        } else {
-            SecurityConfig::permissive()
+    pub(crate) fn security_config(&self) -> SecurityConfig {
+        let mut cfg = match self.security {
+            SecurityPreset::Permissive => SecurityConfig::permissive(),
+            SecurityPreset::Production => SecurityConfig::default(),
+            SecurityPreset::Strict => SecurityConfig::strict(),
         };
         if let Some(skew) = self.accepted_time_diff_secs {
             cfg.clock_skew_seconds = skew;
@@ -684,12 +844,22 @@ impl Saml2Backend {
     /// Response against it.
     async fn handle_acs(&self, ctx: &mut Context) -> Result<BackendAction> {
         match &self.idp_metadata {
-            IdpMetadata::Static { verifier, .. } => {
+            IdpMetadata::Static {
+                verifier,
+                policy_values,
+                ..
+            } => {
                 let expected = self
                     .idp_entity_id
                     .as_deref()
                     .ok_or_else(|| Error::Internal("static mode without idp_entity_id".into()))?;
-                self.process_acs(ctx, verifier, expected, &self.static_idp_scopes)
+                self.process_acs(
+                    ctx,
+                    verifier,
+                    expected,
+                    &self.static_idp_scopes,
+                    policy_values,
+                )
             }
             IdpMetadata::Mdq(client) => {
                 // Verify against the cert for the IdP we actually sent the request
@@ -697,15 +867,21 @@ impl Saml2Backend {
                 // claimed by the Response. Falls back to the configured default.
                 let selected = ctx
                     .state
-                    .get_str(&self.name, "idp_entity_id")
+                    .get_str(&self.state_namespace, "idp_entity_id")
                     .or_else(|| self.idp_entity_id.clone())
                     .ok_or_else(|| Error::Authn("no IdP selected for this flow".into()))?;
-                let (entity, scopes) = client
+                let resolved = client
                     .get(&selected)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {selected} failed: {e}")))?;
-                let verifier = idp_verifier_from_metadata(&entity)?;
-                self.process_acs(ctx, &verifier, &selected, &scopes)
+                let verifier = idp_verifier_from_metadata(&resolved.entity)?;
+                self.process_acs(
+                    ctx,
+                    &verifier,
+                    &selected,
+                    &resolved.scopes,
+                    &resolved.policy_values,
+                )
             }
         }
     }
@@ -716,6 +892,7 @@ impl Saml2Backend {
         verifier: &SamlVerifier,
         expected_idp_entity_id: &str,
         provider_scopes: &[String],
+        provider_policy_values: &MetadataPolicyValues,
     ) -> Result<BackendAction> {
         // SAMLResponse arrives via HTTP-POST (base64 form field) or
         // HTTP-Redirect (deflated query param, optionally query-signed).
@@ -735,6 +912,18 @@ impl Saml2Backend {
         >(&doc)
         .map_err(|e| Error::BadRequest(format!("parsing Response: {e}")))?
         .to_owned();
+        if self.request_subject
+            && response
+                .base
+                .issuer
+                .as_ref()
+                .map(|issuer| issuer.value.as_str())
+                != Some(expected_idp_entity_id)
+        {
+            return Err(Error::Authn(
+                "step-up SAML Response issuer does not match the linked provider".into(),
+            ));
+        }
         let cleartext_assertions_xml =
             cleartext_assertion_sources(&doc, response.assertions.len())?;
 
@@ -847,7 +1036,7 @@ impl Saml2Backend {
                     .is_some_and(|sub| sub.value == constants::STATUS_NO_PASSIVE);
             let is_passive = ctx
                 .state
-                .get_value(&self.name, "is_passive")
+                .get_value(&self.state_namespace, "is_passive")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             if is_passive && is_no_passive {
@@ -884,7 +1073,7 @@ impl Saml2Backend {
         //    unsolicited Response (no InResponseTo) and `allow_unsolicited`
         //    is on — a missing id must never silently skip the InResponseTo
         //    check (fail closed).
-        let expected_id = match ctx.state.get_str(&self.name, "authn_id") {
+        let expected_id = match ctx.state.get_str(&self.state_namespace, "authn_id") {
             Some(id) => Some(id),
             None if self.allow_unsolicited && response.base.in_response_to.is_none() => None,
             None if self.allow_unsolicited => {
@@ -977,11 +1166,11 @@ impl Saml2Backend {
             .first()
             .and_then(|s| s.authn_context.authn_context_class_ref.clone());
         let idp_entity_id = assertion.issuer.value.clone();
-        let saml_attributes: Vec<_> = response
-            .assertions
-            .iter()
-            .flat_map(|a| web_browser::extract_attributes(&a.attribute_statements))
-            .collect();
+        // Step-up elevates an existing login, so every identity-bearing value
+        // it consumes must have the same assertion provenance as the
+        // AuthnStatement, issuer, subject, and LoA selected above. Ordinary
+        // backends retain their historical multi-assertion aggregation.
+        let saml_attributes = consumed_saml_attributes(&response, assertion, self.request_subject);
 
         // 6) Map SAML attributes -> internal. Key by both the attribute Name and
         //    its FriendlyName so the attribute map can match either.
@@ -1081,8 +1270,30 @@ impl Saml2Backend {
                     .collect(),
             ),
         );
+        ctx.decorate(
+            KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+            serde_json::Value::Array(
+                provider_policy_values
+                    .assurance_certifications
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        ctx.decorate(
+            KEY_PROVIDER_ENTITY_CATEGORIES,
+            serde_json::Value::Array(
+                provider_policy_values
+                    .entity_categories
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
 
-        ctx.state.clear_namespace(&self.name);
+        ctx.state.clear_namespace(&self.state_namespace);
 
         let response = InternalData {
             auth_info: AuthenticationInformation {
@@ -1104,6 +1315,33 @@ impl Saml2Backend {
 
 const SHIBBOLETH_METADATA_NS: &str = "urn:mace:shibboleth:metadata:1.0";
 const SAML_METADATA_NS: &str = "urn:oasis:names:tc:SAML:2.0:metadata";
+
+fn trusted_idp_policy_values(entity: &EntityDescriptor) -> MetadataPolicyValues {
+    let mut values = MetadataPolicyValues::default();
+    let active_role = entity.idp_sso_descriptors().first();
+    for extensions in [
+        entity.extensions.as_ref(),
+        active_role.and_then(|role| role.sso_base.base.extensions.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let parsed = gamlastan::metadata::types::MdExtensions::from_extensions(extensions);
+        for category in parsed.entity_categories() {
+            if !values.entity_categories.contains(&category) {
+                values.entity_categories.push(category);
+            }
+        }
+        for certification in parsed.entity_attribute_values(
+            gamlastan::profiles::swedenconnect::constants::ASSURANCE_CERTIFICATION_ATTR,
+        ) {
+            if !values.assurance_certifications.contains(&certification) {
+                values.assurance_certifications.push(certification);
+            }
+        }
+    }
+    values
+}
 
 /// Extract direct Shibboleth `<Scope>` children of an IdP role's
 /// `<md:Extensions>` from the original accepted metadata document.
@@ -1203,15 +1441,61 @@ impl Backend for Saml2Backend {
         // Persist the requester's authentication constraints so they survive
         // a discovery-service round-trip and reach `build_authn_redirect`.
         ctx.state.set_value(
-            &self.name,
+            &self.state_namespace,
             "force_authn",
             serde_json::Value::Bool(request.force_authn),
         );
         ctx.state.set_value(
-            &self.name,
+            &self.state_namespace,
             "is_passive",
             serde_json::Value::Bool(request.is_passive),
         );
+        // Decorations are single-request values, but IdP discovery is a
+        // browser round trip. Preserve both the ordinary ACCR selection and
+        // the step-up override policy in encrypted flow state until the IdP
+        // is known, then consume them in `build_authn_redirect`.
+        ctx.state.set_value(
+            &self.state_namespace,
+            STATE_INITIAL_STEPUP_POLICY,
+            ctx.decoration(KEY_STEPUP_INITIAL_POLICY)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+        // Read only this new request's decorations here. Falling back to
+        // encrypted state is reserved for the discovery callback; otherwise
+        // an abandoned older flow in the same browser could seed a new one.
+        let target_accr = decoration_string_array(
+            ctx,
+            tunnelbana_core::context::KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+        );
+        ctx.state.set_value(
+            &self.state_namespace,
+            STATE_TARGET_ACCR,
+            serde_json::Value::Array(
+                target_accr
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        ctx.state.set_value(
+            &self.state_namespace,
+            STATE_TARGET_ACCR_COMPARISON,
+            ctx.decoration(tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+        if self.request_subject {
+            let subject = request
+                .subject_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    Error::Authn("step-up request has no linked-account identifier".into())
+                })?;
+            ctx.state
+                .set_str(&self.state_namespace, "requested_subject", subject);
+        }
         // Pick the target IdP. In MDQ mode the target can be chosen per
         // request — an `entityID` handed back by a discovery service
         // (SeamlessAccess/thiss.io) or a target-entity decoration left by a
@@ -1220,15 +1504,23 @@ impl Backend for Saml2Backend {
         match &self.idp_metadata {
             IdpMetadata::Static { .. } => self.build_authn_redirect(ctx, None).await,
             IdpMetadata::Mdq(_) => {
-                let target = ctx
-                    .request
-                    .param("entityID")
-                    .map(str::to_string)
-                    .or_else(|| {
-                        ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                    });
+                let decorated_target = || {
+                    ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                // A step-up target comes solely from the SCIM-derived,
+                // operator-mapped linked account. Never let an `entityID`
+                // query parameter on the initial IdP's ACS request override
+                // it. Ordinary backends retain discovery-parameter priority.
+                let target = if self.request_subject {
+                    decorated_target()
+                } else {
+                    ctx.request
+                        .param("entityID")
+                        .map(str::to_string)
+                        .or_else(decorated_target)
+                };
                 match target.or_else(|| self.idp_entity_id.clone()) {
                     Some(target) => self.build_authn_redirect(ctx, Some(&target)).await,
                     None => {
@@ -1295,32 +1587,85 @@ impl Saml2Backend {
         ctx: &mut Context,
         target_idp: Option<&str>,
     ) -> Result<Response> {
-        let sso_url = match &self.idp_metadata {
-            IdpMetadata::Static { sso_url, .. } => sso_url.clone(),
+        let (sso_url, selected_entity_id, policy_values) = match &self.idp_metadata {
+            IdpMetadata::Static {
+                sso_url,
+                policy_values,
+                ..
+            } => (
+                sso_url.clone(),
+                self.idp_entity_id.clone().ok_or_else(|| {
+                    Error::Internal("static mode without an IdP entity ID".into())
+                })?,
+                policy_values.clone(),
+            ),
             IdpMetadata::Mdq(client) => {
                 let target = target_idp
                     .ok_or_else(|| Error::Internal("MDQ mode without a target IdP".into()))?;
-                let (entity, _) = client
+                let resolved = client
                     .get(target)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {target} failed: {e}")))?;
-                let url = idp_sso_redirect_url(&entity)?;
-                ctx.state.set_str(&self.name, "idp_entity_id", target);
-                url
+                let url = idp_sso_redirect_url(&resolved.entity)?;
+                ctx.state
+                    .set_str(&self.state_namespace, "idp_entity_id", target);
+                (url, target.to_string(), resolved.policy_values)
             }
         };
 
         // A request-path micro-service (e.g. `accr`) may have selected the
         // AuthnContextClassRef to forward; absent that, no RequestedAuthnContext
         // is emitted (preserving prior behavior).
-        let (authn_context_class_refs, authn_context_comparison) = read_target_accr(ctx);
+        let (mut authn_context_class_refs, mut authn_context_comparison) =
+            read_target_accr(ctx, &self.state_namespace);
+        let handoff_value = ctx
+            .decorations
+            .remove(KEY_STEPUP_INITIAL_POLICY)
+            .or_else(|| {
+                ctx.state
+                    .get_value(&self.state_namespace, STATE_INITIAL_STEPUP_POLICY)
+                    .filter(|value| !value.is_null())
+                    .cloned()
+            });
+        if let Some(value) = handoff_value {
+            let handoff: InitialPolicyHandoff = serde_json::from_value(value)
+                .map_err(|e| Error::State(format!("invalid initial step-up policy: {e}")))?;
+            if handoff.requester_wants_mfa {
+                if let Some(settings) = resolve_policy(
+                    &handoff.mfa,
+                    Some(&selected_entity_id),
+                    &policy_values,
+                    handoff.behavior,
+                    PolicySubject::Provider,
+                ) {
+                    authn_context_class_refs = settings.requested.clone();
+                    authn_context_comparison =
+                        Some(gamlastan::core::protocol::request::AuthnContextComparison::Exact);
+                }
+            }
+        }
+        ctx.state.set_value(
+            &self.state_namespace,
+            STATE_INITIAL_STEPUP_POLICY,
+            serde_json::Value::Null,
+        );
+        ctx.state.set_value(
+            &self.state_namespace,
+            STATE_TARGET_ACCR,
+            serde_json::Value::Null,
+        );
+        ctx.state.set_value(
+            &self.state_namespace,
+            STATE_TARGET_ACCR_COMPARISON,
+            serde_json::Value::Null,
+        );
 
         // The downstream requester's ForceAuthn/IsPassive constraints,
         // persisted by `start_auth` (false when absent), are forwarded
         // upstream so they are never silently dropped.
         let state_flag = |key: &str| {
             ctx.state
-                .get_value(&self.name, key)
+                .get_value(&self.state_namespace, key)
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
         };
@@ -1338,9 +1683,26 @@ impl Saml2Backend {
             authn_context_comparison,
             ..Default::default()
         };
-        let req = sp_profile::create_authn_request(&options)
+        let mut req = sp_profile::create_authn_request(&options)
             .map_err(|e| Error::Internal(format!("creating AuthnRequest: {e}")))?;
-        ctx.state.set_str(&self.name, "authn_id", &req.base.id);
+        if self.request_subject {
+            let subject = ctx
+                .state
+                .get_str(&self.state_namespace, "requested_subject")
+                .ok_or_else(|| Error::State("step-up request subject is missing".into()))?;
+            req.subject = Some(Subject {
+                name_id: Some(NameIdOrEncryptedId::NameId(NameId {
+                    value: subject,
+                    format: Some(constants::NAMEID_UNSPECIFIED.to_string()),
+                    name_qualifier: None,
+                    sp_name_qualifier: None,
+                    sp_provided_id: None,
+                })),
+                subject_confirmations: Vec::new(),
+            });
+        }
+        ctx.state
+            .set_str(&self.state_namespace, "authn_id", &req.base.id);
 
         let xml = req
             .to_xml_string()
@@ -1369,12 +1731,14 @@ impl Saml2Backend {
 /// when nothing was selected, in which case no RequestedAuthnContext is emitted.
 fn read_target_accr(
     ctx: &Context,
+    state_namespace: &str,
 ) -> (
     Vec<String>,
     Option<gamlastan::core::protocol::request::AuthnContextComparison>,
 ) {
     let refs = ctx
         .decoration(tunnelbana_core::context::KEY_TARGET_AUTHN_CONTEXT_CLASS_REF)
+        .or_else(|| ctx.state.get_value(state_namespace, STATE_TARGET_ACCR))
         .and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
@@ -1384,9 +1748,26 @@ fn read_target_accr(
         .unwrap_or_default();
     let comparison = ctx
         .decoration(tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON)
+        .or_else(|| {
+            ctx.state
+                .get_value(state_namespace, STATE_TARGET_ACCR_COMPARISON)
+        })
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok());
     (refs, comparison)
+}
+
+fn decoration_string_array(ctx: &Context, key: &str) -> Vec<String> {
+    ctx.decoration(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn subject_type_from_name_id_format(name_id_format: Option<&str>) -> SubjectType {
@@ -1678,6 +2059,25 @@ mod tests {
     }
 
     #[test]
+    fn target_accr_falls_back_to_encrypted_state_after_discovery() {
+        let mut ctx = crate::microservices::testutil::ctx();
+        ctx.state.set_value(
+            "backend",
+            STATE_TARGET_ACCR,
+            serde_json::json!(["urn:stored:loa"]),
+        );
+        ctx.state
+            .set_str("backend", STATE_TARGET_ACCR_COMPARISON, "minimum");
+
+        let (refs, comparison) = read_target_accr(&ctx, "backend");
+        assert_eq!(refs, ["urn:stored:loa"]);
+        assert_eq!(
+            comparison,
+            Some(gamlastan::core::protocol::request::AuthnContextComparison::Minimum)
+        );
+    }
+
+    #[test]
     fn attribute_string_values_preserves_nameid_text() {
         let values = attribute_string_values(&[AttributeValue::NameId(NameId {
             value: "idp!sp!legacy".to_string(),
@@ -1688,6 +2088,74 @@ mod tests {
         })]);
 
         assert_eq!(values, vec!["idp!sp!legacy".to_string()]);
+    }
+
+    #[test]
+    fn stepup_attributes_are_bound_to_the_authenticated_assertion() {
+        use gamlastan::core::assertion::attribute::AttributeStatement;
+        use gamlastan::profiles::sso::idp;
+        use gamlastan::profiles::sso::web_browser::{ResponseOptions, ResponseTimes};
+
+        let options = ResponseOptions {
+            idp_entity_id: "https://idp.example.org".into(),
+            in_response_to: Some("request-id".into()),
+            sp_entity_id: "https://stepup.example.org".into(),
+            acs_url: "https://stepup.example.org/acs".into(),
+            assertion_lifetime_seconds: 300,
+            session_index: None,
+            session_not_on_or_after: None,
+            authn_context_class_ref: Some("urn:loa:mfa".into()),
+            client_address: None,
+            attributes: vec![Attribute {
+                name: "primary-only".into(),
+                name_format: None,
+                friendly_name: None,
+                values: vec![AttributeValue::String("primary-value".into())],
+            }],
+        };
+        let name_id = NameId {
+            value: "authenticated-subject".into(),
+            format: Some(constants::NAMEID_PERSISTENT.into()),
+            name_qualifier: Some("https://idp.example.org".into()),
+            sp_name_qualifier: Some("https://stepup.example.org".into()),
+            sp_provided_id: None,
+        };
+        let mut response = idp::create_response(&options, &name_id, ResponseTimes::at(Utc::now()));
+        let mut attribute_only_assertion = response.assertions[0].clone();
+        attribute_only_assertion.id = "attribute-only-assertion".into();
+        attribute_only_assertion.authn_statements.clear();
+        attribute_only_assertion.attribute_statements = vec![AttributeStatement {
+            attributes: vec![Attribute {
+                name: "linked-identifier".into(),
+                name_format: None,
+                friendly_name: None,
+                values: vec![AttributeValue::String("other-subject@example.org".into())],
+            }],
+        }];
+        response.assertions.push(attribute_only_assertion);
+
+        let authenticated_assertion = response
+            .assertions
+            .iter()
+            .find(|assertion| !assertion.authn_statements.is_empty())
+            .unwrap();
+        let stepup = consumed_saml_attributes(&response, authenticated_assertion, true);
+        assert_eq!(
+            stepup
+                .iter()
+                .map(|attribute| attribute.name.as_str())
+                .collect::<Vec<_>>(),
+            ["primary-only"]
+        );
+
+        let ordinary = consumed_saml_attributes(&response, authenticated_assertion, false);
+        assert_eq!(
+            ordinary
+                .iter()
+                .map(|attribute| attribute.name.as_str())
+                .collect::<Vec<_>>(),
+            ["primary-only", "linked-identifier"]
+        );
     }
 
     #[test]
@@ -1830,6 +2298,85 @@ mod tests {
     }
 
     #[test]
+    fn extracts_trusted_assurance_certifications_from_entity_metadata() {
+        let xml = r#"
+        <md:EntityDescriptor
+            xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+            xmlns:mdattr="urn:oasis:names:tc:SAML:metadata:attribute"
+            xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+            entityID="https://idp.example.org">
+          <md:Extensions>
+            <mdattr:EntityAttributes>
+              <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+                <saml:AttributeValue>https://cert.example/eid</saml:AttributeValue>
+              </saml:Attribute>
+            </mdattr:EntityAttributes>
+          </md:Extensions>
+          <md:IDPSSODescriptor
+              protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:SingleSignOnService
+                Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+                Location="https://idp.example.org/sso"/>
+          </md:IDPSSODescriptor>
+        </md:EntityDescriptor>
+        "#;
+        let doc = gamlastan::xml::uppsala::parse(xml).unwrap();
+        let entity = gamlastan::xml::deserialize::parse_saml::<
+            gamlastan::metadata::types::entity_descriptor::EntityDescriptorRef<'_>,
+        >(&doc)
+        .unwrap()
+        .to_owned();
+        assert_eq!(
+            trusted_idp_policy_values(&entity).assurance_certifications,
+            ["https://cert.example/eid"]
+        );
+    }
+
+    #[test]
+    fn policy_values_ignore_later_idp_roles() {
+        let xml = r#"
+        <md:EntityDescriptor
+            xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+            xmlns:mdattr="urn:oasis:names:tc:SAML:metadata:attribute"
+            xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+            entityID="https://idp.example.org">
+          <md:Extensions><mdattr:EntityAttributes>
+            <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+              <saml:AttributeValue>https://cert.example/entity</saml:AttributeValue>
+            </saml:Attribute>
+          </mdattr:EntityAttributes></md:Extensions>
+          <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:Extensions><mdattr:EntityAttributes>
+              <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+                <saml:AttributeValue>https://cert.example/active</saml:AttributeValue>
+              </saml:Attribute>
+            </mdattr:EntityAttributes></md:Extensions>
+            <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.org/active"/>
+          </md:IDPSSODescriptor>
+          <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:Extensions><mdattr:EntityAttributes>
+              <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+                <saml:AttributeValue>https://cert.example/later</saml:AttributeValue>
+              </saml:Attribute>
+            </mdattr:EntityAttributes></md:Extensions>
+            <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.org/later"/>
+          </md:IDPSSODescriptor>
+        </md:EntityDescriptor>
+        "#;
+        let doc = gamlastan::xml::uppsala::parse(xml).unwrap();
+        let entity = gamlastan::xml::deserialize::parse_saml::<
+            gamlastan::metadata::types::entity_descriptor::EntityDescriptorRef<'_>,
+        >(&doc)
+        .unwrap()
+        .to_owned();
+
+        assert_eq!(
+            trusted_idp_policy_values(&entity).assurance_certifications,
+            ["https://cert.example/entity", "https://cert.example/active"]
+        );
+    }
+
+    #[test]
     fn malformed_or_dtd_scope_extensions_fail_soft() {
         for xml in [
             "<md:EntityDescriptor>",
@@ -1899,8 +2446,8 @@ mod tests {
 
         let (first, second) =
             tokio::join!(client.get(&first_entity_id), client.get(&second_entity_id));
-        assert_eq!(first.unwrap().1, ["first.scope.example.org"]);
-        assert_eq!(second.unwrap().1, ["second.scope.example.org"]);
+        assert_eq!(first.unwrap().scopes, ["first.scope.example.org"]);
+        assert_eq!(second.unwrap().scopes, ["second.scope.example.org"]);
         assert_eq!(max_active.load(Ordering::SeqCst), 2);
     }
 
@@ -1921,24 +2468,24 @@ mod tests {
         let client = ScopeAwareMdqClient::new(client, 2);
 
         assert_eq!(
-            client.get("first").await.unwrap().1,
+            client.get("first").await.unwrap().scopes,
             ["first.scope.example.org"]
         );
         assert_eq!(
-            client.get("second").await.unwrap().1,
+            client.get("second").await.unwrap().scopes,
             ["second.scope.example.org"]
         );
         assert_eq!(client.client.cache_len(), 2);
 
         assert_eq!(
-            client.get("third").await.unwrap().1,
+            client.get("third").await.unwrap().scopes,
             ["third.scope.example.org"]
         );
         assert_eq!(client.client.cache_len(), 1);
         assert_eq!(lock_unpoisoned(&client.trusted_scopes).entries.len(), 1);
 
         assert_eq!(
-            client.get("first").await.unwrap().1,
+            client.get("first").await.unwrap().scopes,
             ["first.scope.example.org"]
         );
         assert_eq!(fetch_count.load(Ordering::SeqCst), 4);

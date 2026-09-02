@@ -8,6 +8,7 @@ use crate::http::{HttpRequestData, Response};
 use crate::internal::InternalData;
 use crate::plugin::{
     Backend, BackendAction, Frontend, FrontendAction, MicroService, MicroServiceAction,
+    MicroServiceResponseAction,
 };
 use crate::router::{ModuleKind, Router};
 use crate::state::StateSealer;
@@ -161,6 +162,9 @@ impl Proxy {
                         // remaining chain), then dispatch to a backend.
                         self.finish_request(ctx, request, idx + 1, None).await
                     }
+                    MicroServiceAction::ResumeResponse { response } => {
+                        self.finish_response(ctx, response, idx + 1).await
+                    }
                 }
             }
         }
@@ -254,21 +258,42 @@ impl Proxy {
                     response.requester = ctx.requester();
                 }
 
-                // Response-path micro-services.
-                for ms in &self.microservices {
-                    response = ms.process_response(ctx, response).await?;
-                }
-
-                let frontend = self
-                    .frontends
-                    .get(&frontend_name)
-                    .ok_or_else(|| Error::UnknownModule(frontend_name.clone()))?;
-                let resp = frontend.handle_authn_response(ctx, response).await?;
-                // Session complete — clear the state cookie.
-                ctx.state.delete = true;
-                Ok(resp)
+                self.finish_response(ctx, response, 0).await
             }
         }
+    }
+
+    /// Run response-path micro-services from `start_index`, then render the
+    /// final result through the originating frontend. A service may interrupt
+    /// the chain with an HTTP response and later resume it from its endpoint.
+    async fn finish_response(
+        &self,
+        ctx: &mut Context,
+        mut response: InternalData,
+        start_index: usize,
+    ) -> Result<Response> {
+        for ms in self.microservices.iter().skip(start_index) {
+            match ms.process_response_action(ctx, response).await? {
+                MicroServiceResponseAction::Continue(next) => response = next,
+                MicroServiceResponseAction::Respond(http) => return Ok(http),
+            }
+        }
+
+        let frontend_name = ctx
+            .target_frontend
+            .clone()
+            .or_else(|| ctx.state.get_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND))
+            .ok_or_else(|| Error::State("no originating frontend in state".into()))?;
+        ctx.target_frontend = Some(frontend_name.clone());
+        let frontend = self
+            .frontends
+            .get(&frontend_name)
+            .ok_or(Error::UnknownModule(frontend_name))?;
+        let rendered = frontend.handle_authn_response(ctx, response).await?;
+        // Session complete — clear the state cookie. Interrupted response
+        // chains deliberately retain it until their callback resumes here.
+        ctx.state.delete = true;
+        Ok(rendered)
     }
 
     /// Render an error, preferring an error-redirect decoration, then the
@@ -630,6 +655,157 @@ mod tests {
         assert_eq!(String::from_utf8(response.body).unwrap(), "request failed");
         assert!(calls.lock().unwrap().is_empty());
         assert!(received.lock().unwrap().is_none());
+    }
+
+    struct ResponseRecordingService {
+        name: String,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        backends: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        resume: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl MicroService for ResponseRecordingService {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn process_response(
+            &self,
+            ctx: &mut Context,
+            data: crate::internal::InternalData,
+        ) -> crate::error::Result<crate::internal::InternalData> {
+            self.calls.lock().unwrap().push(self.name.clone());
+            self.backends
+                .lock()
+                .unwrap()
+                .push(ctx.target_backend.clone());
+            Ok(data)
+        }
+
+        fn register_endpoints(&self) -> Vec<crate::plugin::Route> {
+            self.resume
+                .then(|| crate::plugin::Route::exact("resume-response", "resume"))
+                .into_iter()
+                .collect()
+        }
+
+        async fn handle_endpoint(
+            &self,
+            ctx: &mut Context,
+            _route_id: &str,
+        ) -> crate::error::Result<MicroServiceAction> {
+            // A suspending response service such as stepup restores the
+            // original backend before asking the proxy to resume the chain.
+            ctx.target_backend = Some("original-backend".into());
+            Ok(MicroServiceAction::ResumeResponse {
+                response: crate::internal::InternalData {
+                    requester: Some("sp".into()),
+                    auth_info: crate::internal::AuthenticationInformation {
+                        issuer: Some("issuer".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    struct RecordingFrontend;
+
+    #[async_trait::async_trait]
+    impl Frontend for RecordingFrontend {
+        fn name(&self) -> &str {
+            "frontend"
+        }
+
+        fn register_endpoints(&self, _backend_names: &[String]) -> Vec<crate::plugin::Route> {
+            Vec::new()
+        }
+
+        async fn handle_endpoint(
+            &self,
+            _ctx: &mut Context,
+            _route_id: &str,
+        ) -> crate::error::Result<FrontendAction> {
+            unreachable!()
+        }
+
+        async fn handle_authn_response(
+            &self,
+            _ctx: &mut Context,
+            response: crate::internal::InternalData,
+        ) -> crate::error::Result<Response> {
+            Ok(Response::text(
+                200,
+                response.requester.unwrap_or_else(|| "missing".into()),
+            ))
+        }
+
+        async fn handle_backend_error(
+            &self,
+            _ctx: &mut Context,
+            _error: &crate::error::Error,
+        ) -> crate::error::Result<Response> {
+            Ok(Response::text(500, "frontend error"))
+        }
+    }
+
+    #[tokio::test]
+    async fn response_resume_runs_only_later_services_then_frontend() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let backends = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services: Vec<Box<dyn MicroService>> = vec![
+            Box::new(ResponseRecordingService {
+                name: "before".into(),
+                calls: calls.clone(),
+                backends: backends.clone(),
+                resume: false,
+            }),
+            Box::new(ResponseRecordingService {
+                name: "resumer".into(),
+                calls: calls.clone(),
+                backends: backends.clone(),
+                resume: true,
+            }),
+            Box::new(ResponseRecordingService {
+                name: "after".into(),
+                calls: calls.clone(),
+                backends: backends.clone(),
+                resume: false,
+            }),
+        ];
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
+        let proxy = Proxy::new(vec![Box::new(RecordingFrontend)], vec![], services, sealer);
+        let mut state = State::new();
+        state.set_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND, "frontend");
+        let sealed = proxy.sealer().seal(&state).unwrap();
+        let cookie_value = sealed
+            .split(';')
+            .next()
+            .and_then(|value| value.split_once('='))
+            .map(|(_, value)| value.to_string())
+            .unwrap();
+        let mut request = HttpRequestData {
+            path: "resume-response".into(),
+            ..Default::default()
+        };
+        request
+            .cookies
+            .insert(proxy.sealer().cookie_name().to_string(), cookie_value);
+
+        let response = proxy.run(request).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "sp");
+        assert_eq!(*calls.lock().unwrap(), vec!["after".to_string()]);
+        assert_eq!(
+            *backends.lock().unwrap(),
+            vec![Some("original-backend".to_string())]
+        );
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "set-cookie" && value.contains("Max-Age=0")));
     }
 
     #[tokio::test]
