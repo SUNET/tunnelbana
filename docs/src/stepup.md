@@ -144,6 +144,11 @@ assertion replay checks. Step-up additionally requires:
 - the linked identifier to occur in the configured identifier attribute;
 - the asserted AuthnContextClassRef to occur in `requested`.
 
+For step-up, attributes are read only from the same assertion whose
+AuthnStatement supplies the issuer, subject, and AuthnContextClassRef. Other
+assertions in the Response cannot contribute the linked identifier or merged
+assurance values.
+
 Values from the linked account's assurance attribute are merged into the
 original response through the normal SAML attribute map. `returned`, when set,
 is the downstream LoA; otherwise the first originally requested LoA is used.

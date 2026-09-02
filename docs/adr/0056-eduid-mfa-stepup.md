@@ -52,9 +52,11 @@ return arbitrary HTTP challenges through that boundary.
   satisfied LoA.
 - On the callback, require normal SAML validation plus exact linked provider,
   exact requested step-up LoA and presence of the linked identifier in its
-  configured assertion attribute. Merge only the configured assurance
-  attribute, normalize the returned LoA, restore the original decorations and
-  consume the snapshot before resuming.
+  configured assertion attribute. Bind identifier and assurance extraction to
+  the same assertion whose AuthnStatement supplies the issuer, subject, and
+  LoA; never aggregate step-up identity values across assertions. Merge only
+  the configured assurance attribute, normalize the returned LoA, restore the
+  original decorations and consume the snapshot before resuming.
 - Reject a required step-up on an `IsPassive` flow as interaction-required;
   never turn a passive request into an interactive redirect.
 - Store the response snapshot in the existing encrypted state cookie, with a
@@ -70,6 +72,7 @@ return arbitrary HTTP challenges through that boundary.
 | Initial ACS query overrides the linked provider | The embedded SAML backend ignores request `entityID` values and uses only the account decoration | Trusted operator Python can still publish linked-account data |
 | Forged, replayed or cross-flow step-up response | Native SAML signature, issuer, audience, recipient, time, `InResponseTo` and replay validation; unsolicited mode is forbidden | Replay cache remains process-local, as for ordinary SAML backends; clustered deployments need a shared cache |
 | A valid account assertion authenticates another person | The linked identifier must appear in the configured mapped assertion attribute, in addition to the Subject-bound request | The provider must faithfully enforce the requested Subject and attribute semantics |
+| Attributes from another valid assertion are confused with the authenticated subject | Step-up consumes attributes only from the assertion whose AuthnStatement supplies the issuer, subject and LoA | Ordinary non-step-up SAML backends retain historical multi-assertion aggregation |
 | LoA inflation | Exact comparison is requested and the returned class must be in `requested`; downstream output is an operator-configured normalization or an original requested value | Incorrect LoA configuration can misrepresent assurance |
 | Flow state leaks or is tampered with | Snapshot is compressed inside authenticated JWE state and restored only after ACS validation | The browser holds ciphertext and large responses may exceed cookie transport limits |
 

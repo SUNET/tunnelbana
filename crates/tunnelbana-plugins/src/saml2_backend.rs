@@ -13,9 +13,10 @@ use bytes::Bytes;
 use chrono::Utc;
 use serde::Deserialize;
 
-use gamlastan::core::assertion::attribute::AttributeValue;
+use gamlastan::core::assertion::attribute::{Attribute, AttributeValue};
 use gamlastan::core::assertion::name_id::{NameId, NameIdOrEncryptedId};
 use gamlastan::core::assertion::subject::Subject;
+use gamlastan::core::assertion::types::Assertion;
 use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
 use gamlastan::crypto::{
@@ -419,6 +420,22 @@ enum SecurityPreset {
     /// High-security policy requiring signed responses, directly signed and
     /// encrypted assertions, and client-address validation as applicable.
     Strict,
+}
+
+fn consumed_saml_attributes(
+    response: &gamlastan::core::protocol::response::Response,
+    authenticated_assertion: &Assertion,
+    require_authn_provenance: bool,
+) -> Vec<Attribute> {
+    if require_authn_provenance {
+        web_browser::extract_attributes(&authenticated_assertion.attribute_statements)
+    } else {
+        response
+            .assertions
+            .iter()
+            .flat_map(|assertion| web_browser::extract_attributes(&assertion.attribute_statements))
+            .collect()
+    }
 }
 
 impl Saml2Backend {
@@ -1099,11 +1116,11 @@ impl Saml2Backend {
             .first()
             .and_then(|s| s.authn_context.authn_context_class_ref.clone());
         let idp_entity_id = assertion.issuer.value.clone();
-        let saml_attributes: Vec<_> = response
-            .assertions
-            .iter()
-            .flat_map(|a| web_browser::extract_attributes(&a.attribute_statements))
-            .collect();
+        // Step-up elevates an existing login, so every identity-bearing value
+        // it consumes must have the same assertion provenance as the
+        // AuthnStatement, issuer, subject, and LoA selected above. Ordinary
+        // backends retain their historical multi-assertion aggregation.
+        let saml_attributes = consumed_saml_attributes(&response, assertion, self.request_subject);
 
         // 6) Map SAML attributes -> internal. Key by both the attribute Name and
         //    its FriendlyName so the attribute map can match either.
@@ -1877,6 +1894,74 @@ mod tests {
         })]);
 
         assert_eq!(values, vec!["idp!sp!legacy".to_string()]);
+    }
+
+    #[test]
+    fn stepup_attributes_are_bound_to_the_authenticated_assertion() {
+        use gamlastan::core::assertion::attribute::AttributeStatement;
+        use gamlastan::profiles::sso::idp;
+        use gamlastan::profiles::sso::web_browser::{ResponseOptions, ResponseTimes};
+
+        let options = ResponseOptions {
+            idp_entity_id: "https://idp.example.org".into(),
+            in_response_to: Some("request-id".into()),
+            sp_entity_id: "https://stepup.example.org".into(),
+            acs_url: "https://stepup.example.org/acs".into(),
+            assertion_lifetime_seconds: 300,
+            session_index: None,
+            session_not_on_or_after: None,
+            authn_context_class_ref: Some("urn:loa:mfa".into()),
+            client_address: None,
+            attributes: vec![Attribute {
+                name: "primary-only".into(),
+                name_format: None,
+                friendly_name: None,
+                values: vec![AttributeValue::String("primary-value".into())],
+            }],
+        };
+        let name_id = NameId {
+            value: "authenticated-subject".into(),
+            format: Some(constants::NAMEID_PERSISTENT.into()),
+            name_qualifier: Some("https://idp.example.org".into()),
+            sp_name_qualifier: Some("https://stepup.example.org".into()),
+            sp_provided_id: None,
+        };
+        let mut response = idp::create_response(&options, &name_id, ResponseTimes::at(Utc::now()));
+        let mut attribute_only_assertion = response.assertions[0].clone();
+        attribute_only_assertion.id = "attribute-only-assertion".into();
+        attribute_only_assertion.authn_statements.clear();
+        attribute_only_assertion.attribute_statements = vec![AttributeStatement {
+            attributes: vec![Attribute {
+                name: "linked-identifier".into(),
+                name_format: None,
+                friendly_name: None,
+                values: vec![AttributeValue::String("other-subject@example.org".into())],
+            }],
+        }];
+        response.assertions.push(attribute_only_assertion);
+
+        let authenticated_assertion = response
+            .assertions
+            .iter()
+            .find(|assertion| !assertion.authn_statements.is_empty())
+            .unwrap();
+        let stepup = consumed_saml_attributes(&response, authenticated_assertion, true);
+        assert_eq!(
+            stepup
+                .iter()
+                .map(|attribute| attribute.name.as_str())
+                .collect::<Vec<_>>(),
+            ["primary-only"]
+        );
+
+        let ordinary = consumed_saml_attributes(&response, authenticated_assertion, false);
+        assert_eq!(
+            ordinary
+                .iter()
+                .map(|attribute| attribute.name.as_str())
+                .collect::<Vec<_>>(),
+            ["primary-only", "linked-identifier"]
+        );
     }
 
     #[test]

@@ -7,7 +7,8 @@
   sends a signed, subject-bound exact-LoA SAML request; reuses the hardened
   SAML backend for metadata, signature, audience, time, correlation and replay
   validation; verifies the linked issuer and identifier; merges assurance
-  values; and resumes the original response chain. The core now supports
+  values from the same authenticated assertion; and resumes the original
+  response chain. The core now supports
   response-path interruption/resumption. Trusted requester entity categories
   and provider assurance certifications support eduID's LoA policy mappings.
   Configure services in `ScimAttributes`, `stepup`, `accr` order.
