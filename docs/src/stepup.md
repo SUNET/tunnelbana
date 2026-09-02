@@ -105,6 +105,10 @@ The `mfa` lookup follows the eduID precedence relevant to each leg:
 - the initial IdP's exact entity ID, then its trusted metadata assurance
   certifications, can recognize and normalize an already satisfied LoA.
 
+When several configured categories or certifications match, the first entry in
+the TOML configuration wins. Metadata value order does not affect policy
+priority.
+
 For a static initial SAML backend, configure metadata-equivalent assurance
 certifications with `idp_assurance_certifications = ["..."]`. MDQ mode reads
 them from accepted metadata.

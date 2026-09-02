@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tunnelbana_core::attributes::AttributeMapper;
@@ -62,14 +63,14 @@ impl LoaSettings {
 #[derive(Debug, Deserialize)]
 struct MfaConfig {
     #[serde(default)]
-    by_entity_id: BTreeMap<String, LoaSettings>,
+    by_entity_id: IndexMap<String, LoaSettings>,
     #[serde(default)]
-    by_entity_category: BTreeMap<String, LoaSettings>,
+    by_entity_category: IndexMap<String, LoaSettings>,
     // Recognize and normalize an already-satisfied initial IdP response by a
     // trusted metadata assurance certification. The second exchange itself is
     // selected by requester entity ID/category and the SCIM linked account.
     #[serde(default)]
-    by_assurance_certification: BTreeMap<String, LoaSettings>,
+    by_assurance_certification: IndexMap<String, LoaSettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,12 +132,19 @@ impl StepUp {
 
     fn request_policy(&self, ctx: &Context, requester: Option<&str>) -> RequestPolicy {
         let requester_loas = decoration_strings(ctx, KEY_REQUESTED_ACCR);
+        let requester_categories = decoration_strings(ctx, KEY_REQUESTER_ENTITY_CATEGORIES);
         let configured = requester
             .and_then(|entity_id| self.mfa.by_entity_id.get(entity_id))
             .or_else(|| {
-                decoration_strings(ctx, KEY_REQUESTER_ENTITY_CATEGORIES)
+                self.mfa
+                    .by_entity_category
                     .iter()
-                    .find_map(|category| self.mfa.by_entity_category.get(category))
+                    .find_map(|(category, settings)| {
+                        requester_categories
+                            .iter()
+                            .any(|candidate| candidate == category)
+                            .then_some(settings)
+                    })
             })
             .cloned();
         let loa_settings = configured.unwrap_or_else(|| LoaSettings {
@@ -157,10 +165,17 @@ impl StepUp {
         data: &InternalData,
     ) -> Option<&LoaSettings> {
         let issuer = data.auth_info.issuer.as_deref()?;
+        let certifications = decoration_strings(ctx, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS);
         let settings = self.mfa.by_entity_id.get(issuer).or_else(|| {
-            decoration_strings(ctx, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS)
+            self.mfa
+                .by_assurance_certification
                 .iter()
-                .find_map(|certification| self.mfa.by_assurance_certification.get(certification))
+                .find_map(|(certification, settings)| {
+                    certifications
+                        .iter()
+                        .any(|candidate| candidate == certification)
+                        .then_some(settings)
+                })
         })?;
         settings
             .accepts(data.auth_info.auth_class_ref.as_deref())
@@ -477,6 +492,7 @@ mod tests {
     use std::io::Read;
     use std::sync::Arc;
     use tunnelbana_core::attributes::AttributeMapper;
+    use tunnelbana_core::config::ProxyConfig;
     use tunnelbana_core::internal::AuthenticationInformation;
 
     const REQUESTER: &str = "https://service.example/sp";
@@ -669,25 +685,41 @@ mod tests {
     }
 
     #[test]
-    fn requester_category_and_provider_certification_select_policy() {
+    fn configured_order_selects_category_and_certification_policy() {
         let mut service = service();
-        let category_settings = LoaSettings {
-            requested: vec!["urn:category:loa".into()],
+        let preferred_category = LoaSettings {
+            requested: vec!["urn:category:preferred".into()],
             extra_accepted: vec![],
             returned: Some(REFEDS_MFA.into()),
         };
         service.mfa.by_entity_category.insert(
-            "https://category.example/mfa".into(),
-            category_settings.clone(),
+            "https://z-category.example/preferred".into(),
+            preferred_category.clone(),
         );
-        let provider_settings = LoaSettings {
+        service.mfa.by_entity_category.insert(
+            "https://a-category.example/fallback".into(),
+            LoaSettings {
+                requested: vec!["urn:category:fallback".into()],
+                extra_accepted: vec![],
+                returned: Some(REFEDS_MFA.into()),
+            },
+        );
+        let preferred_provider = LoaSettings {
             requested: vec!["urn:provider:loa3".into()],
-            extra_accepted: vec!["urn:provider:loa3-alias".into()],
-            returned: Some(REFEDS_MFA.into()),
+            extra_accepted: vec![],
+            returned: Some("urn:provider:preferred".into()),
         };
         service.mfa.by_assurance_certification.insert(
-            "https://certification.example/eid".into(),
-            provider_settings,
+            "https://z-certification.example/preferred".into(),
+            preferred_provider.clone(),
+        );
+        service.mfa.by_assurance_certification.insert(
+            "https://a-certification.example/fallback".into(),
+            LoaSettings {
+                requested: vec!["urn:provider:loa3".into()],
+                extra_accepted: vec![],
+                returned: Some("urn:provider:fallback".into()),
+            },
         );
 
         let mut ctx = super::super::testutil::ctx();
@@ -697,20 +729,62 @@ mod tests {
         );
         ctx.decorate(
             KEY_REQUESTER_ENTITY_CATEGORIES,
-            serde_json::json!(["https://category.example/mfa"]),
+            serde_json::json!([
+                "https://a-category.example/fallback",
+                "https://z-category.example/preferred"
+            ]),
         );
         let policy = service.request_policy(&ctx, Some("https://unlisted.example/sp"));
-        assert_eq!(policy.loa_settings, category_settings);
+        assert_eq!(policy.loa_settings, preferred_category);
 
         ctx.decorate(
             KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
-            serde_json::json!(["https://certification.example/eid"]),
+            serde_json::json!([
+                "https://a-certification.example/fallback",
+                "https://z-certification.example/preferred"
+            ]),
         );
         let mut response = initial_response();
-        response.auth_info.auth_class_ref = Some("urn:provider:loa3-alias".into());
-        assert!(service
-            .provider_already_satisfied(&ctx, &response)
-            .is_some());
+        response.auth_info.auth_class_ref = Some("urn:provider:loa3".into());
+        assert_eq!(
+            service.provider_already_satisfied(&ctx, &response),
+            Some(&preferred_provider)
+        );
+    }
+
+    #[test]
+    fn toml_mfa_policy_order_survives_config_conversion() {
+        let cfg = ProxyConfig::from_str(
+            r#"
+            base_url = "https://proxy.example.org"
+            state_encryption_key = "a-32-byte-or-longer-test-secret!!"
+
+            [[microservice]]
+            type = "stepup"
+            name = "stepup"
+
+              [microservice.config.mfa.by_entity_category."https://z-category.example/first"]
+              requested = ["urn:loa:first"]
+
+              [microservice.config.mfa.by_entity_category."https://a-category.example/second"]
+              requested = ["urn:loa:second"]
+            "#,
+        )
+        .unwrap();
+        let parsed: StepUpConfig =
+            serde_json::from_value(cfg.microservices[0].config_json()).unwrap();
+        assert_eq!(
+            parsed
+                .mfa
+                .by_entity_category
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "https://z-category.example/first",
+                "https://a-category.example/second"
+            ]
+        );
     }
 
     #[tokio::test]
