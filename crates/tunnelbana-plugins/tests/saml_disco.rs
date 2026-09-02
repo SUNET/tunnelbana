@@ -7,12 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::http::{HttpRequestData, Response};
-use tunnelbana_core::plugin::{Backend, BuildContext, Frontend, NullHttpClient};
+use tunnelbana_core::internal::InternalData;
+use tunnelbana_core::plugin::{Backend, BuildContext, Frontend, MicroService, NullHttpClient};
 use tunnelbana_core::proxy::Proxy;
 use tunnelbana_core::state::StateSealer;
 use tunnelbana_oidc::pkce;
@@ -40,8 +41,17 @@ fn cert_b64(path: &str) -> String {
 fn idp_metadata_xml() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP_ENTITY}">
+<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+                     xmlns:scopealias="urn:mace:shibboleth:metadata:1.0"
+                     xmlns:custom="urn:custom:metadata"
+                     entityID="{IDP_ENTITY}">
   <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:Extensions>
+      <scopealias:Scope regexp="false">mdq.example.org</scopealias:Scope>
+      <custom:Wrapper>
+        <scopealias:Scope>nested-must-not-be-trusted.example.org</scopealias:Scope>
+      </custom:Wrapper>
+    </md:Extensions>
     <md:KeyDescriptor use="signing">
       <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
         <ds:X509Data><ds:X509Certificate>{cert}</ds:X509Certificate></ds:X509Data>
@@ -133,6 +143,26 @@ fn oidc_frontend() -> Box<dyn Frontend> {
         }]
     });
     tunnelbana_plugins::oidc_frontend::OidcFrontend::build(&build_ctx("OIDC", config)).unwrap()
+}
+
+struct ScopeProbe {
+    observed: Arc<Mutex<Option<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl MicroService for ScopeProbe {
+    fn name(&self) -> &str {
+        "scope-probe"
+    }
+
+    async fn process_response(
+        &self,
+        ctx: &mut tunnelbana_core::context::Context,
+        data: InternalData,
+    ) -> tunnelbana_core::Result<InternalData> {
+        *self.observed.lock().unwrap() = ctx.decorations.get("provider_scopes").cloned();
+        Ok(data)
+    }
 }
 
 fn req(path: &str, method: &str, cookie: Option<&str>) -> HttpRequestData {
@@ -268,8 +298,12 @@ async fn discovery_flow_through_proxy() {
     let mdq_url = serve_metadata(idp_metadata_xml()).await;
     let frontend = oidc_frontend();
     let backend = saml_backend(&mdq_url);
+    let observed_scopes = Arc::new(Mutex::new(None));
+    let scope_probe: Box<dyn MicroService> = Box::new(ScopeProbe {
+        observed: Arc::clone(&observed_scopes),
+    });
     let sealer = StateSealer::new("disco-test-secret", "TB_STATE").with_secure(false);
-    let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
+    let proxy = Proxy::new(vec![frontend], vec![backend], vec![scope_probe], sealer);
 
     let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
     let challenge = pkce::s256_challenge(verifier);
@@ -323,6 +357,10 @@ async fn discovery_flow_through_proxy() {
     assert!(
         query_param(&rp_redirect, "code").is_some(),
         "authorization response did not contain a code: {rp_redirect}"
+    );
+    assert_eq!(
+        *observed_scopes.lock().unwrap(),
+        Some(serde_json::json!(["mdq.example.org"]))
     );
 }
 

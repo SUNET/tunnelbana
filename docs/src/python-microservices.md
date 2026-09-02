@@ -122,6 +122,24 @@ The constructor receives:
 | `base_url` | Tunnelbana's top-level `base_url`. |
 | `config` | A plain dictionary containing only `[microservice.config.settings]`. It is `{}` when `settings` is omitted. |
 
+An explicitly opted-in service may also receive a fourth constructor argument:
+
+```toml
+[microservice.config]
+module = "services.scim"
+class = "ScimAttributes"
+pass_internal_attributes = true
+```
+
+Its constructor is then called as
+`Class(name, base_url, config, internal_attributes)`. The last argument is a
+detached normalized copy shaped as
+`internal-name -> profile -> {names, oid, friendly_name}`. It contains
+attribute names only—no state, secrets, HTTP clients, or Rust objects. This is
+intended for adapters that must apply the deployment's protocol attribute map;
+ordinary services should keep the three-argument constructor. See
+[eduID SCIM response attributes](scim-attributes.md) for the built-in use.
+
 Tunnelbana constructs the class once at startup and reuses that exact instance
 for every request and response call. Store parsed, read-only settings on the
 instance, but do not store a request's `context` or `data` for later use.
@@ -229,13 +247,19 @@ not just by your own services. Treat them as security-sensitive:
   origin). The proxy only follows absolute `http(s)` URLs and ignores
   anything else, but the redirect target's host is not otherwise restricted.
 - `target_entity_id`, `target_authn_context_class_ref`,
-  `target_accr_comparison` - upstream IdP/OP selection and authentication
-  context forwarding. These are **first writer wins** across the pipeline:
+  `target_accr_comparison`, and `mfa_stepup_accounts` - upstream IdP/OP
+  selection, authentication context forwarding, and SCIM output. These are
+  **first writer wins** across the pipeline:
   a Python service may publish them when they are absent, but changing or
   removing a value that an earlier component (for example the discovery
   service) already set makes the whole call fail, exactly like a read-only
   field mutation. Never derive `target_entity_id` from an untrusted request
   value; that would let a client pick the upstream identity provider.
+  `mfa_stepup_accounts` is SCIM-derived output, so later Python services may
+  read but not replace it.
+- `provider_scopes` - trusted SAML metadata input. It is fully read-only to
+  Python: a Python service cannot create, replace, or remove it. The native
+  SAML backend publishes the authoritative array after response validation.
 
 The restricted snapshot deliberately excludes the complete URI, headers,
 cookies, request body, encrypted or persistent state, secrets, HTTP client
@@ -320,9 +344,10 @@ Each Python `[[microservice]]` has this configuration:
 | `module` | Yes | Dotted Python module import, relative to `module_path`, such as `services.affiliation`. |
 | `class` | Yes | Name of a Python class in that module. A factory function or other non-class callable is rejected at startup. |
 | `settings` | No | TOML table converted to the constructor's `config` dictionary. |
+| `pass_internal_attributes` | No | Default `false`. When true, pass a detached normalized attribute map as the fourth constructor argument. |
 
 The global Python table and the service-level table containing
-`module`/`class`/`settings` reject unknown keys. Keys inside `settings` belong
+`module`/`class`/`settings`/`pass_internal_attributes` reject unknown keys. Keys inside `settings` belong
 to the Python class and may have any TOML value that converts to Python. If the
 class requires settings, validate them in `__init__`; raising there makes
 Tunnelbana fail fast during startup.

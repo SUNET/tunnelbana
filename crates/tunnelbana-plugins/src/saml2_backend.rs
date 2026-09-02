@@ -3,11 +3,13 @@
 //! via HTTP-Redirect, then at the ACS verify the signature, validate the Response
 //! (32-check `AssertionValidator` via `process_response`) and map attributes.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use async_trait::async_trait;
 use base64::Engine;
+use bytes::Bytes;
 use chrono::Utc;
 use serde::Deserialize;
 
@@ -27,22 +29,29 @@ use gamlastan::security::config::SecurityConfig;
 use gamlastan::security::replay::InMemoryReplayCache;
 use gamlastan::security::validation::{AssertionValidator, ValidationParams};
 use gamlastan::xml::serialize::SamlSerialize;
-use gamlastan_mdq::MdqClient;
+use gamlastan_mdq::{MdqClient, MdqError, MetadataFetcher, ReqwestFetcher};
 
 use tunnelbana_core::attributes::AttributeMapper;
-use tunnelbana_core::context::Context;
+use tunnelbana_core::context::{Context, KEY_PROVIDER_SCOPES};
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
 use tunnelbana_core::util::now_rfc3339;
 
-use crate::saml_common::{build_mdq_client, extract_cert_b64, verifier_from_cert_ders, MdqConfig};
+use crate::saml_common::{
+    build_mdq_client_with_fetcher, extract_cert_b64, verifier_from_cert_ders, MdqConfig,
+};
 
 /// XML-DSig RSA-SHA256 signature algorithm URI (for signed redirect requests).
 const SIGALG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
 const SAML_ASSERTION_NS: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
 const XMLDSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+const MDQ_CACHE_CAPACITY: usize = 1024;
+
+tokio::task_local! {
+    static CAPTURED_MDQ_METADATA: RefCell<Option<Bytes>>;
+}
 
 #[derive(Debug, Deserialize)]
 struct Saml2BackendConfig {
@@ -72,6 +81,10 @@ struct Saml2BackendConfig {
     /// in static mode; in MDQ mode the signing cert comes from metadata.
     #[serde(default)]
     idp_cert_path: Option<String>,
+    /// Trusted scope values for a statically configured IdP. Dynamic/MDQ
+    /// backends obtain these from the selected IdP's signed metadata.
+    #[serde(default)]
+    idp_scopes: Vec<String>,
     /// When present, resolve the IdP's SSO endpoint and signing cert on demand
     /// from an MDQ server instead of the static `idp_sso_url` / `idp_cert_path`.
     #[serde(default)]
@@ -141,7 +154,153 @@ enum IdpMetadata {
         verifier: SamlVerifier,
     },
     /// Resolved per request from an MDQ server, keyed by `idp_entity_id`.
-    Mdq(MdqClient),
+    Mdq(ScopeAwareMdqClient),
+}
+
+#[derive(Clone)]
+struct CapturingMetadataFetcher<F = ReqwestFetcher> {
+    inner: F,
+}
+
+impl<F> MetadataFetcher for CapturingMetadataFetcher<F>
+where
+    F: MetadataFetcher + Sync,
+{
+    async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
+        let bytes = self.inner.fetch(url).await?;
+        CAPTURED_MDQ_METADATA
+            .try_with(|capture| capture.replace(Some(bytes.clone())))
+            .map_err(|_| MdqError::Transport("MDQ capture context is unavailable".into()))?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Default)]
+struct TrustedScopeCache {
+    entries: BTreeMap<String, Vec<String>>,
+}
+
+impl TrustedScopeCache {
+    fn requires_reset(&self, entity_id: &str, capacity: usize) -> bool {
+        !self.entries.contains_key(entity_id) && self.entries.len() >= capacity
+    }
+
+    fn insert(&mut self, entity_id: String, scopes: Vec<String>) {
+        self.entries.insert(entity_id, scopes);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn get(&self, entity_id: &str) -> Vec<String> {
+        self.entries.get(entity_id).cloned().unwrap_or_default()
+    }
+}
+
+/// MDQ client paired with the exact source document accepted by it.
+///
+/// `EntityDescriptor` intentionally keeps extension XML as a detached source
+/// slice, which loses namespace declarations inherited from ancestors. The
+/// capture lets scope parsing use the original namespace-aware document after
+/// (and only after) the normal MDQ client has accepted that same fetch. Capture
+/// is task-local so unrelated network lookups remain concurrent. Weakly held
+/// per-entity locks make each entity/scopes cache update atomic without
+/// accumulating a second persistent entity map. The scope cache may retain an
+/// entry after MDQ purges it, but scopes are never removed independently while
+/// MDQ still retains the corresponding entity.
+struct ScopeAwareMdqClient<F = ReqwestFetcher> {
+    client: MdqClient<CapturingMetadataFetcher<F>>,
+    trusted_scopes: StdMutex<TrustedScopeCache>,
+    cache_capacity: usize,
+    lookup_locks: StdMutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
+}
+
+impl ScopeAwareMdqClient<ReqwestFetcher> {
+    fn build(config: &MdqConfig) -> Result<Self> {
+        let inner = ReqwestFetcher::try_default()
+            .map_err(|e| Error::Config(format!("building MDQ HTTP client: {e}")))?;
+        let fetcher = CapturingMetadataFetcher { inner };
+        let client = build_mdq_client_with_fetcher(config, fetcher)?;
+        Ok(Self::new(client, MDQ_CACHE_CAPACITY))
+    }
+}
+
+impl<F> ScopeAwareMdqClient<F>
+where
+    F: MetadataFetcher + Sync,
+{
+    fn new(client: MdqClient<CapturingMetadataFetcher<F>>, cache_capacity: usize) -> Self {
+        assert!(cache_capacity > 0, "MDQ cache capacity must be non-zero");
+        Self {
+            client: client.with_cache_capacity(cache_capacity),
+            trusted_scopes: StdMutex::new(TrustedScopeCache::default()),
+            cache_capacity,
+            lookup_locks: StdMutex::new(BTreeMap::new()),
+        }
+    }
+
+    async fn get(
+        &self,
+        entity_id: &str,
+    ) -> std::result::Result<(EntityDescriptor, Vec<String>), MdqError> {
+        let lookup_lock = self.lookup_lock(entity_id);
+        let _lookup = lookup_lock.lock().await;
+        // Keep a request-local copy because a concurrent lookup for another
+        // entity may reset both shared caches after this lookup hits MDQ's
+        // cache but before it returns here.
+        let cached_scopes = {
+            let mut trusted_scopes = lock_unpoisoned(&self.trusted_scopes);
+            if trusted_scopes.requires_reset(entity_id, self.cache_capacity) {
+                self.client.clear_cache();
+                trusted_scopes.clear();
+            }
+            trusted_scopes.get(entity_id)
+        };
+        let (entity, captured_bytes) = CAPTURED_MDQ_METADATA
+            .scope(RefCell::new(None), async {
+                let entity = self.client.get(entity_id).await?;
+                let captured = CAPTURED_MDQ_METADATA.with(|capture| capture.borrow_mut().take());
+                Ok::<_, MdqError>((entity, captured))
+            })
+            .await?;
+
+        let Some(captured_bytes) = captured_bytes else {
+            return Ok((entity, cached_scopes));
+        };
+
+        // Promote only bytes fetched and accepted by this lookup. The MDQ
+        // cache can purge expired entries without exposing their IDs. Never
+        // evict a scope entry alone: at the shared bound, clear both caches so
+        // every entity retained by MDQ continues to have matching scopes.
+        let scopes = std::str::from_utf8(&captured_bytes)
+            .map(|xml| trusted_scopes_from_metadata_xml(xml, entity_id))
+            .unwrap_or_default();
+        let mut trusted_scopes = lock_unpoisoned(&self.trusted_scopes);
+        if trusted_scopes.requires_reset(entity_id, self.cache_capacity) {
+            self.client.clear_cache();
+            trusted_scopes.clear();
+        }
+        trusted_scopes.insert(entity_id.to_string(), scopes.clone());
+        Ok((entity, scopes))
+    }
+
+    fn lookup_lock(&self, entity_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = lock_unpoisoned(&self.lookup_locks);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(entity_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(entity_id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `gamlastan::bindings::traits::HttpRequest` adapter exposing the raw
@@ -217,6 +376,9 @@ pub struct Saml2Backend {
     passthrough_unmapped_attributes: bool,
     scope_subject_id_by_issuer: bool,
     allow_unsolicited: bool,
+    /// Operator-configured equivalent of Shibboleth `<Scope>` metadata for a
+    /// statically pinned IdP.
+    static_idp_scopes: Vec<String>,
     /// Assertion IDs accepted by this backend, retained until their SAML
     /// validity deadline. gamlastan 0.8 fails closed when validation has no
     /// replay cache, so every backend owns one for its full process lifetime.
@@ -243,6 +405,17 @@ impl Saml2Backend {
             .unwrap_or_else(|| module_base.clone());
         let acs_url = format!("{module_base}/acs");
 
+        if cfg
+            .idp_scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.chars().any(char::is_control))
+        {
+            return Err(Error::Config(format!(
+                "saml2 backend {}: idp_scopes entries must be non-empty and contain no control characters",
+                bx.name
+            )));
+        }
+
         let sp_key = std::fs::read(&cfg.sp_key_path)
             .map_err(|e| Error::Config(format!("reading sp_key_path: {e}")))?;
 
@@ -258,12 +431,17 @@ impl Saml2Backend {
         // is present, else the static idp_sso_url + idp_cert_path pair.
         let idp_metadata = match &cfg.mdq {
             Some(mdq_cfg) => {
+                if !cfg.idp_scopes.is_empty() {
+                    return Err(Error::Config(
+                        "saml2 backend idp_scopes is only valid in static mode; MDQ mode reads scopes from trusted metadata".into(),
+                    ));
+                }
                 if cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
                     return Err(Error::Config(
                         "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv".into(),
                     ));
                 }
-                IdpMetadata::Mdq(build_mdq_client(mdq_cfg)?)
+                IdpMetadata::Mdq(ScopeAwareMdqClient::build(mdq_cfg)?)
             }
             None => {
                 if cfg.disco_srv.is_some() {
@@ -358,6 +536,7 @@ impl Saml2Backend {
             passthrough_unmapped_attributes: cfg.passthrough_unmapped_attributes,
             scope_subject_id_by_issuer: cfg.scope_subject_id_by_issuer,
             allow_unsolicited: cfg.allow_unsolicited,
+            static_idp_scopes: cfg.idp_scopes,
             replay_cache: InMemoryReplayCache::new(),
             organization: cfg.organization.as_ref().map(|o| o.to_organization()),
             contact_persons: crate::saml_metadata::contact_persons(&cfg.contact_person)?,
@@ -510,7 +689,7 @@ impl Saml2Backend {
                     .idp_entity_id
                     .as_deref()
                     .ok_or_else(|| Error::Internal("static mode without idp_entity_id".into()))?;
-                self.process_acs(ctx, verifier, expected)
+                self.process_acs(ctx, verifier, expected, &self.static_idp_scopes)
             }
             IdpMetadata::Mdq(client) => {
                 // Verify against the cert for the IdP we actually sent the request
@@ -521,12 +700,12 @@ impl Saml2Backend {
                     .get_str(&self.name, "idp_entity_id")
                     .or_else(|| self.idp_entity_id.clone())
                     .ok_or_else(|| Error::Authn("no IdP selected for this flow".into()))?;
-                let entity = client
+                let (entity, scopes) = client
                     .get(&selected)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {selected} failed: {e}")))?;
                 let verifier = idp_verifier_from_metadata(&entity)?;
-                self.process_acs(ctx, &verifier, &selected)
+                self.process_acs(ctx, &verifier, &selected, &scopes)
             }
         }
     }
@@ -536,6 +715,7 @@ impl Saml2Backend {
         ctx: &mut Context,
         verifier: &SamlVerifier,
         expected_idp_entity_id: &str,
+        provider_scopes: &[String],
     ) -> Result<BackendAction> {
         // SAMLResponse arrives via HTTP-POST (base64 form field) or
         // HTTP-Redirect (deflated query param, optionally query-signed).
@@ -887,6 +1067,21 @@ impl Saml2Backend {
             self.scope_subject_id_by_issuer,
         );
 
+        // Only publish scopes after the SAML response has passed signature,
+        // issuer, audience, correlation, time and replay validation. Python
+        // receives a detached JSON copy through the existing decorations
+        // boundary; it never receives the metadata object itself.
+        ctx.decorate(
+            KEY_PROVIDER_SCOPES,
+            serde_json::Value::Array(
+                provider_scopes
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+
         ctx.state.clear_namespace(&self.name);
 
         let response = InternalData {
@@ -905,6 +1100,89 @@ impl Saml2Backend {
         };
         Ok(BackendAction::AuthResponse(response))
     }
+}
+
+const SHIBBOLETH_METADATA_NS: &str = "urn:mace:shibboleth:metadata:1.0";
+const SAML_METADATA_NS: &str = "urn:oasis:names:tc:SAML:2.0:metadata";
+
+/// Extract direct Shibboleth `<Scope>` children of an IdP role's
+/// `<md:Extensions>` from the original accepted metadata document.
+fn trusted_scopes_from_metadata_xml(xml: &str, entity_id: &str) -> Vec<String> {
+    let mut scopes = BTreeSet::new();
+    let Ok(doc) = gamlastan::xml::parse_secure_metadata(xml) else {
+        return Vec::new();
+    };
+    let Some(root) = doc.document_element() else {
+        return Vec::new();
+    };
+    let Some(entity) = find_metadata_entity(&doc, root, entity_id) else {
+        return Vec::new();
+    };
+
+    for role in doc.children_iter(entity) {
+        let Some(role_element) = doc.element(role) else {
+            continue;
+        };
+        if !role_element
+            .name
+            .matches(Some(SAML_METADATA_NS), "IDPSSODescriptor")
+        {
+            continue;
+        }
+        for extensions in doc.children_iter(role) {
+            let Some(extensions_element) = doc.element(extensions) else {
+                continue;
+            };
+            if !extensions_element
+                .name
+                .matches(Some(SAML_METADATA_NS), "Extensions")
+            {
+                continue;
+            }
+            for scope in doc.children_iter(extensions) {
+                let Some(scope_element) = doc.element(scope) else {
+                    continue;
+                };
+                if scope_element
+                    .name
+                    .matches(Some(SHIBBOLETH_METADATA_NS), "Scope")
+                    && !doc
+                        .children_iter(scope)
+                        .any(|child| doc.element(child).is_some())
+                {
+                    let value = doc.text_content_deep(scope);
+                    let value = value.trim();
+                    if !value.is_empty() && !value.chars().any(char::is_control) {
+                        scopes.insert(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    scopes.into_iter().collect()
+}
+
+fn find_metadata_entity<'a>(
+    doc: &'a gamlastan::xml::uppsala::Document<'a>,
+    node: gamlastan::xml::uppsala::NodeId,
+    entity_id: &str,
+) -> Option<gamlastan::xml::uppsala::NodeId> {
+    let element = doc.element(node)?;
+    if element
+        .name
+        .matches(Some(SAML_METADATA_NS), "EntityDescriptor")
+    {
+        return (doc.get_attribute(node, "entityID") == Some(entity_id)).then_some(node);
+    }
+    if !element
+        .name
+        .matches(Some(SAML_METADATA_NS), "EntitiesDescriptor")
+    {
+        return None;
+    }
+    doc.children_iter(node)
+        .filter(|child| doc.element(*child).is_some())
+        .find_map(|child| find_metadata_entity(doc, child, entity_id))
 }
 
 #[async_trait]
@@ -1022,7 +1300,7 @@ impl Saml2Backend {
             IdpMetadata::Mdq(client) => {
                 let target = target_idp
                     .ok_or_else(|| Error::Internal("MDQ mode without a target IdP".into()))?;
-                let entity = client
+                let (entity, _) = client
                     .get(target)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {target} failed: {e}")))?;
@@ -1370,6 +1648,10 @@ fn idp_verifier_from_metadata(entity: &EntityDescriptor) -> Result<SamlVerifier>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use gamlastan_mdq::RequiredRole;
 
     fn empty_mapper() -> AttributeMapper {
         AttributeMapper::from_toml("").expect("empty mapper")
@@ -1511,5 +1793,154 @@ mod tests {
         );
 
         assert_eq!(subject_id, "opaque-name-id");
+    }
+
+    #[test]
+    fn extracts_direct_scopes_with_inherited_arbitrary_namespace_alias() {
+        let xml = r#"
+        <md:EntityDescriptor
+            xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+            xmlns:scopealias="urn:mace:shibboleth:metadata:1.0"
+            xmlns:other="urn:not-shibboleth"
+            entityID="https://idp.example.org">
+          <md:Extensions>
+            <scopealias:Scope>entity-level.example</scopealias:Scope>
+          </md:Extensions>
+          <md:IDPSSODescriptor
+              protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:Extensions>
+              <scopealias:Scope regexp="false">example.org</scopealias:Scope>
+              <scopealias:Scope> sub.example.org </scopealias:Scope>
+              <scopealias:Scope>example.org</scopealias:Scope>
+              <other:Scope>wrong-namespace.example</other:Scope>
+              <other:Wrapper>
+                <scopealias:Scope>nested.example</scopealias:Scope>
+              </other:Wrapper>
+            </md:Extensions>
+            <md:SingleSignOnService
+                Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+                Location="https://idp.example.org/sso"/>
+          </md:IDPSSODescriptor>
+        </md:EntityDescriptor>
+        "#;
+        assert_eq!(
+            trusted_scopes_from_metadata_xml(xml, "https://idp.example.org"),
+            ["example.org", "sub.example.org"]
+        );
+    }
+
+    #[test]
+    fn malformed_or_dtd_scope_extensions_fail_soft() {
+        for xml in [
+            "<md:EntityDescriptor>",
+            r#"<!DOCTYPE x [<!ENTITY e "scope.example">]><md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.org">&e;</md:EntityDescriptor>"#,
+        ] {
+            assert!(trusted_scopes_from_metadata_xml(xml, "https://idp.example.org").is_empty());
+        }
+    }
+
+    #[test]
+    fn trusted_scope_cache_requests_a_coupled_reset_at_capacity() {
+        let mut cache = TrustedScopeCache::default();
+        cache.insert("first".into(), vec!["first.scope.example.org".into()]);
+        cache.insert("second".into(), vec!["second.scope.example.org".into()]);
+
+        assert!(!cache.requires_reset("first", 2));
+        assert!(cache.requires_reset("third", 2));
+        cache.clear();
+        cache.insert("third".into(), vec!["third.scope.example.org".into()]);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.get("third"), ["third.scope.example.org"]);
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentMetadataFetcher {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        fetch_count: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl MetadataFetcher for ConcurrentMetadataFetcher {
+        async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+
+            let entity_id = url.rsplit('/').next().expect("MDQ entity path");
+            let scope = format!("{entity_id}.scope.example.org");
+            Ok(Bytes::from(format!(
+                r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:scope="urn:mace:shibboleth:metadata:1.0" entityID="{entity_id}"><md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:Extensions><scope:Scope>{scope}</scope:Scope></md:Extensions><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.org/sso"/></md:IDPSSODescriptor></md:EntityDescriptor>"#
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_aware_mdq_lookups_are_concurrent_and_request_scoped() {
+        let first_entity_id = "first".to_string();
+        let second_entity_id = "second".to_string();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetcher = CapturingMetadataFetcher {
+            inner: ConcurrentMetadataFetcher {
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                fetch_count,
+                delay: Duration::from_millis(25),
+            },
+        };
+        let client = MdqClient::with_fetcher("https://mdq.example.org/", fetcher)
+            .require_role(RequiredRole::Idp)
+            .allow_unverified();
+        let client = ScopeAwareMdqClient::new(client, MDQ_CACHE_CAPACITY);
+
+        let (first, second) =
+            tokio::join!(client.get(&first_entity_id), client.get(&second_entity_id));
+        assert_eq!(first.unwrap().1, ["first.scope.example.org"]);
+        assert_eq!(second.unwrap().1, ["second.scope.example.org"]);
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn scope_cache_reset_clears_mdq_cache_and_refetches_with_scopes() {
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetcher = CapturingMetadataFetcher {
+            inner: ConcurrentMetadataFetcher {
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                fetch_count: Arc::clone(&fetch_count),
+                delay: Duration::ZERO,
+            },
+        };
+        let client = MdqClient::with_fetcher("https://mdq.example.org/", fetcher)
+            .require_role(RequiredRole::Idp)
+            .allow_unverified();
+        let client = ScopeAwareMdqClient::new(client, 2);
+
+        assert_eq!(
+            client.get("first").await.unwrap().1,
+            ["first.scope.example.org"]
+        );
+        assert_eq!(
+            client.get("second").await.unwrap().1,
+            ["second.scope.example.org"]
+        );
+        assert_eq!(client.client.cache_len(), 2);
+
+        assert_eq!(
+            client.get("third").await.unwrap().1,
+            ["third.scope.example.org"]
+        );
+        assert_eq!(client.client.cache_len(), 1);
+        assert_eq!(lock_unpoisoned(&client.trusted_scopes).entries.len(), 1);
+
+        assert_eq!(
+            client.get("first").await.unwrap().1,
+            ["first.scope.example.org"]
+        );
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 4);
     }
 }

@@ -48,7 +48,9 @@ const FIRST_WRITER_DECORATION_KEYS: &[&str] = &[
     tunnelbana_core::context::KEY_TARGET_ENTITYID,
     tunnelbana_core::context::KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
     tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON,
+    tunnelbana_core::context::KEY_MFA_STEPUP_ACCOUNTS,
 ];
+const READ_ONLY_DECORATION_KEYS: &[&str] = &[tunnelbana_core::context::KEY_PROVIDER_SCOPES];
 static MODULE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static VENV_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// Serializes interpreter setup and the module-path claim. Without it, two
@@ -261,6 +263,11 @@ struct PythonMicroServiceConfig {
     class: String,
     #[serde(default = "empty_settings")]
     settings: Value,
+    /// Pass a detached copy of the normalized Tunnelbana attribute map as the
+    /// fourth constructor argument.  Disabled by default so existing operator
+    /// classes keep their three-argument constructor contract.
+    #[serde(default)]
+    pass_internal_attributes: bool,
 }
 
 fn empty_settings() -> Value {
@@ -300,6 +307,7 @@ impl PythonMicroService {
             )));
         }
 
+        let internal_attributes = bx.attribute_mapper.profile_mappings();
         let built = Python::attach(|py| -> PyResult<(Py<PyAny>, bool, bool)> {
             let module = py.import(config.module.as_str())?;
             let class = module.getattr(config.class.as_str())?;
@@ -313,7 +321,18 @@ impl PythonMicroService {
             }
             let settings = pythonize::pythonize(py, &config.settings)
                 .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid settings"))?;
-            let instance = class.call1((bx.name.as_str(), bx.base_url.as_str(), settings))?;
+            let instance = if config.pass_internal_attributes {
+                let internal_attributes = pythonize::pythonize(py, &internal_attributes)
+                    .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid attribute map"))?;
+                class.call1((
+                    bx.name.as_str(),
+                    bx.base_url.as_str(),
+                    settings,
+                    internal_attributes,
+                ))?
+            } else {
+                class.call1((bx.name.as_str(), bx.base_url.as_str(), settings))?
+            };
             let has_request = validate_method(py, &inspect, &instance, "process_request")?;
             let has_response = validate_method(py, &inspect, &instance, "process_response")?;
             if !has_request && !has_response {
@@ -433,6 +452,13 @@ impl PythonMicroService {
             .validate_reserved_decorations(&original)
             .map_err(|_| {
                 log_boundary_error(&self.inner, phase, "reserved decoration overwritten");
+                Error::Internal("python microservice returned invalid output".into())
+            })?;
+        output
+            .context
+            .validate_read_only_decorations(&original)
+            .map_err(|_| {
+                log_boundary_error(&self.inner, phase, "read-only decoration changed");
                 Error::Internal("python microservice returned invalid output".into())
             })?;
         // A returned backend selection must name a configured backend; an
@@ -674,14 +700,25 @@ impl ContextSnapshot {
     }
 
     /// Enforce the pipeline's first-writer-wins convention for reserved
-    /// routing decorations: once another component has published one, Python
-    /// must return it unchanged.
+    /// decorations: once another component has published one, Python must
+    /// return it unchanged.
     fn validate_reserved_decorations(&self, original: &Self) -> std::result::Result<(), ()> {
         for key in FIRST_WRITER_DECORATION_KEYS {
             if let Some(existing) = original.decorations.get(*key) {
                 if self.decorations.get(*key) != Some(existing) {
                     return Err(());
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Decorations populated from native, protocol-validated inputs cannot be
+    /// created, changed or removed by embedded Python.
+    fn validate_read_only_decorations(&self, original: &Self) -> std::result::Result<(), ()> {
+        for key in READ_ONLY_DECORATION_KEYS {
+            if self.decorations.get(*key) != original.decorations.get(*key) {
+                return Err(());
             }
         }
         Ok(())

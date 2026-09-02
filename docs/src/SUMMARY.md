@@ -8,6 +8,7 @@
 - [Attributes and transforms](attributes.md)
 - [Micro-services](micro-services.md)
 - [Embedded Python micro-services](python-microservices.md)
+- [eduID SCIM response attributes](scim-attributes.md)
 - [Legacy identifier compatibility](legacy-identifiers.md)
 - [Security: the state cookie](security-state-cookie.md)
 - [Writing a plugin](writing-a-plugin.md)

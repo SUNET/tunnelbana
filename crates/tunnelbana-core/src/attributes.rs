@@ -17,11 +17,11 @@
 //! ```
 
 use crate::error::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One internal attribute's mapping for a single profile, normalized.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProfileAttribute {
     /// External names, priority-ordered; the first is the canonical outbound
     /// name for the profile.
@@ -114,6 +114,16 @@ impl AttributeMapper {
         &self,
     ) -> impl Iterator<Item = (&String, &BTreeMap<String, ProfileAttribute>)> {
         self.attributes.iter()
+    }
+
+    /// Return a detached, JSON-serializable copy of the normalized map.
+    ///
+    /// This is used by explicitly opted-in embedded Python services that need
+    /// the same external-to-internal conversion rules as native plugins.  The
+    /// copy contains attribute names only; subject-id composition settings and
+    /// every other proxy capability remain outside the Python boundary.
+    pub fn profile_mappings(&self) -> BTreeMap<String, BTreeMap<String, ProfileAttribute>> {
+        self.attributes.clone()
     }
 
     /// The normalized mapping of one internal attribute for `profile`.

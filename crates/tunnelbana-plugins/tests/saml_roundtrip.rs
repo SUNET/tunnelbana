@@ -74,6 +74,7 @@ fn backend() -> Box<dyn Backend> {
         "idp_entity_id": IDP_ENTITY,
         "idp_sso_url": "https://proxy.example.com/IdP/sso",
         "idp_cert_path": testdata("idp-cert.pem"),
+        "idp_scopes": ["static.example.org"],
         "security": "permissive"
     });
     tunnelbana_plugins::saml2_backend::Saml2Backend::build(&build_ctx("SP", config)).unwrap()
@@ -228,6 +229,10 @@ async fn saml_idp_signs_and_sp_verifies() {
     assert_eq!(internal.attr_first("mail"), Some("anna@example.com"));
     assert_eq!(internal.attr_first("givenname"), Some("Anna"));
     assert_eq!(internal.auth_info.issuer.as_deref(), Some(IDP_ENTITY));
+    assert_eq!(
+        sp_ctx.decorations["provider_scopes"],
+        serde_json::json!(["static.example.org"])
+    );
 }
 
 #[tokio::test]
@@ -284,6 +289,10 @@ async fn saml_backend_rejects_tampered_response() {
 
     let result = sp.handle_endpoint(&mut sp_ctx, "acs").await;
     assert!(result.is_err(), "tampered Response must be rejected");
+    assert!(
+        !sp_ctx.decorations.contains_key("provider_scopes"),
+        "provider scopes must not be published before ACS validation succeeds"
+    );
 }
 
 #[tokio::test]

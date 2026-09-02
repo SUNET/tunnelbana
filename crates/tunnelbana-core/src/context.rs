@@ -39,6 +39,15 @@ pub const KEY_TARGET_AUTHN_CONTEXT_CLASS_REF: &str = "target_authn_context_class
 /// Decoration key carrying the `Comparison` attribute to forward alongside
 /// [`KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`].
 pub const KEY_TARGET_ACCR_COMPARISON: &str = "target_accr_comparison";
+/// Decoration key carrying trusted SAML IdP scope values. In MDQ mode these
+/// come from the selected entity's validated metadata; a static backend may
+/// supply the same values explicitly. Response-path services such as eduID's
+/// SCIM enrichment use them to select a data owner.
+pub const KEY_PROVIDER_SCOPES: &str = "provider_scopes";
+/// Decoration key containing SCIM-derived linked accounts eligible for a
+/// later MFA step-up. The SCIM adapter publishes a JSON array; no step-up
+/// routing is implemented by the core itself.
+pub const KEY_MFA_STEPUP_ACCOUNTS: &str = "mfa_stepup_accounts";
 
 /// Carries the inbound request, routing decisions, mutable session state and
 /// ad-hoc decorations between the frontend, micro-services and backend.
