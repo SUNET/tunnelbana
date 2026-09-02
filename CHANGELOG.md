@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **eduID SCIM response attributes (ADR 0055):** add the bundled
+  `ScimAttributes` Python adapter, an opt-in detached attribute-map constructor
+  argument, and trusted SAML IdP scope publication for SCIM data-owner
+  selection. The adapter enriches profiles and group entitlements and publishes
+  linked MFA accounts as JSON for a later step-up implementation; it does not
+  add step-up routing or endpoints. Provider scopes are read-only to Python and
+  become available only after successful SAML response validation. An
+  explicitly configured adapter imports its eduID database classes during
+  startup and fails fast when the optional dependency is unavailable.
+
 ## 0.4.0 [2026-09-01]
 
 - **OIDC authenticating authority:** the `oidc` and `oidc_federation` frontends

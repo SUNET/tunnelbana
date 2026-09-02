@@ -19,6 +19,20 @@ class ResponseTransform:
         return data
 
 
+class InternalAttributes:
+    def __init__(self, name, base_url, config, internal_attributes):
+        del name, base_url, config
+        self.internal_attributes = internal_attributes
+
+    def process_response(self, context, data):
+        del context
+        mail = self.internal_attributes["mail"]["saml"]
+        data["attributes"]["mapping-names"] = mail["names"]
+        data["attributes"]["mapping-oid"] = [mail["oid"]]
+        data["attributes"]["mapping-friendly"] = [mail["friendly_name"]]
+        return data
+
+
 class RequestOnly:
     def __init__(self, name, base_url, config):
         pass
@@ -106,6 +120,15 @@ class TargetEntityRemover:
 
     def process_request(self, context, data):
         del context["decorations"]["target_entity_id"]
+        return data
+
+
+class ProviderScopesWriter:
+    def __init__(self, name, base_url, config):
+        pass
+
+    def process_request(self, context, data):
+        context["decorations"]["provider_scopes"] = ["untrusted.example"]
         return data
 
 

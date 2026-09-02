@@ -30,7 +30,7 @@ use gamlastan::xml::serialize::SamlSerialize;
 use gamlastan_mdq::MdqClient;
 
 use tunnelbana_core::attributes::AttributeMapper;
-use tunnelbana_core::context::Context;
+use tunnelbana_core::context::{Context, KEY_PROVIDER_SCOPES};
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
@@ -72,6 +72,10 @@ struct Saml2BackendConfig {
     /// in static mode; in MDQ mode the signing cert comes from metadata.
     #[serde(default)]
     idp_cert_path: Option<String>,
+    /// Trusted scope values for a statically configured IdP. Dynamic/MDQ
+    /// backends obtain these from the selected IdP's signed metadata.
+    #[serde(default)]
+    idp_scopes: Vec<String>,
     /// When present, resolve the IdP's SSO endpoint and signing cert on demand
     /// from an MDQ server instead of the static `idp_sso_url` / `idp_cert_path`.
     #[serde(default)]
@@ -217,6 +221,9 @@ pub struct Saml2Backend {
     passthrough_unmapped_attributes: bool,
     scope_subject_id_by_issuer: bool,
     allow_unsolicited: bool,
+    /// Operator-configured equivalent of Shibboleth `<Scope>` metadata for a
+    /// statically pinned IdP.
+    static_idp_scopes: Vec<String>,
     /// Assertion IDs accepted by this backend, retained until their SAML
     /// validity deadline. gamlastan 0.8 fails closed when validation has no
     /// replay cache, so every backend owns one for its full process lifetime.
@@ -243,6 +250,17 @@ impl Saml2Backend {
             .unwrap_or_else(|| module_base.clone());
         let acs_url = format!("{module_base}/acs");
 
+        if cfg
+            .idp_scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.chars().any(char::is_control))
+        {
+            return Err(Error::Config(format!(
+                "saml2 backend {}: idp_scopes entries must be non-empty and contain no control characters",
+                bx.name
+            )));
+        }
+
         let sp_key = std::fs::read(&cfg.sp_key_path)
             .map_err(|e| Error::Config(format!("reading sp_key_path: {e}")))?;
 
@@ -258,6 +276,11 @@ impl Saml2Backend {
         // is present, else the static idp_sso_url + idp_cert_path pair.
         let idp_metadata = match &cfg.mdq {
             Some(mdq_cfg) => {
+                if !cfg.idp_scopes.is_empty() {
+                    return Err(Error::Config(
+                        "saml2 backend idp_scopes is only valid in static mode; MDQ mode reads scopes from trusted metadata".into(),
+                    ));
+                }
                 if cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
                     return Err(Error::Config(
                         "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv".into(),
@@ -358,6 +381,7 @@ impl Saml2Backend {
             passthrough_unmapped_attributes: cfg.passthrough_unmapped_attributes,
             scope_subject_id_by_issuer: cfg.scope_subject_id_by_issuer,
             allow_unsolicited: cfg.allow_unsolicited,
+            static_idp_scopes: cfg.idp_scopes,
             replay_cache: InMemoryReplayCache::new(),
             organization: cfg.organization.as_ref().map(|o| o.to_organization()),
             contact_persons: crate::saml_metadata::contact_persons(&cfg.contact_person)?,
@@ -510,7 +534,7 @@ impl Saml2Backend {
                     .idp_entity_id
                     .as_deref()
                     .ok_or_else(|| Error::Internal("static mode without idp_entity_id".into()))?;
-                self.process_acs(ctx, verifier, expected)
+                self.process_acs(ctx, verifier, expected, &self.static_idp_scopes)
             }
             IdpMetadata::Mdq(client) => {
                 // Verify against the cert for the IdP we actually sent the request
@@ -526,7 +550,8 @@ impl Saml2Backend {
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {selected} failed: {e}")))?;
                 let verifier = idp_verifier_from_metadata(&entity)?;
-                self.process_acs(ctx, &verifier, &selected)
+                let scopes = trusted_scopes_from_entity(&entity);
+                self.process_acs(ctx, &verifier, &selected, &scopes)
             }
         }
     }
@@ -536,6 +561,7 @@ impl Saml2Backend {
         ctx: &mut Context,
         verifier: &SamlVerifier,
         expected_idp_entity_id: &str,
+        provider_scopes: &[String],
     ) -> Result<BackendAction> {
         // SAMLResponse arrives via HTTP-POST (base64 form field) or
         // HTTP-Redirect (deflated query param, optionally query-signed).
@@ -887,6 +913,21 @@ impl Saml2Backend {
             self.scope_subject_id_by_issuer,
         );
 
+        // Only publish scopes after the SAML response has passed signature,
+        // issuer, audience, correlation, time and replay validation. Python
+        // receives a detached JSON copy through the existing decorations
+        // boundary; it never receives the metadata object itself.
+        ctx.decorate(
+            KEY_PROVIDER_SCOPES,
+            serde_json::Value::Array(
+                provider_scopes
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+
         ctx.state.clear_namespace(&self.name);
 
         let response = InternalData {
@@ -904,6 +945,58 @@ impl Saml2Backend {
             is_passive: false,
         };
         Ok(BackendAction::AuthResponse(response))
+    }
+}
+
+const SHIBBOLETH_METADATA_NS: &str = "urn:mace:shibboleth:metadata:1.0";
+
+/// Extract Shibboleth `<Scope>` values from entity- and IdP-role-level
+/// extensions of metadata that the backend already resolved and trusted.
+fn trusted_scopes_from_entity(entity: &EntityDescriptor) -> Vec<String> {
+    let mut scopes = BTreeSet::new();
+    for idp in entity.idp_sso_descriptors() {
+        if let Some(extensions) = &idp.sso_base.base.extensions {
+            collect_scope_values(&extensions.raw_xml, &mut scopes);
+        }
+    }
+    scopes.into_iter().collect()
+}
+
+fn collect_scope_values(raw_xml: &str, scopes: &mut BTreeSet<String>) {
+    if raw_xml.trim().is_empty() {
+        return;
+    }
+    // Extension fragments often inherit namespace declarations from the
+    // EntityDescriptor. Supply the common prefixes on a synthetic root while
+    // retaining Gamlastan's metadata parser limits and DTD/entity rejection.
+    let xml = format!(
+        r#"<tb:root xmlns:tb="urn:tunnelbana:metadata" xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:shibmd="{SHIBBOLETH_METADATA_NS}">{raw_xml}</tb:root>"#
+    );
+    let Ok(doc) = gamlastan::xml::parse_secure_metadata(&xml) else {
+        return;
+    };
+    let Some(root) = doc.document_element() else {
+        return;
+    };
+    collect_scope_nodes(&doc, root, scopes);
+}
+
+fn collect_scope_nodes<'a>(
+    doc: &'a gamlastan::xml::uppsala::Document<'a>,
+    node: gamlastan::xml::uppsala::NodeId,
+    scopes: &mut BTreeSet<String>,
+) {
+    for child in doc.children_iter(node) {
+        if let Some(element) = doc.element(child) {
+            if element.name.matches(Some(SHIBBOLETH_METADATA_NS), "Scope") {
+                let value = doc.text_content_deep(child);
+                let value = value.trim();
+                if !value.is_empty() && !value.chars().any(char::is_control) {
+                    scopes.insert(value.to_string());
+                }
+            }
+            collect_scope_nodes(doc, child, scopes);
+        }
     }
 }
 
@@ -1511,5 +1604,69 @@ mod tests {
         );
 
         assert_eq!(subject_id, "opaque-name-id");
+    }
+
+    #[test]
+    fn extracts_unique_shibboleth_scopes_from_trusted_metadata_extensions() {
+        let mut scopes = BTreeSet::new();
+        collect_scope_values(
+            r#"
+            <md:Extensions>
+              <shibmd:Scope regexp="false">example.org</shibmd:Scope>
+              <shibmd:Scope> sub.example.org </shibmd:Scope>
+              <shibmd:Scope>example.org</shibmd:Scope>
+              <Scope xmlns="urn:not-shibboleth">ignored.example</Scope>
+            </md:Extensions>
+            "#,
+            &mut scopes,
+        );
+        assert_eq!(
+            scopes.into_iter().collect::<Vec<_>>(),
+            ["example.org", "sub.example.org"]
+        );
+    }
+
+    #[test]
+    fn extracts_scopes_only_from_idp_role_in_parsed_metadata() {
+        use gamlastan::xml::deserialize::SamlDeserialize;
+
+        let xml = r#"
+        <md:EntityDescriptor
+            xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+            xmlns:shibmd="urn:mace:shibboleth:metadata:1.0"
+            entityID="https://idp.example.org">
+          <md:Extensions>
+            <shibmd:Scope>entity-level.example</shibmd:Scope>
+          </md:Extensions>
+          <md:IDPSSODescriptor
+              protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:Extensions>
+              <shibmd:Scope regexp="false">role.example</shibmd:Scope>
+            </md:Extensions>
+            <md:SingleSignOnService
+                Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+                Location="https://idp.example.org/sso"/>
+          </md:IDPSSODescriptor>
+        </md:EntityDescriptor>
+        "#;
+        let doc = gamlastan::xml::parse_secure_metadata(xml).unwrap();
+        let root = doc.document_element().unwrap();
+        let entity = gamlastan::metadata::EntityDescriptorRef::from_xml(&doc, root)
+            .unwrap()
+            .to_owned();
+
+        assert_eq!(trusted_scopes_from_entity(&entity), ["role.example"]);
+    }
+
+    #[test]
+    fn malformed_or_dtd_scope_extensions_fail_soft() {
+        for xml in [
+            "<md:Extensions><shibmd:Scope>",
+            r#"<!DOCTYPE x [<!ENTITY e "scope.example">]><shibmd:Scope>&e;</shibmd:Scope>"#,
+        ] {
+            let mut scopes = BTreeSet::new();
+            collect_scope_values(xml, &mut scopes);
+            assert!(scopes.is_empty());
+        }
     }
 }

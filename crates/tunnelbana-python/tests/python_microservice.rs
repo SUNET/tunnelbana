@@ -45,6 +45,23 @@ fn build(
     runtime.build_microservice(&bx, &["python-selected".to_string()])
 }
 
+fn build_with_mapper(
+    runtime: &Arc<PythonRuntime>,
+    config: serde_json::Value,
+    mapper: AttributeMapper,
+) -> tunnelbana_core::Result<Box<dyn MicroService>> {
+    let bx = BuildContext {
+        name: "mapped".into(),
+        base_url: "https://proxy.example".into(),
+        config,
+        attribute_mapper: Arc::new(mapper),
+        http_client: Arc::new(NullHttpClient),
+        secret: "not-exposed-to-python".into(),
+        previous_secrets: vec![],
+    };
+    runtime.build_microservice(&bx, &[])
+}
+
 fn context() -> Context {
     let request = HttpRequestData {
         path: "frontend/start".into(),
@@ -113,6 +130,37 @@ async fn valid_response_transformation() {
         .await
         .unwrap();
     assert_eq!(output.subject_id.as_deref(), Some("python-subject"));
+}
+
+#[tokio::test]
+async fn explicitly_passes_a_detached_normalized_attribute_map() {
+    let runtime = runtime(4, Duration::from_secs(2));
+    let mapper = AttributeMapper::from_toml(
+        r#"
+        [attributes.mail]
+        saml = { names = ["mail", "email"], oid = "urn:oid:mail", friendly_name = "mail" }
+        "#,
+    )
+    .unwrap();
+    let service = build_with_mapper(
+        &runtime,
+        json!({
+            "module": "services",
+            "class": "InternalAttributes",
+            "settings": {},
+            "pass_internal_attributes": true
+        }),
+        mapper,
+    )
+    .unwrap();
+
+    let output = service
+        .process_response(&mut context(), InternalData::default())
+        .await
+        .unwrap();
+    assert_eq!(output.attributes["mapping-names"], ["mail", "email"]);
+    assert_eq!(output.attributes["mapping-oid"], ["urn:oid:mail"]);
+    assert_eq!(output.attributes["mapping-friendly"], ["mail"]);
 }
 
 #[tokio::test]
@@ -313,6 +361,42 @@ async fn reserved_decorations_are_first_writer_wins() {
     assert_eq!(
         ctx.decorations["target_entity_id"],
         json!("https://discovery-chosen.example")
+    );
+}
+
+#[tokio::test]
+async fn trusted_provider_scopes_are_read_only_to_python() {
+    let runtime = runtime(4, Duration::from_secs(2));
+    let writer = build(
+        &runtime,
+        "scope-writer",
+        "services",
+        "ProviderScopesWriter",
+        json!({}),
+    )
+    .unwrap();
+
+    // Python cannot create protocol-derived scopes when the backend has not
+    // populated them yet.
+    let mut absent = context();
+    assert!(writer
+        .process_request(&mut absent, InternalData::default())
+        .await
+        .is_err());
+    assert!(!absent.decorations.contains_key("provider_scopes"));
+
+    // It cannot replace a backend-published value either.
+    let mut present = context();
+    present
+        .decorations
+        .insert("provider_scopes".into(), json!(["trusted.example"]));
+    assert!(writer
+        .process_request(&mut present, InternalData::default())
+        .await
+        .is_err());
+    assert_eq!(
+        present.decorations["provider_scopes"],
+        json!(["trusted.example"])
     );
 }
 

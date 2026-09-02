@@ -60,6 +60,9 @@ COPY --from=build /usr/local/bin/tunnelbana /usr/local/bin/tunnelbana
 # override with a deployment's proxy.toml / attributes.toml. Keys and secrets
 # are NEVER baked — mount /app/keys and pass secrets via env at runtime.
 COPY config/ /app/config/
+# Bundled trusted Python adapters. Third-party dependencies (such as eduID's
+# SCIM database package) belong in a deployment-specific Python environment.
+COPY python/tunnelbana_scimapi/ /app/python/tunnelbana_scimapi/
 
 ENV TUNNELBANA_BIND=0.0.0.0:8080
 EXPOSE 8080

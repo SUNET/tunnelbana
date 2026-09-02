@@ -571,6 +571,10 @@ name = "Saml2"
   idp_entity_id       = "https://idp.example.com/metadata"   # expected issuer
   idp_sso_url         = "https://idp.example.com/sso"        # where AuthnRequests go
   idp_cert_path       = "keys/idp.crt"     # IdP signing cert - verifies the Response
+  # Trusted Shibboleth metadata scopes for this statically configured IdP.
+  # Response services such as ScimAttributes may use them for tenant selection.
+  # MDQ mode reads the values from the selected IdP metadata instead.
+  # idp_scopes          = ["example.org"]
   sign_authn_requests = true               # default false
   name_id_format      = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
   security            = "permissive"       # "permissive" (default) or "strict"
@@ -649,6 +653,8 @@ name = "Saml2"
   In **static mode**, AuthnRequests always go to `idp_sso_url`, and the backend
   verifies the response against `idp_cert_path`. `disco_srv` is rejected in
   static mode - a pinned cert cannot verify arbitrary discovery choices.
+  Optional `idp_scopes` values are published to response micro-services only
+  after that response validates successfully.
 
   In **MDQ mode**, the backend resolves the upstream IdP per request:
 
@@ -662,8 +668,12 @@ name = "Saml2"
   4. Persist the selected `entityID` in the encrypted state cookie (the
      discovery round-trip needs no other state).
   5. On the ACS, fetch metadata for that same persisted entity again, build the
-    verifier from its signing certificates, and validate the Response against
-    that IdP.
+     verifier from its signing certificates, and validate the Response against
+     that IdP.
+
+  After successful validation, Shibboleth `<Scope>` values from the IdP-role
+  metadata extensions are published as the trusted `provider_scopes` response
+  decoration. They are not released directly to the downstream requester.
 
   > The discovery hop is a top-level cross-site navigation: the state cookie
   > must survive it (`cookie_same_site = "None"`, or `"Lax"` for GET returns).
