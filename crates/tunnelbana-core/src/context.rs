@@ -47,6 +47,9 @@ pub const KEY_PROVIDER_SCOPES: &str = "provider_scopes";
 /// Trusted assurance-certification values from the authenticating IdP's
 /// metadata, published after SAML response validation.
 pub const KEY_PROVIDER_ASSURANCE_CERTIFICATIONS: &str = "provider_assurance_certifications";
+/// Trusted entity-category values from the authenticating IdP's active
+/// metadata role, published only after SAML response validation.
+pub const KEY_PROVIDER_ENTITY_CATEGORIES: &str = "provider_entity_categories";
 /// Decoration key containing SCIM-derived linked accounts eligible for a
 /// later MFA step-up. The SCIM adapter publishes a JSON array consumed by the
 /// optional `stepup` micro-service; the core itself does not interpret it.
@@ -55,6 +58,13 @@ pub const KEY_MFA_STEPUP_ACCOUNTS: &str = "mfa_stepup_accounts";
 /// frontend publishes these only after resolving the requester and validating
 /// its AuthnRequest; step-up policy can use them on the request leg.
 pub const KEY_REQUESTER_ENTITY_CATEGORIES: &str = "requester_entity_categories";
+/// Trusted assurance-certification values from the requesting SP's active
+/// metadata role. This is the requester-side counterpart to
+/// [`KEY_PROVIDER_ASSURANCE_CERTIFICATIONS`].
+pub const KEY_REQUESTER_ASSURANCE_CERTIFICATIONS: &str = "requester_assurance_certifications";
+/// Request-local eduID step-up policy handoff consumed by the selected SAML
+/// backend after it resolves the initial provider's trusted metadata.
+pub const KEY_STEPUP_INITIAL_POLICY: &str = "stepup_initial_policy";
 
 /// Carries the inbound request, routing decisions, mutable session state and
 /// ad-hoc decorations between the frontend, micro-services and backend.

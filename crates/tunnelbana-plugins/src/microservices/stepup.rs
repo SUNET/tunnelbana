@@ -8,15 +8,16 @@
 //! response services.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use async_trait::async_trait;
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::{
-    Context, KEY_MFA_STEPUP_ACCOUNTS, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS, KEY_REQUESTED_ACCR,
-    KEY_REQUESTER_ENTITY_CATEGORIES, KEY_TARGET_ACCR_COMPARISON,
+    Context, KEY_MFA_STEPUP_ACCOUNTS, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+    KEY_PROVIDER_ENTITY_CATEGORIES, KEY_REQUESTED_ACCR, KEY_REQUESTER_ASSURANCE_CERTIFICATIONS,
+    KEY_REQUESTER_ENTITY_CATEGORIES, KEY_STEPUP_INITIAL_POLICY, KEY_TARGET_ACCR_COMPARISON,
     KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_TARGET_ENTITYID,
 };
 use tunnelbana_core::error::{Error, Result};
@@ -27,11 +28,17 @@ use tunnelbana_core::plugin::{
 };
 
 use crate::saml2_backend::Saml2Backend;
+use crate::stepup_policy::{
+    completed_loa, initial_loa_decision, resolve_policy, InitialLoaDecision, InitialPolicyHandoff,
+    LoaSettings, MetadataPolicyValues, MfaConfig, PolicySubject, StepupBehavior, REFEDS_MFA,
+};
 
-const REFEDS_MFA: &str = "https://refeds.org/profile/mfa";
 const KEY_REQUEST: &str = "request";
 const KEY_SNAPSHOT: &str = "snapshot";
 const MAX_SNAPSHOT_BYTES: usize = 32 * 1024;
+// Leave room in the 4096-byte sealed state cookie for the ordinary request
+// state and JWE overhead. The same DEFLATE algorithm is used by StateSealer.
+const MAX_COMPRESSED_HANDOFF_BYTES: usize = 1536;
 const NAMESPACE_PREFIX: &str = "stepup:";
 
 fn default_identifier_attribute() -> String {
@@ -42,51 +49,10 @@ fn default_assurance_attribute() -> String {
     "eduPersonAssurance".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-struct LoaSettings {
-    requested: Vec<String>,
-    #[serde(default)]
-    extra_accepted: Vec<String>,
-    #[serde(default)]
-    returned: Option<String>,
-}
-
-impl LoaSettings {
-    fn accepts(&self, loa: Option<&str>) -> bool {
-        loa.is_some_and(|loa| {
-            self.requested.iter().any(|value| value == loa)
-                || self.extra_accepted.iter().any(|value| value == loa)
-        })
-    }
-}
-
-fn normalized_loa(
-    settings: &LoaSettings,
-    requester_loas: &[String],
-    asserted_loa: Option<&str>,
-) -> Option<String> {
-    settings
-        .returned
-        .clone()
-        .or_else(|| requester_loas.first().cloned())
-        .or_else(|| asserted_loa.map(str::to_string))
-}
-
-#[derive(Debug, Deserialize)]
-struct MfaConfig {
-    #[serde(default)]
-    by_entity_id: IndexMap<String, LoaSettings>,
-    #[serde(default)]
-    by_entity_category: IndexMap<String, LoaSettings>,
-    // Recognize and normalize an already-satisfied initial IdP response by a
-    // trusted metadata assurance certification. The second exchange itself is
-    // selected by requester entity ID/category and the SCIM linked account.
-    #[serde(default)]
-    by_assurance_certification: IndexMap<String, LoaSettings>,
-}
-
 #[derive(Debug, Deserialize)]
 struct StepUpConfig {
+    #[serde(default)]
+    behavior: StepupBehavior,
     mfa: MfaConfig,
 }
 
@@ -102,6 +68,12 @@ struct MfaStepupAccount {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RequestPolicy {
+    #[serde(default)]
+    behavior: StepupBehavior,
+    #[serde(default)]
+    original_requester_loas: Vec<String>,
+    /// eduID replaces the inbound list with a matched requester policy's
+    /// `requested`; hardened mode leaves it identical to `original_*`.
     requester_loas: Vec<String>,
     loa_settings: LoaSettings,
     #[serde(default)]
@@ -113,6 +85,8 @@ struct StepupSnapshot {
     response: InternalData,
     account: MfaStepupAccount,
     policy: RequestPolicy,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    target_backend: Option<String>,
     target_frontend: Option<String>,
     decorations: BTreeMap<String, Value>,
 }
@@ -120,6 +94,7 @@ struct StepupSnapshot {
 /// Response-path MFA step-up service.
 pub struct StepUp {
     name: String,
+    behavior: StepupBehavior,
     mfa: MfaConfig,
     saml: Saml2Backend,
     mapper: std::sync::Arc<AttributeMapper>,
@@ -129,9 +104,11 @@ impl StepUp {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn MicroService>> {
         let cfg: StepUpConfig = bx.parse_config()?;
         validate_mfa(&bx.name, &cfg.mfa)?;
+        validate_handoff_size(&bx.name, cfg.behavior, &cfg.mfa)?;
         let saml = Saml2Backend::build_stepup(bx)?;
         Ok(Box::new(Self {
             name: bx.name.clone(),
+            behavior: cfg.behavior,
             mfa: cfg.mfa,
             saml,
             mapper: bx.attribute_mapper.clone(),
@@ -143,55 +120,69 @@ impl StepUp {
     }
 
     fn request_policy(&self, ctx: &Context, requester: Option<&str>) -> RequestPolicy {
-        let requester_loas = decoration_strings(ctx, KEY_REQUESTED_ACCR);
-        let requester_categories = decoration_strings(ctx, KEY_REQUESTER_ENTITY_CATEGORIES);
-        let configured = requester
-            .and_then(|entity_id| self.mfa.by_entity_id.get(entity_id))
-            .or_else(|| {
-                self.mfa
-                    .by_entity_category
-                    .iter()
-                    .find_map(|(category, settings)| {
-                        requester_categories
-                            .iter()
-                            .any(|candidate| candidate == category)
-                            .then_some(settings)
-                    })
-            })
-            .cloned();
+        let original_requester_loas = decoration_strings(ctx, KEY_REQUESTED_ACCR);
+        let metadata = MetadataPolicyValues {
+            entity_categories: decoration_strings(ctx, KEY_REQUESTER_ENTITY_CATEGORIES),
+            assurance_certifications: decoration_strings(
+                ctx,
+                KEY_REQUESTER_ASSURANCE_CERTIFICATIONS,
+            ),
+        };
+        let configured = resolve_policy(
+            &self.mfa,
+            requester,
+            &metadata,
+            self.behavior,
+            PolicySubject::Requester,
+        )
+        .cloned();
+        let requester_loas = match (&configured, self.behavior) {
+            (Some(settings), StepupBehavior::Eduid) => settings.requested.clone(),
+            _ => original_requester_loas.clone(),
+        };
         let loa_settings = configured.unwrap_or_else(|| LoaSettings {
-            requested: requester_loas.clone(),
+            // Without an explicit trusted mapping, never let a weaker sibling
+            // ACCR be normalized into REFEDS MFA after the second exchange.
+            requested: requester_loas
+                .iter()
+                .filter(|loa| loa.as_str() == REFEDS_MFA)
+                .cloned()
+                .collect(),
             extra_accepted: Vec::new(),
-            returned: requester_loas.first().cloned(),
+            returned: requester_loas
+                .iter()
+                .find(|loa| loa.as_str() == REFEDS_MFA)
+                .cloned(),
         });
         RequestPolicy {
+            behavior: self.behavior,
+            original_requester_loas,
             requester_loas,
             loa_settings,
             is_passive: false,
         }
     }
 
-    fn provider_already_satisfied(
+    fn initial_provider_policy(
         &self,
         ctx: &Context,
-        data: &InternalData,
+        issuer: Option<&str>,
+        behavior: StepupBehavior,
     ) -> Option<&LoaSettings> {
-        let issuer = data.auth_info.issuer.as_deref()?;
-        let certifications = decoration_strings(ctx, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS);
-        let settings = self.mfa.by_entity_id.get(issuer).or_else(|| {
-            self.mfa
-                .by_assurance_certification
-                .iter()
-                .find_map(|(certification, settings)| {
-                    certifications
-                        .iter()
-                        .any(|candidate| candidate == certification)
-                        .then_some(settings)
-                })
-        })?;
-        settings
-            .accepts(data.auth_info.auth_class_ref.as_deref())
-            .then_some(settings)
+        let metadata = MetadataPolicyValues {
+            entity_categories: decoration_strings(ctx, KEY_PROVIDER_ENTITY_CATEGORIES),
+            assurance_certifications: decoration_strings(
+                ctx,
+                KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+            ),
+        };
+        resolve_policy(
+            &self.mfa,
+            issuer,
+            &metadata,
+            behavior,
+            PolicySubject::Provider,
+        )
     }
 
     fn snapshot(&self, ctx: &Context) -> Result<StepupSnapshot> {
@@ -224,8 +215,11 @@ impl StepUp {
                 .any(|requested| requested == loa)
         });
 
-        let identifier_internal =
-            internal_name_for_external(self.mapper.as_ref(), &snapshot.account.attribute)?;
+        let identifier_internal = internal_name_for_external(
+            self.mapper.as_ref(),
+            &snapshot.account.attribute,
+            snapshot.policy.behavior,
+        )?;
         let identifier_ok = stepup_response
             .attributes
             .get(&identifier_internal)
@@ -244,23 +238,29 @@ impl StepUp {
             ));
         }
 
-        let assurance_internal =
-            internal_name_for_external(self.mapper.as_ref(), &snapshot.account.assurance)?;
+        let assurance_internal = internal_name_for_external(
+            self.mapper.as_ref(),
+            &snapshot.account.assurance,
+            snapshot.policy.behavior,
+        )?;
         if let Some(assurances) = stepup_response.attributes.get(&assurance_internal) {
             let target = snapshot
                 .response
                 .attributes
                 .entry(assurance_internal)
                 .or_default();
-            for assurance in assurances {
-                if !target.contains(assurance) {
-                    target.push(assurance.clone());
-                }
-            }
+            merge_assurances(target, assurances, snapshot.policy.behavior);
         }
 
-        snapshot.response.auth_info.auth_class_ref = normalized_loa(
+        let original_requester_loas = if snapshot.policy.original_requester_loas.is_empty() {
+            &snapshot.policy.requester_loas
+        } else {
+            &snapshot.policy.original_requester_loas
+        };
+        snapshot.response.auth_info.auth_class_ref = completed_loa(
+            snapshot.policy.behavior,
             &snapshot.policy.loa_settings,
+            original_requester_loas,
             &snapshot.policy.requester_loas,
             loa,
         );
@@ -268,6 +268,7 @@ impl StepUp {
         // The callback's SAML backend publishes decorations for the step-up
         // IdP. Later response services belong to the original authentication
         // and must see the exact decoration snapshot from that flow instead.
+        ctx.target_backend = snapshot.target_backend;
         ctx.target_frontend = snapshot.target_frontend;
         ctx.decorations = snapshot.decorations;
         Ok(snapshot.response)
@@ -283,6 +284,22 @@ impl MicroService for StepUp {
     async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData> {
         let mut policy = self.request_policy(ctx, data.requester.as_deref());
         policy.is_passive = data.is_passive;
+        let requester_wants_mfa = policy.requester_loas.iter().any(|loa| loa == REFEDS_MFA);
+        if requester_wants_mfa {
+            let handoff = InitialPolicyHandoff {
+                behavior: self.behavior,
+                requester_wants_mfa,
+                mfa: self.mfa.clone(),
+            };
+            ctx.decorate(
+                KEY_STEPUP_INITIAL_POLICY,
+                serde_json::to_value(handoff).map_err(|e| {
+                    Error::State(format!("serializing initial step-up policy: {e}"))
+                })?,
+            );
+        } else {
+            ctx.decorations.remove(KEY_STEPUP_INITIAL_POLICY);
+        }
         ctx.state.set_value(
             &self.state_namespace(),
             KEY_REQUEST,
@@ -305,24 +322,37 @@ impl MicroService for StepUp {
             .transpose()
             .map_err(|e| Error::State(format!("invalid saved step-up policy: {e}")))?
             .unwrap_or_else(|| self.request_policy(ctx, data.requester.as_deref()));
+        // The handoff belongs only to the original authentication backend.
+        // Ensure it cannot be snapshotted or re-applied by the embedded
+        // second-exchange backend when an initial backend completed inline.
+        ctx.decorations.remove(KEY_STEPUP_INITIAL_POLICY);
 
         if !policy.requester_loas.iter().any(|loa| loa == REFEDS_MFA) {
             ctx.state.clear_namespace(&self.state_namespace());
             return Ok(MicroServiceResponseAction::Continue(data));
         }
 
-        if let Some(settings) = self.provider_already_satisfied(ctx, &data) {
-            data.auth_info.auth_class_ref = normalized_loa(
-                settings,
-                &policy.requester_loas,
-                data.auth_info.auth_class_ref.as_deref(),
-            );
-            ctx.state.clear_namespace(&self.state_namespace());
-            return Ok(MicroServiceResponseAction::Continue(data));
-        }
-        if data.auth_info.auth_class_ref.as_deref() == Some(REFEDS_MFA) {
-            ctx.state.clear_namespace(&self.state_namespace());
-            return Ok(MicroServiceResponseAction::Continue(data));
+        let provider_settings =
+            self.initial_provider_policy(ctx, data.auth_info.issuer.as_deref(), policy.behavior);
+        match initial_loa_decision(
+            policy.behavior,
+            provider_settings,
+            &policy.requester_loas,
+            data.auth_info.auth_class_ref.as_deref(),
+        ) {
+            InitialLoaDecision::Satisfied(returned) => {
+                data.auth_info.auth_class_ref = Some(returned);
+                ctx.state.clear_namespace(&self.state_namespace());
+                return Ok(MicroServiceResponseAction::Continue(data));
+            }
+            InitialLoaDecision::Rejected => {
+                ctx.state.clear_namespace(&self.state_namespace());
+                return Err(Error::Authn(format!(
+                    "initial provider AuthnContextClassRef {:?} is not accepted",
+                    data.auth_info.auth_class_ref
+                )));
+            }
+            InitialLoaDecision::NeedsStepup => {}
         }
 
         if policy.is_passive {
@@ -356,13 +386,14 @@ impl MicroService for StepUp {
 
         // Fail before redirecting if either linked-account attribute cannot be
         // represented by the configured internal attribute map.
-        internal_name_for_external(self.mapper.as_ref(), &account.attribute)?;
-        internal_name_for_external(self.mapper.as_ref(), &account.assurance)?;
+        internal_name_for_external(self.mapper.as_ref(), &account.attribute, policy.behavior)?;
+        internal_name_for_external(self.mapper.as_ref(), &account.assurance, policy.behavior)?;
 
         let snapshot = StepupSnapshot {
             response: data,
             account: account.clone(),
             policy: policy.clone(),
+            target_backend: ctx.target_backend.clone(),
             target_frontend: ctx.target_frontend.clone(),
             decorations: ctx.decorations.clone(),
         };
@@ -438,6 +469,16 @@ impl MicroService for StepUp {
     }
 }
 
+fn deserialize_present_option<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
 fn validate_mfa(name: &str, mfa: &MfaConfig) -> Result<()> {
     for settings in mfa
         .by_entity_id
@@ -454,6 +495,32 @@ fn validate_mfa(name: &str, mfa: &MfaConfig) -> Result<()> {
                 "stepup {name}: LoA settings must contain non-empty requested values"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_handoff_size(name: &str, behavior: StepupBehavior, mfa: &MfaConfig) -> Result<()> {
+    let handoff = InitialPolicyHandoff {
+        behavior,
+        requester_wants_mfa: true,
+        mfa: mfa.clone(),
+    };
+    let json = serde_json::to_vec(&handoff)
+        .map_err(|e| Error::Config(format!("stepup {name}: serializing MFA policy: {e}")))?;
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(&json)
+        .map_err(|e| Error::Config(format!("stepup {name}: compressing MFA policy: {e}")))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| Error::Config(format!("stepup {name}: compressing MFA policy: {e}")))?;
+    if compressed.len() > MAX_COMPRESSED_HANDOFF_BYTES {
+        return Err(Error::Config(format!(
+            "stepup {name}: compressed MFA policy is {} bytes, exceeds the \
+             {MAX_COMPRESSED_HANDOFF_BYTES}-byte discovery-state budget",
+            compressed.len()
+        )));
     }
     Ok(())
 }
@@ -475,7 +542,19 @@ fn json_strings(values: &[String]) -> Value {
     Value::Array(values.iter().cloned().map(Value::String).collect())
 }
 
-fn internal_name_for_external(mapper: &AttributeMapper, external: &str) -> Result<String> {
+fn merge_assurances(target: &mut Vec<String>, source: &[String], behavior: StepupBehavior) {
+    for assurance in source {
+        if behavior == StepupBehavior::Eduid || !target.contains(assurance) {
+            target.push(assurance.clone());
+        }
+    }
+}
+
+fn internal_name_for_external(
+    mapper: &AttributeMapper,
+    external: &str,
+    behavior: StepupBehavior,
+) -> Result<String> {
     let matches: Vec<String> = mapper
         .attributes()
         .filter_map(|(internal, profiles)| {
@@ -488,6 +567,7 @@ fn internal_name_for_external(mapper: &AttributeMapper, external: &str) -> Resul
         .collect();
     match matches.as_slice() {
         [internal] => Ok(internal.clone()),
+        [first, ..] if behavior == StepupBehavior::Eduid => Ok(first.clone()),
         [] => Err(Error::Config(format!(
             "step-up SAML attribute {external:?} has no internal mapping"
         ))),
@@ -552,6 +632,7 @@ mod tests {
         let cfg: StepUpConfig = bx.parse_config().unwrap();
         StepUp {
             name: bx.name.clone(),
+            behavior: cfg.behavior,
             mfa: cfg.mfa,
             saml: Saml2Backend::build_stepup(&bx).unwrap(),
             mapper: bx.attribute_mapper.clone(),
@@ -671,6 +752,21 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(signed.as_bytes())
     }
 
+    fn signed_stepup_response_with_wrong_response_issuer(request_id: &str) -> String {
+        let encoded = signed_stepup_response(request_id);
+        let xml = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        // The Response is unsigned in this fixture while its Assertion is
+        // signed. Change only the envelope Issuer; the assertion remains a
+        // valid assertion from STEPUP_IDP.
+        let xml = xml.replacen(STEPUP_IDP, "https://wrong.example/idp", 1);
+        base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+    }
+
     #[test]
     fn external_attribute_mapping_must_be_unique() {
         let mapper = AttributeMapper::from_toml(
@@ -683,10 +779,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            internal_name_for_external(&mapper, "eduPersonPrincipalName").unwrap(),
+            internal_name_for_external(
+                &mapper,
+                "eduPersonPrincipalName",
+                StepupBehavior::Hardened,
+            )
+            .unwrap(),
             "eppn"
         );
-        assert!(internal_name_for_external(&mapper, "missing").is_err());
+        assert!(internal_name_for_external(&mapper, "missing", StepupBehavior::Hardened).is_err());
+    }
+
+    #[test]
+    fn eduid_behavior_uses_first_ambiguous_attribute_mapping() {
+        let mapper = AttributeMapper::from_toml(
+            r#"
+            [attributes.first]
+            saml = ["shared"]
+            [attributes.second]
+            saml = ["shared"]
+            "#,
+        )
+        .unwrap();
+        assert!(internal_name_for_external(&mapper, "shared", StepupBehavior::Hardened).is_err());
+        assert_eq!(
+            internal_name_for_external(&mapper, "shared", StepupBehavior::Eduid).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn behavior_defaults_to_hardened_and_rejects_unknown_values() {
+        let bx = build_context(None);
+        let cfg: StepUpConfig = bx.parse_config().unwrap();
+        assert_eq!(cfg.behavior, StepupBehavior::Hardened);
+
+        let mut bx = build_context(None);
+        bx.config["behavior"] = Value::String("eduid".into());
+        let cfg: StepUpConfig = bx.parse_config().unwrap();
+        assert_eq!(cfg.behavior, StepupBehavior::Eduid);
+
+        bx.config["behavior"] = Value::String("typo".into());
+        assert!(StepUp::build(&bx).is_err());
     }
 
     #[test]
@@ -699,6 +833,25 @@ mod tests {
         assert!(settings.accepts(Some("loa3")));
         assert!(settings.accepts(Some("loa3-alias")));
         assert!(!settings.accepts(Some("loa2")));
+    }
+
+    #[test]
+    fn assurance_merge_matches_each_behavior() {
+        let mut hardened = vec!["shared".into()];
+        merge_assurances(
+            &mut hardened,
+            &["shared".into(), "new".into(), "new".into()],
+            StepupBehavior::Hardened,
+        );
+        assert_eq!(hardened, ["shared", "new"]);
+
+        let mut eduid = vec!["shared".into()];
+        merge_assurances(
+            &mut eduid,
+            &["shared".into(), "new".into(), "new".into()],
+            StepupBehavior::Eduid,
+        );
+        assert_eq!(eduid, ["shared", "shared", "new", "new"]);
     }
 
     #[tokio::test]
@@ -738,6 +891,201 @@ mod tests {
             response.auth_info.auth_class_ref.as_deref(),
             Some(REFEDS_MFA)
         );
+    }
+
+    #[tokio::test]
+    async fn raw_refeds_mfa_without_trusted_provider_policy_does_not_bypass() {
+        let service = service();
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        let mut response = initial_response();
+        response.auth_info.auth_class_ref = Some(REFEDS_MFA.into());
+
+        let error = service
+            .process_response_action(&mut ctx, response)
+            .await
+            .err()
+            .expect("untrusted raw REFEDS MFA must continue to step-up");
+        assert!(error.to_string().contains("no linked account"));
+    }
+
+    #[tokio::test]
+    async fn eduid_requester_policy_replaces_original_accrs() {
+        let mut service = service();
+        service.behavior = StepupBehavior::Eduid;
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!(["original-loa"]));
+
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        let policy: RequestPolicy = serde_json::from_value(
+            ctx.state
+                .get_value(&service.state_namespace(), KEY_REQUEST)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(policy.original_requester_loas, ["original-loa"]);
+        assert_eq!(policy.requester_loas, [REFEDS_MFA]);
+    }
+
+    #[tokio::test]
+    async fn eduid_initial_policy_requires_returned_and_rejects_mismatch() {
+        let mut service = service();
+        service.behavior = StepupBehavior::Eduid;
+        service.mfa.by_entity_id.insert(
+            "https://initial.example/idp".into(),
+            LoaSettings {
+                requested: vec!["provider-loa".into()],
+                extra_accepted: Vec::new(),
+                returned: Some(REFEDS_MFA.into()),
+            },
+        );
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+
+        let error = service
+            .process_response_action(&mut ctx, initial_response())
+            .await
+            .err()
+            .expect("eduID rejects a mismatched LoA when returned is configured");
+        assert!(error.to_string().contains("is not accepted"));
+    }
+
+    #[tokio::test]
+    async fn eduid_incomplete_first_account_fails_closed() {
+        let mut service = service();
+        service.behavior = StepupBehavior::Eduid;
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        ctx.decorate(
+            KEY_MFA_STEPUP_ACCOUNTS,
+            serde_json::json!([{"entity_id": "", "identifier": "alice"}]),
+        );
+
+        let error = service
+            .process_response_action(&mut ctx, initial_response())
+            .await
+            .err()
+            .expect("an incomplete account must fail closed");
+        assert!(error.to_string().contains("incomplete"));
+    }
+
+    #[tokio::test]
+    async fn eduid_incomplete_account_cannot_pass_through_raw_refeds_mfa() {
+        let mut service = service();
+        service.behavior = StepupBehavior::Eduid;
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        ctx.decorate(
+            KEY_MFA_STEPUP_ACCOUNTS,
+            serde_json::json!([{"entity_id": "", "identifier": "alice"}]),
+        );
+        let mut response = initial_response();
+        response.auth_info.auth_class_ref = Some(REFEDS_MFA.into());
+
+        let error = service
+            .process_response_action(&mut ctx, response)
+            .await
+            .err()
+            .expect("an incomplete account must not authenticate raw REFEDS MFA");
+        assert!(error.to_string().contains("incomplete"));
+    }
+
+    #[test]
+    fn legacy_snapshot_without_target_backend_is_rejected() {
+        let snapshot = serde_json::json!({
+            "response": initial_response(),
+            "account": {
+                "entity_id": STEPUP_IDP,
+                "identifier": "alice@example.org",
+                "attribute": default_identifier_attribute(),
+                "assurance": default_assurance_attribute()
+            },
+            "policy": {
+                "behavior": "hardened",
+                "original_requester_loas": [REFEDS_MFA],
+                "requester_loas": [REFEDS_MFA],
+                "loa_settings": {
+                    "requested": ["urn:stepup:loa3"],
+                    "extra_accepted": [],
+                    "returned": REFEDS_MFA
+                }
+            },
+            "target_frontend": "SamlFrontend",
+            "decorations": {}
+        });
+
+        assert!(serde_json::from_value::<StepupSnapshot>(snapshot).is_err());
+    }
+
+    #[test]
+    fn synthesized_policy_requests_only_refeds_mfa() {
+        let service = service();
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(
+            KEY_REQUESTED_ACCR,
+            serde_json::json!([
+                REFEDS_MFA,
+                "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport"
+            ]),
+        );
+
+        let policy = service.request_policy(&ctx, Some("https://unconfigured.example/sp"));
+        assert_eq!(policy.requester_loas.len(), 2);
+        assert_eq!(policy.loa_settings.requested, [REFEDS_MFA]);
+        assert_eq!(policy.loa_settings.returned.as_deref(), Some(REFEDS_MFA));
+    }
+
+    #[tokio::test]
+    async fn non_mfa_request_does_not_publish_policy_table() {
+        let service = service();
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!(["urn:example:loa1"]));
+
+        service
+            .process_request(&mut ctx, InternalData::request("https://other.example/sp"))
+            .await
+            .unwrap();
+
+        assert!(ctx.decoration(KEY_STEPUP_INITIAL_POLICY).is_none());
+    }
+
+    #[test]
+    fn oversized_discovery_handoff_is_rejected_at_startup() {
+        let mut mfa = MfaConfig::default();
+        for index in 0..2_000 {
+            mfa.by_entity_id.insert(
+                format!("https://idp-{index:04}.example/metadata/{index:08x}"),
+                LoaSettings {
+                    requested: vec![format!("urn:example:loa:{index:08x}:provider")],
+                    extra_accepted: Vec::new(),
+                    returned: Some(REFEDS_MFA.into()),
+                },
+            );
+        }
+
+        let error = validate_handoff_size("oversized", StepupBehavior::Hardened, &mfa)
+            .expect_err("oversized policy must fail during configuration");
+        assert!(error.to_string().contains("discovery-state budget"));
     }
 
     #[test]
@@ -832,7 +1180,11 @@ mod tests {
         let mut response = initial_response();
         response.auth_info.auth_class_ref = Some("urn:provider:loa3".into());
         assert_eq!(
-            service.provider_already_satisfied(&ctx, &response),
+            service.initial_provider_policy(
+                &ctx,
+                response.auth_info.issuer.as_deref(),
+                StepupBehavior::Hardened,
+            ),
             Some(&preferred_provider)
         );
     }
@@ -917,9 +1269,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_provider_policy_overrides_later_accr_selection() {
+        let mut service = service();
+        service.mfa.by_entity_id.insert(
+            STEPUP_IDP.into(),
+            LoaSettings {
+                requested: vec!["urn:provider:required".into()],
+                extra_accepted: Vec::new(),
+                returned: Some(REFEDS_MFA.into()),
+            },
+        );
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        // Simulate `accr`, which is ordered after stepup on the request path.
+        ctx.decorate(
+            KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+            serde_json::json!(["urn:ordinary:accr"]),
+        );
+
+        let response = service
+            .saml
+            .start_auth(
+                &mut ctx,
+                InternalData {
+                    subject_id: Some("alice@example.org".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let xml = redirect_xml(&response);
+        assert!(xml.contains("urn:provider:required"), "got {xml}");
+        assert!(!xml.contains("urn:ordinary:accr"), "got {xml}");
+        assert!(ctx.decoration(KEY_STEPUP_INITIAL_POLICY).is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_initial_provider_policy_preserves_accr_selection() {
+        let service = service();
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        ctx.decorate(
+            KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+            serde_json::json!(["urn:ordinary:accr"]),
+        );
+
+        let response = service
+            .saml
+            .start_auth(
+                &mut ctx,
+                InternalData {
+                    subject_id: Some("alice@example.org".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let xml = redirect_xml(&response);
+        assert!(xml.contains("urn:ordinary:accr"), "got {xml}");
+    }
+
+    #[tokio::test]
     async fn validated_acs_resumes_original_response() {
         let service = service();
         let mut ctx = super::super::testutil::ctx();
+        ctx.target_backend = Some("InitialSamlBackend".into());
         ctx.target_frontend = Some("SamlFrontend".into());
         ctx.decorate(
             KEY_REQUESTED_ACCR,
@@ -948,6 +1370,9 @@ mod tests {
         let id_start = request_xml.find("ID=\"").unwrap() + 4;
         let id_end = id_start + request_xml[id_start..].find('"').unwrap();
         let saml_response = signed_stepup_response(&request_xml[id_start..id_end]);
+        // Endpoint dispatch points at the step-up service; successful resume
+        // must restore the backend from the suspended original flow.
+        ctx.target_backend = Some("stepup".into());
         ctx.request = tunnelbana_core::http::HttpRequestData {
             path: "stepup/acs".into(),
             uri: "https://x/stepup/acs".into(),
@@ -961,6 +1386,7 @@ mod tests {
             _ => panic!("expected response resume"),
         };
         assert_eq!(resumed.subject_id.as_deref(), Some("original-subject"));
+        assert_eq!(ctx.target_backend.as_deref(), Some("InitialSamlBackend"));
         assert_eq!(
             resumed.auth_info.auth_class_ref.as_deref(),
             Some(REFEDS_MFA)
@@ -971,6 +1397,51 @@ mod tests {
         );
         assert!(ctx.state.get("stepup:stepup").is_none());
         assert!(ctx.state.get("stepup_saml:stepup").is_none());
+    }
+
+    #[tokio::test]
+    async fn callback_requires_response_level_issuer_to_match_linked_provider() {
+        let service = service();
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(KEY_REQUESTED_ACCR, serde_json::json!([REFEDS_MFA]));
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        ctx.decorate(
+            KEY_MFA_STEPUP_ACCOUNTS,
+            serde_json::json!([{
+                "entity_id": STEPUP_IDP,
+                "identifier": "alice@example.org"
+            }]),
+        );
+        let redirect = match service
+            .process_response_action(&mut ctx, initial_response())
+            .await
+            .unwrap()
+        {
+            MicroServiceResponseAction::Respond(response) => response,
+            MicroServiceResponseAction::Continue(_) => panic!("expected step-up redirect"),
+        };
+        let request_xml = redirect_xml(&redirect);
+        let id_start = request_xml.find("ID=\"").unwrap() + 4;
+        let id_end = id_start + request_xml[id_start..].find('"').unwrap();
+        let saml_response =
+            signed_stepup_response_with_wrong_response_issuer(&request_xml[id_start..id_end]);
+        ctx.request = tunnelbana_core::http::HttpRequestData {
+            path: "stepup/acs".into(),
+            uri: "https://x/stepup/acs".into(),
+            method: "POST".into(),
+            form: BTreeMap::from([("SAMLResponse".into(), saml_response)]),
+            ..Default::default()
+        };
+
+        let error = service
+            .handle_endpoint(&mut ctx, "acs")
+            .await
+            .err()
+            .expect("wrong Response issuer must fail");
+        assert!(error.to_string().contains("Response issuer"));
     }
 
     #[tokio::test]
@@ -1048,6 +1519,8 @@ mod tests {
                 assurance: default_assurance_attribute(),
             },
             policy: RequestPolicy {
+                behavior: StepupBehavior::Hardened,
+                original_requester_loas: vec![REFEDS_MFA.into()],
                 requester_loas: vec![REFEDS_MFA.into()],
                 loa_settings: LoaSettings {
                     requested: vec!["urn:stepup:loa3".into()],
@@ -1056,6 +1529,7 @@ mod tests {
                 },
                 is_passive: false,
             },
+            target_backend: Some("SamlBackend".into()),
             target_frontend: Some("SamlFrontend".into()),
             decorations: BTreeMap::from([(
                 "original-decoration".into(),
@@ -1087,6 +1561,7 @@ mod tests {
             ]
         );
         assert_eq!(ctx.target_frontend.as_deref(), Some("SamlFrontend"));
+        assert_eq!(ctx.target_backend.as_deref(), Some("SamlBackend"));
         assert_eq!(
             ctx.decoration("original-decoration")
                 .and_then(Value::as_str),

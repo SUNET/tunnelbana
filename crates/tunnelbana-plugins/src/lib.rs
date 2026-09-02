@@ -16,6 +16,7 @@ pub mod saml2_backend;
 pub mod saml2_frontend;
 pub(crate) mod saml_common;
 pub mod saml_metadata;
+pub(crate) mod stepup_policy;
 pub(crate) mod url_check;
 
 use tunnelbana_core::plugin::Registry;

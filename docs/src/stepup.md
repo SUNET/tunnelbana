@@ -12,6 +12,25 @@ metadata trust, response correlation, signature/time/audience validation, and
 replay protection. A deployment that does not configure `ScimAttributes` or
 `stepup` imports no eduID Python package.
 
+## Compatibility modes
+
+The service defaults to `behavior = "hardened"`. Set `behavior = "eduid"` to
+match the policy branches and resulting `InternalData` of eduID-backend commit
+`e0be0462eab2f013ca75a32959c9e7b0ae4edd4b`, `stepup.py` blob
+`7537e8c11c03823362832a3c372d771fe6ed31aa`. Unknown values are rejected at
+startup.
+
+The eduID mode changes requester-policy replacement, metadata precedence,
+initial-response rewriting, incomplete linked-account handling, attribute-map
+selection, final LoA normalization, and duplicate assurance handling. For
+valid output from the bundled `ScimAttributes` adapter, it is 100% compatible
+with the reference policy and `InternalData` output behavior. It does not
+weaken Tunnelbana's SAML validation, metadata trust, response correlation,
+replay checks, passive-flow handling, or same-assertion provenance. It also
+does not make Tunnelbana's native configuration and SAML XML byte-identical to
+PySAML. See [ADR 0056](https://github.com/SUNET/tunnelbana/blob/main/docs/adr/0056-eduid-mfa-stepup.md)
+for the exact contract and security substitutions.
+
 ## Required ordering
 
 List the services in this order:
@@ -49,6 +68,7 @@ name = "ScimAttributes"
 type = "stepup"
 name = "stepup"
   [microservice.config]
+  behavior = "hardened" # use "eduid" for eduID policy/output compatibility
   sp_entity_id = "https://proxy.example.org/stepup/metadata"
   sp_key_path = "keys/stepup.key"
   sp_cert_path = "keys/stepup.crt"
@@ -81,6 +101,7 @@ resolves and verifies the selected entity's SSO endpoint and signing keys.
 type = "stepup"
 name = "stepup"
   [microservice.config]
+  behavior = "hardened"
   sp_entity_id = "https://proxy.example.org/stepup/metadata"
   sp_key_path = "keys/stepup.key"
   sp_cert_path = "keys/stepup.crt"
@@ -104,7 +125,7 @@ The service exposes its ACS at `<base_url>/<name>/acs` and metadata at
 MDQ metadata must be signature-verified; `mdq.allow_unverified` is rejected for
 step-up even though the ordinary SAML backend retains that explicit test mode.
 
-The `mfa` lookup follows the eduID precedence relevant to each leg:
+In the default hardened mode, `mfa` lookup is role-specific:
 
 - the requesting SP's exact entity ID, then its trusted metadata entity
   categories, chooses the LoAs sent to the step-up provider;
@@ -115,30 +136,53 @@ When several configured categories or certifications match, the first entry in
 the TOML configuration wins. Metadata value order does not affect policy
 priority.
 
+In `behavior = "eduid"`, both roles use eduID's generic lookup: exact entity ID
+wins, followed by entity categories and assurance certifications in trusted
+metadata source order. A matched requester policy also replaces the effective
+requester ACCRs with that policy's `requested` list.
+
 For a static initial SAML backend, configure metadata-equivalent assurance
-certifications with `idp_assurance_certifications = ["..."]`. MDQ mode reads
-them from accepted metadata.
+certifications and categories with `idp_assurance_certifications = ["..."]`
+and `idp_entity_categories = ["..."]`. MDQ mode reads them from accepted
+metadata. Entity-level extensions and only the first active SSO descriptor are
+used, matching endpoint and certificate selection; later role descriptors
+cannot affect policy.
 
 This folds SATOSA's separate `AuthnContext` and
-`RewriteAuthnContextClass` helpers into the step-up service. Tunnelbana's
-existing `accr` service and SAML backend provide the initial AuthnContext
-forwarding/validation performed by eduID's `StepupSAMLBackend`; keep `accr`
-after `stepup` so a completed second exchange is the value it validates.
+`RewriteAuthnContextClass` helpers into the step-up service. To reproduce
+`StepupSAMLBackend`, step-up hands its policy to the selected SAML backend;
+after resolving the initial IdP, a matching provider policy overrides the
+ordinary `accr` target with its `requested` values and exact comparison. Keep
+`accr` after `stepup` so it selects the ordinary fallback first and validates
+the final value after a completed exchange.
 
 ## Runtime behavior and checks
 
-Step-up is attempted only when the original requester included
-`https://refeds.org/profile/mfa`. An already asserted REFEDS MFA value, or an
-initial-provider LoA accepted by `requested`/`extra_accepted`, passes without a
-second exchange. Otherwise a missing or malformed linked account fails closed.
-An `IsPassive` flow that would require the second browser interaction fails as
-interaction-required instead of silently dropping the passive constraint.
+In hardened mode, step-up is attempted only when the original requester
+included `https://refeds.org/profile/mfa`. In eduID mode, a matched requester
+policy's `requested` list determines that intent. A raw REFEDS MFA assertion is
+not sufficient to bypass step-up: the initial provider must match trusted MFA
+policy. Hardened mode accepts `requested`/`extra_accepted` with fallback
+normalization; eduID mode bypasses only when `returned` is configured and
+raises an authentication error when that policy rejects the assertion.
+
+A missing linked account is an authentication failure in both modes. Hardened
+and eduID modes also fail closed for an incomplete first account. This is a
+deliberate security-envelope difference from the reference pass-through: the
+bundled SCIM adapter does not emit this malformed shape, and accepting it can
+bypass metadata-replaced MFA intent. When no explicit trusted requester policy
+matches, the synthesized second exchange requests only REFEDS MFA, so a weaker
+sibling ACCR cannot be normalized to MFA. Explicit provider LoA aliases remain
+available through configured policies.
+An `IsPassive` flow that would require the second browser interaction always
+fails as interaction-required instead of silently dropping the passive
+constraint.
 
 The first eligible linked account is used, matching eduID. Tunnelbana sends its
 identifier as an `unspecified` NameID and requests the configured LoAs with
 `Comparison="exact"`. On return the ordinary SAML backend validator enforces
-the signature, issuer, destination, audience, time, request correlation and
-assertion replay checks. Step-up additionally requires:
+the signature, Response and assertion issuers, destination, audience, time,
+request correlation and assertion replay checks. Step-up additionally requires:
 
 - the validated issuer to equal the linked account's entity ID;
 - the linked identifier to occur in the configured identifier attribute;
@@ -150,9 +194,12 @@ assertions in the Response cannot contribute the linked identifier or merged
 assurance values.
 
 Values from the linked account's assurance attribute are merged into the
-original response through the normal SAML attribute map. For both an accepted
-initial-provider LoA and a completed step-up, `returned`, when set, is the
-downstream LoA; otherwise the first originally requested LoA is used.
+original response through the normal SAML attribute map. Hardened mode removes
+duplicates and normalizes a completed exchange to `returned`, the first
+original requester LoA, or the asserted LoA. eduID mode preserves duplicate
+assurances and returns the first effective requester LoA, falling back to the
+asserted step-up LoA; its callback intentionally ignores `returned`, matching
+the reference implementation.
 
 The suspended response and decorations are kept only in the authenticated,
 encrypted state cookie and consumed after a valid ACS response. A 32 KiB
@@ -160,3 +207,10 @@ uncompressed snapshot guard rejects extreme responses, while the global 4096
 byte sealed-cookie limit remains authoritative; highly incompressible large
 attribute sets can therefore fail the step-up redirect safely rather than
 produce an unresumable flow.
+The initial-provider policy is copied into discovery state only for an
+effective MFA request. Tunnelbana rejects a configuration at startup when that
+policy handoff exceeds its 1536-byte compressed budget, leaving cookie space
+for the rest of the discovery flow.
+The original frontend and backend selections are restored before later
+response services run, so audit services observe the original authentication
+flow rather than the embedded step-up micro-SP.

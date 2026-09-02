@@ -9,8 +9,14 @@
   validation; verifies the linked issuer and identifier; merges assurance
   values from the same authenticated assertion; and resumes the original
   response chain. The core now supports
-  response-path interruption/resumption. Trusted requester entity categories
-  and provider assurance certifications support eduID's LoA policy mappings.
+  response-path interruption/resumption. Trusted requester/provider entity
+  categories and assurance certifications support eduID's LoA policy mappings.
+  `behavior = "eduid"` reproduces the pinned eduID policy/output semantics;
+  the default `hardened` mode retains fail-closed Tunnelbana behavior. Initial
+  provider policy now overrides the ordinary backend's ACCR after trusted
+  metadata resolution, synthesized fallback policy cannot elevate a weaker
+  sibling ACCR, malformed linked accounts fail closed, discovery policy state
+  is bounded at startup, and resumed flows restore their original backend.
   Configure services in `ScimAttributes`, `stepup`, `accr` order.
 - **eduID SCIM response attributes (ADR 0055):** add the bundled
   `ScimAttributes` Python adapter, an opt-in detached attribute-map constructor

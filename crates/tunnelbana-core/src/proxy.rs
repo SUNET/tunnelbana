@@ -660,6 +660,7 @@ mod tests {
     struct ResponseRecordingService {
         name: String,
         calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        backends: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
         resume: bool,
     }
 
@@ -671,10 +672,14 @@ mod tests {
 
         async fn process_response(
             &self,
-            _ctx: &mut Context,
+            ctx: &mut Context,
             data: crate::internal::InternalData,
         ) -> crate::error::Result<crate::internal::InternalData> {
             self.calls.lock().unwrap().push(self.name.clone());
+            self.backends
+                .lock()
+                .unwrap()
+                .push(ctx.target_backend.clone());
             Ok(data)
         }
 
@@ -687,9 +692,12 @@ mod tests {
 
         async fn handle_endpoint(
             &self,
-            _ctx: &mut Context,
+            ctx: &mut Context,
             _route_id: &str,
         ) -> crate::error::Result<MicroServiceAction> {
+            // A suspending response service such as stepup restores the
+            // original backend before asking the proxy to resume the chain.
+            ctx.target_backend = Some("original-backend".into());
             Ok(MicroServiceAction::ResumeResponse {
                 response: crate::internal::InternalData {
                     requester: Some("sp".into()),
@@ -746,20 +754,24 @@ mod tests {
     #[tokio::test]
     async fn response_resume_runs_only_later_services_then_frontend() {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let backends = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let services: Vec<Box<dyn MicroService>> = vec![
             Box::new(ResponseRecordingService {
                 name: "before".into(),
                 calls: calls.clone(),
+                backends: backends.clone(),
                 resume: false,
             }),
             Box::new(ResponseRecordingService {
                 name: "resumer".into(),
                 calls: calls.clone(),
+                backends: backends.clone(),
                 resume: true,
             }),
             Box::new(ResponseRecordingService {
                 name: "after".into(),
                 calls: calls.clone(),
+                backends: backends.clone(),
                 resume: false,
             }),
         ];
@@ -786,6 +798,10 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(String::from_utf8(response.body).unwrap(), "sp");
         assert_eq!(*calls.lock().unwrap(), vec!["after".to_string()]);
+        assert_eq!(
+            *backends.lock().unwrap(),
+            vec![Some("original-backend".to_string())]
+        );
         assert!(response
             .headers
             .iter()

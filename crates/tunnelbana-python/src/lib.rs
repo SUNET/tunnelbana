@@ -53,7 +53,10 @@ const FIRST_WRITER_DECORATION_KEYS: &[&str] = &[
 const READ_ONLY_DECORATION_KEYS: &[&str] = &[
     tunnelbana_core::context::KEY_PROVIDER_SCOPES,
     tunnelbana_core::context::KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+    tunnelbana_core::context::KEY_PROVIDER_ENTITY_CATEGORIES,
     tunnelbana_core::context::KEY_REQUESTER_ENTITY_CATEGORIES,
+    tunnelbana_core::context::KEY_REQUESTER_ASSURANCE_CERTIFICATIONS,
+    tunnelbana_core::context::KEY_STEPUP_INITIAL_POLICY,
 ];
 static MODULE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static VENV_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
