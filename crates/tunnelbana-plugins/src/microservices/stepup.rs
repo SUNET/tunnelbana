@@ -60,6 +60,18 @@ impl LoaSettings {
     }
 }
 
+fn normalized_loa(
+    settings: &LoaSettings,
+    requester_loas: &[String],
+    asserted_loa: Option<&str>,
+) -> Option<String> {
+    settings
+        .returned
+        .clone()
+        .or_else(|| requester_loas.first().cloned())
+        .or_else(|| asserted_loa.map(str::to_string))
+}
+
 #[derive(Debug, Deserialize)]
 struct MfaConfig {
     #[serde(default)]
@@ -247,13 +259,11 @@ impl StepUp {
             }
         }
 
-        snapshot.response.auth_info.auth_class_ref = snapshot
-            .policy
-            .loa_settings
-            .returned
-            .clone()
-            .or_else(|| snapshot.policy.requester_loas.first().cloned())
-            .or_else(|| loa.map(str::to_string));
+        snapshot.response.auth_info.auth_class_ref = normalized_loa(
+            &snapshot.policy.loa_settings,
+            &snapshot.policy.requester_loas,
+            loa,
+        );
 
         // The callback's SAML backend publishes decorations for the step-up
         // IdP. Later response services belong to the original authentication
@@ -302,9 +312,11 @@ impl MicroService for StepUp {
         }
 
         if let Some(settings) = self.provider_already_satisfied(ctx, &data) {
-            if let Some(returned) = &settings.returned {
-                data.auth_info.auth_class_ref = Some(returned.clone());
-            }
+            data.auth_info.auth_class_ref = normalized_loa(
+                settings,
+                &policy.requester_loas,
+                data.auth_info.auth_class_ref.as_deref(),
+            );
             ctx.state.clear_namespace(&self.state_namespace());
             return Ok(MicroServiceResponseAction::Continue(data));
         }
@@ -687,6 +699,45 @@ mod tests {
         assert!(settings.accepts(Some("loa3")));
         assert!(settings.accepts(Some("loa3-alias")));
         assert!(!settings.accepts(Some("loa2")));
+    }
+
+    #[tokio::test]
+    async fn accepted_provider_alias_without_returned_uses_requester_loa() {
+        let mut service = service();
+        service.mfa.by_entity_id.insert(
+            "https://initial.example/idp".into(),
+            LoaSettings {
+                requested: vec!["urn:provider:loa3".into()],
+                extra_accepted: vec!["urn:provider:loa3-alias".into()],
+                returned: None,
+            },
+        );
+        let mut ctx = super::super::testutil::ctx();
+        ctx.decorate(
+            KEY_REQUESTED_ACCR,
+            Value::Array(vec![Value::String(REFEDS_MFA.into())]),
+        );
+        service
+            .process_request(&mut ctx, InternalData::request(REQUESTER))
+            .await
+            .unwrap();
+        let mut response = initial_response();
+        response.auth_info.auth_class_ref = Some("urn:provider:loa3-alias".into());
+
+        let response = match service
+            .process_response_action(&mut ctx, response)
+            .await
+            .unwrap()
+        {
+            MicroServiceResponseAction::Continue(response) => response,
+            MicroServiceResponseAction::Respond(_) => {
+                panic!("accepted provider alias must bypass step-up")
+            }
+        };
+        assert_eq!(
+            response.auth_info.auth_class_ref.as_deref(),
+            Some(REFEDS_MFA)
+        );
     }
 
     #[test]

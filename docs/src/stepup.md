@@ -150,8 +150,9 @@ assertions in the Response cannot contribute the linked identifier or merged
 assurance values.
 
 Values from the linked account's assurance attribute are merged into the
-original response through the normal SAML attribute map. `returned`, when set,
-is the downstream LoA; otherwise the first originally requested LoA is used.
+original response through the normal SAML attribute map. For both an accepted
+initial-provider LoA and a completed step-up, `returned`, when set, is the
+downstream LoA; otherwise the first originally requested LoA is used.
 
 The suspended response and decorations are kept only in the authenticated,
 encrypted state cookie and consumed after a valid ACS response. A 32 KiB
