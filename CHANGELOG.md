@@ -186,8 +186,9 @@
 
 - **Security (SAML):** `passthrough_unmapped_attributes` can no longer merge
   into or fabricate mapped internal attributes (case-insensitive known
-  check, ADR 0047); the SAML backend's `security` value must be `strict` or
-  `permissive` (ADR 0050); attacker-controlled entity IDs are escaped in
+  check, ADR 0047); the SAML backend rejects unknown `security` values
+  (ADR 0050), and adds a secure interoperable `production` preset for step-up
+  (ADR 0056); attacker-controlled entity IDs are escaped in
   logs and no longer reflected in 403 bodies (ADR 0051); `ForceAuthn` /
   `IsPassive` are propagated upstream (`prompt=login`/`prompt=none` for the
   OIDC backend) or rejected when the backend cannot honor them (ADR 0049).

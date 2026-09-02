@@ -498,29 +498,29 @@ mod tests {
     const REQUESTER: &str = "https://service.example/sp";
     const STEPUP_IDP: &str = "https://accounts.example/idp";
 
-    fn service() -> StepUp {
+    fn build_context(security: Option<&str>) -> BuildContext {
         let testdata = format!("{}/testdata", env!("CARGO_MANIFEST_DIR"));
-        let mut bx = super::super::testutil::bx(
-            "stepup",
-            serde_json::json!({
-                "mfa": {
-                    "by_entity_id": {
-                        (REQUESTER): {
-                            "requested": [REFEDS_MFA],
-                            "returned": REFEDS_MFA
-                        }
+        let mut config = serde_json::json!({
+            "mfa": {
+                "by_entity_id": {
+                    (REQUESTER): {
+                        "requested": [REFEDS_MFA],
+                        "returned": REFEDS_MFA
                     }
-                },
-                "sp_entity_id": "https://proxy.example/stepup/metadata",
-                "sp_key_path": format!("{testdata}/sp-key.pem"),
-                "sp_cert_path": format!("{testdata}/sp-cert.pem"),
-                "idp_entity_id": STEPUP_IDP,
-                "idp_sso_url": "https://accounts.example/sso",
-                "idp_cert_path": format!("{testdata}/idp-cert.pem"),
-                "sign_authn_requests": true,
-                "security": "permissive"
-            }),
-        );
+                }
+            },
+            "sp_entity_id": "https://proxy.example/stepup/metadata",
+            "sp_key_path": format!("{testdata}/sp-key.pem"),
+            "sp_cert_path": format!("{testdata}/sp-cert.pem"),
+            "idp_entity_id": STEPUP_IDP,
+            "idp_sso_url": "https://accounts.example/sso",
+            "idp_cert_path": format!("{testdata}/idp-cert.pem"),
+            "sign_authn_requests": true
+        });
+        if let Some(security) = security {
+            config["security"] = Value::String(security.to_string());
+        }
+        let mut bx = super::super::testutil::bx("stepup", config);
         bx.attribute_mapper = Arc::new(
             AttributeMapper::from_toml(
                 r#"
@@ -532,6 +532,11 @@ mod tests {
             )
             .unwrap(),
         );
+        bx
+    }
+
+    fn service() -> StepUp {
+        let bx = build_context(None);
         let cfg: StepUpConfig = bx.parse_config().unwrap();
         StepUp {
             name: bx.name.clone(),
@@ -682,6 +687,35 @@ mod tests {
         assert!(settings.accepts(Some("loa3")));
         assert!(settings.accepts(Some("loa3-alias")));
         assert!(!settings.accepts(Some("loa2")));
+    }
+
+    #[test]
+    fn stepup_defaults_to_production_validation_and_rejects_permissive() {
+        let service = service();
+        let security = service.saml.security_config();
+        assert!(security.require_signed_assertions);
+        assert!(security.verify_destination);
+        assert!(security.verify_recipient);
+        assert!(security.reject_signatures_with_ds_object);
+        assert!(!security.require_encrypted_assertions);
+
+        let err = Saml2Backend::build_stepup(&build_context(Some("permissive")))
+            .err()
+            .expect("permissive step-up validation must be rejected");
+        assert!(err.to_string().contains("security=permissive"));
+    }
+
+    #[test]
+    fn stepup_rejects_unverified_mdq_metadata() {
+        let mut bx = build_context(Some("production"));
+        bx.config["mdq"] = serde_json::json!({
+            "url": "https://mdq.example.org/entities/",
+            "allow_unverified": true
+        });
+        let err = Saml2Backend::build_stepup(&bx)
+            .err()
+            .expect("unverified step-up metadata must be rejected");
+        assert!(err.to_string().contains("mdq.allow_unverified"));
     }
 
     #[test]

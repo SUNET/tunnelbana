@@ -36,10 +36,15 @@ return arbitrary HTTP challenges through that boundary.
   second ACS parser. Give the embedded instance a separate state namespace,
   require signed AuthnRequests, disable unsolicited Responses and include the
   linked identifier as an unspecified Subject NameID.
+- Default the embedded backend to gamlastan's secure, interoperable production
+  validation policy and reject the test-only permissive policy. Keep strict as
+  an explicit high-security option.
 - In MDQ mode, select the target solely from the SCIM-derived linked account;
   an `entityID` query parameter on the initial ACS request cannot override it.
   Static mode requires that account entity ID to equal the pinned IdP before
   the identifier is disclosed in a redirect.
+- Require signature-verified MDQ metadata for step-up; reject the ordinary
+  backend's explicit `allow_unverified` test escape hatch.
 - Save the original requester ACCRs and requester-metadata categories on the
   request path. Exact requester configuration wins, then the first configured
   entity category. On the initial response, an exact provider configuration or
@@ -61,7 +66,7 @@ return arbitrary HTTP challenges through that boundary.
 
 | Threat | Control | Residual risk |
 |---|---|---|
-| Linked account chooses an attacker IdP | SCIM issuer values require an operator mapping; static mode pins the same entity ID; MDQ mode resolves trusted metadata; the validated response issuer must match | Incorrect operator mappings or unsafe MDQ configuration can authorize the wrong provider |
+| Linked account chooses an attacker IdP | SCIM issuer values require an operator mapping; static mode pins the same entity ID; step-up MDQ requires signed metadata; the validated response issuer must match | Incorrect operator mappings or compromised metadata-signing authority can authorize the wrong provider |
 | Initial ACS query overrides the linked provider | The embedded SAML backend ignores request `entityID` values and uses only the account decoration | Trusted operator Python can still publish linked-account data |
 | Forged, replayed or cross-flow step-up response | Native SAML signature, issuer, audience, recipient, time, `InResponseTo` and replay validation; unsolicited mode is forbidden | Replay cache remains process-local, as for ordinary SAML backends; clustered deployments need a shared cache |
 | A valid account assertion authenticates another person | The linked identifier must appear in the configured mapped assertion attribute, in addition to the Subject-bound request | The provider must faithfully enforce the requested Subject and attribute semantics |

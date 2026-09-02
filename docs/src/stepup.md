@@ -27,9 +27,13 @@ micro-services in configuration order.
 
 ## Configuration
 
-The SAML keys are the same as the `saml2` backend. AuthnRequests must be signed
-and unsolicited Responses are prohibited. For one statically pinned step-up
-provider:
+The SAML keys are the same as the `saml2` backend. AuthnRequests must be signed,
+unsolicited Responses are prohibited, and the test-only `permissive` security
+preset is rejected. Step-up defaults to the interoperable `production` preset,
+which validates signatures, Destination, Recipient, time, audience,
+correlation, replay state, and `ds:Object`. `strict` remains available when the
+deployment also requires encrypted assertions and its additional checks. For
+one statically pinned step-up provider:
 
 ```toml
 [[microservice]]
@@ -53,7 +57,7 @@ name = "stepup"
   idp_cert_path = "keys/accounts-signing.crt"
   sign_authn_requests = true
   allow_unsolicited = false
-  security = "strict"
+  security = "production"
 
   [microservice.config.mfa.by_entity_id."https://service.example.org/sp"]
   requested = ["https://refeds.org/profile/mfa"]
@@ -81,7 +85,7 @@ name = "stepup"
   sp_key_path = "keys/stepup.key"
   sp_cert_path = "keys/stepup.crt"
   sign_authn_requests = true
-  security = "strict"
+  security = "production"
 
   [microservice.config.mdq]
   url = "https://mdq.example.org/entities/"
@@ -97,6 +101,8 @@ name = "stepup"
 The service exposes its ACS at `<base_url>/<name>/acs` and metadata at
 `<base_url>/<name>/metadata`. Register that metadata with every step-up IdP.
 `disco_srv` is not accepted: the linked account selects the provider.
+MDQ metadata must be signature-verified; `mdq.allow_unverified` is rejected for
+step-up even though the ordinary SAML backend retains that explicit test mode.
 
 The `mfa` lookup follows the eduID precedence relevant to each leg:
 

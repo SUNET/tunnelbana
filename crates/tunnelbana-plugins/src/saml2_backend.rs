@@ -98,7 +98,9 @@ struct Saml2BackendConfig {
     sign_authn_requests: bool,
     #[serde(default)]
     name_id_format: Option<String>,
-    /// Use "strict" or "permissive" security validation (default permissive).
+    /// Validation preset: "production", "strict", or "permissive". Ordinary
+    /// backends retain the historical permissive default; step-up defaults to
+    /// production and rejects permissive.
     #[serde(default)]
     security: Option<String>,
     /// Accepted clock skew (seconds) between this SP and the IdP; overrides
@@ -380,7 +382,7 @@ pub struct Saml2Backend {
     sign_requests: bool,
     name_id_format: Option<String>,
     sp_cert_b64: Option<String>,
-    strict: bool,
+    security: SecurityPreset,
     accepted_time_diff_secs: Option<u64>,
     passthrough_unmapped_attributes: bool,
     scope_subject_id_by_issuer: bool,
@@ -407,6 +409,18 @@ pub struct Saml2Backend {
     request_subject: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecurityPreset {
+    /// gamlastan's test-only compatibility policy.
+    Permissive,
+    /// Secure, interoperable SP defaults: signed assertions plus destination,
+    /// recipient, time, audience, correlation, replay, and E91 checks.
+    Production,
+    /// High-security policy requiring signed responses, directly signed and
+    /// encrypted assertions, and client-address validation as applicable.
+    Strict,
+}
+
 impl Saml2Backend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
         Self::build_concrete(bx, false, bx.name.clone())
@@ -415,6 +429,12 @@ impl Saml2Backend {
 
     pub(crate) fn build_stepup(bx: &BuildContext) -> Result<Self> {
         let backend = Self::build_concrete(bx, true, format!("stepup_saml:{}", bx.name))?;
+        if backend.security == SecurityPreset::Permissive {
+            return Err(Error::Config(format!(
+                "stepup {}: security=permissive is test-only and is not allowed; use production or strict",
+                bx.name
+            )));
+        }
         if !backend.sign_requests {
             return Err(Error::Config(format!(
                 "stepup {}: sign_authn_requests must be true",
@@ -502,6 +522,12 @@ impl Saml2Backend {
         // is present, else the static idp_sso_url + idp_cert_path pair.
         let idp_metadata = match &cfg.mdq {
             Some(mdq_cfg) => {
+                if request_subject && mdq_cfg.allow_unverified {
+                    return Err(Error::Config(format!(
+                        "stepup {}: mdq.allow_unverified is not allowed; step-up metadata must be signature-verified",
+                        bx.name
+                    )));
+                }
                 if !cfg.idp_scopes.is_empty() || !cfg.idp_assurance_certifications.is_empty() {
                     return Err(Error::Config(
                         "saml2 backend idp_scopes and idp_assurance_certifications are only valid in static mode; MDQ mode reads them from trusted metadata".into(),
@@ -581,14 +607,16 @@ impl Saml2Backend {
 
         // Fail closed on a typo'd security preset instead of silently
         // selecting the permissive one.
-        let strict = match cfg.security.as_deref() {
-            None => false,
-            Some(v) if v.eq_ignore_ascii_case("strict") => true,
-            Some(v) if v.eq_ignore_ascii_case("permissive") => false,
+        let security = match cfg.security.as_deref() {
+            None if request_subject => SecurityPreset::Production,
+            None => SecurityPreset::Permissive,
+            Some(v) if v.eq_ignore_ascii_case("production") => SecurityPreset::Production,
+            Some(v) if v.eq_ignore_ascii_case("strict") => SecurityPreset::Strict,
+            Some(v) if v.eq_ignore_ascii_case("permissive") => SecurityPreset::Permissive,
             Some(other) => {
                 return Err(Error::Config(format!(
                     "saml2 backend {}: unknown security value {other:?} \
-                     (expected \"strict\" or \"permissive\")",
+                     (expected \"production\", \"strict\", or \"permissive\")",
                     bx.name
                 )))
             }
@@ -607,7 +635,7 @@ impl Saml2Backend {
             sign_requests: cfg.sign_authn_requests,
             name_id_format: cfg.name_id_format,
             sp_cert_b64,
-            strict,
+            security,
             accepted_time_diff_secs: cfg.accepted_time_diff_secs,
             passthrough_unmapped_attributes: cfg.passthrough_unmapped_attributes,
             scope_subject_id_by_issuer: cfg.scope_subject_id_by_issuer,
@@ -645,11 +673,11 @@ impl Saml2Backend {
         )))
     }
 
-    fn security_config(&self) -> SecurityConfig {
-        let mut cfg = if self.strict {
-            SecurityConfig::strict()
-        } else {
-            SecurityConfig::permissive()
+    pub(crate) fn security_config(&self) -> SecurityConfig {
+        let mut cfg = match self.security {
+            SecurityPreset::Permissive => SecurityConfig::permissive(),
+            SecurityPreset::Production => SecurityConfig::default(),
+            SecurityPreset::Strict => SecurityConfig::strict(),
         };
         if let Some(skew) = self.accepted_time_diff_secs {
             cfg.clock_skew_seconds = skew;

@@ -561,6 +561,12 @@ startup). The `initiate` route is only registered in discovery mode.
 
 Static single-IdP mode:
 
+`production` uses gamlastan's secure SP-friendly defaults, including signed
+assertions and Destination/Recipient validation. `strict` additionally
+requires encrypted assertions and the other high-security checks. The
+historical ordinary-backend default remains `permissive` for compatibility;
+new production deployments should select `production` or `strict` explicitly.
+
 ```toml
 [[backend]]
 type = "saml2"
@@ -578,9 +584,10 @@ name = "Saml2"
   # idp_scopes          = ["example.org"]
   sign_authn_requests = true               # default false
   name_id_format      = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
-  security            = "permissive"       # "permissive" (default) or "strict"
+  security            = "permissive"       # "permissive" (default), "production", or "strict"
   # Clock-skew tolerance towards the IdP in seconds, overriding the preset
-  # (SATOSA: accepted_time_diff). Permissive defaults to 600, strict to 180.
+  # (SATOSA: accepted_time_diff). Permissive defaults to 600; production and
+  # strict default to 180.
   # accepted_time_diff_secs = 300
   # Keep inbound attributes the attribute map does not know, under a
   # lowercased FriendlyName-or-Name key (SATOSA: allow_unknown_attributes).
@@ -1113,7 +1120,7 @@ name = "stepup"
   sp_key_path = "keys/stepup.key"
   sp_cert_path = "keys/stepup.crt"
   sign_authn_requests = true
-  security = "strict"
+  security = "production" # secure default for step-up; permissive is rejected
   idp_entity_id = "https://accounts.example.org/idp"
   idp_sso_url = "https://accounts.example.org/sso"
   idp_cert_path = "keys/accounts.crt"
@@ -1126,7 +1133,8 @@ name = "stepup"
 The service owns `<base_url>/<name>/acs` and
 `<base_url>/<name>/metadata`. See [eduID MFA step-up](stepup.md) for MDQ,
 entity-category/assurance-certification policy, ordering, attribute mapping,
-and the complete validation behavior.
+and the complete validation behavior. Step-up MDQ configuration also rejects
+the test-only `allow_unverified` mode.
 
 ### `custom_routing` - backend selection (request path, ADR 0033; original ADR 0015)
 
