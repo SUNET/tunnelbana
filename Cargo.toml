@@ -60,6 +60,7 @@ url = "2"
 percent-encoding = "2"
 form_urlencoded = "1"
 regex = "1"
+bytes = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # Embedded CPython support. Keep these exact and isolated to tunnelbana-python.

@@ -4,10 +4,11 @@
 //! (32-check `AssertionValidator` via `process_response`) and map attributes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use base64::Engine;
+use bytes::Bytes;
 use chrono::Utc;
 use serde::Deserialize;
 
@@ -27,7 +28,7 @@ use gamlastan::security::config::SecurityConfig;
 use gamlastan::security::replay::InMemoryReplayCache;
 use gamlastan::security::validation::{AssertionValidator, ValidationParams};
 use gamlastan::xml::serialize::SamlSerialize;
-use gamlastan_mdq::MdqClient;
+use gamlastan_mdq::{MdqClient, MdqError, MetadataFetcher, ReqwestFetcher};
 
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::{Context, KEY_PROVIDER_SCOPES};
@@ -37,7 +38,9 @@ use tunnelbana_core::internal::{AuthenticationInformation, InternalData, Subject
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
 use tunnelbana_core::util::now_rfc3339;
 
-use crate::saml_common::{build_mdq_client, extract_cert_b64, verifier_from_cert_ders, MdqConfig};
+use crate::saml_common::{
+    build_mdq_client_with_fetcher, extract_cert_b64, verifier_from_cert_ders, MdqConfig,
+};
 
 /// XML-DSig RSA-SHA256 signature algorithm URI (for signed redirect requests).
 const SIGALG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
@@ -145,7 +148,108 @@ enum IdpMetadata {
         verifier: SamlVerifier,
     },
     /// Resolved per request from an MDQ server, keyed by `idp_entity_id`.
-    Mdq(MdqClient),
+    Mdq(ScopeAwareMdqClient),
+}
+
+#[derive(Clone)]
+struct CapturingMetadataFetcher {
+    inner: ReqwestFetcher,
+    capture: Arc<StdMutex<MetadataCapture>>,
+}
+
+#[derive(Default)]
+struct MetadataCapture {
+    generation: u64,
+    bytes: Bytes,
+}
+
+impl MetadataFetcher for CapturingMetadataFetcher {
+    async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
+        let bytes = self.inner.fetch(url).await?;
+        let mut capture = lock_unpoisoned(&self.capture);
+        capture.generation = capture.generation.wrapping_add(1);
+        capture.bytes = bytes.clone();
+        Ok(bytes)
+    }
+}
+
+/// MDQ client paired with the exact source document accepted by it.
+///
+/// `EntityDescriptor` intentionally keeps extension XML as a detached source
+/// slice, which loses namespace declarations inherited from ancestors. The
+/// capture lets scope parsing use the original namespace-aware document after
+/// (and only after) the normal MDQ client has accepted that same fetch. The
+/// async lock makes fetch, verification and capture promotion one atomic
+/// sequence for this backend.
+struct ScopeAwareMdqClient {
+    client: MdqClient<CapturingMetadataFetcher>,
+    capture: Arc<StdMutex<MetadataCapture>>,
+    trusted_scopes: StdMutex<BTreeMap<String, Vec<String>>>,
+    lookup_lock: tokio::sync::Mutex<()>,
+}
+
+impl ScopeAwareMdqClient {
+    fn build(config: &MdqConfig) -> Result<Self> {
+        let capture = Arc::new(StdMutex::new(MetadataCapture::default()));
+        let inner = ReqwestFetcher::try_default()
+            .map_err(|e| Error::Config(format!("building MDQ HTTP client: {e}")))?;
+        let fetcher = CapturingMetadataFetcher {
+            inner,
+            capture: Arc::clone(&capture),
+        };
+        let client = build_mdq_client_with_fetcher(config, fetcher)?;
+        Ok(Self {
+            client,
+            capture,
+            trusted_scopes: StdMutex::new(BTreeMap::new()),
+            lookup_lock: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    async fn get(
+        &self,
+        entity_id: &str,
+    ) -> std::result::Result<(EntityDescriptor, Vec<String>), MdqError> {
+        let _lookup = self.lookup_lock.lock().await;
+        let before_generation = lock_unpoisoned(&self.capture).generation;
+        let entity = match self.client.get(entity_id).await {
+            Ok(entity) => entity,
+            Err(error) => {
+                let mut capture = lock_unpoisoned(&self.capture);
+                if capture.generation != before_generation {
+                    capture.bytes = Bytes::new();
+                }
+                return Err(error);
+            }
+        };
+        let captured_bytes = {
+            let mut capture = lock_unpoisoned(&self.capture);
+            if capture.generation != before_generation {
+                std::mem::take(&mut capture.bytes)
+            } else {
+                Bytes::new()
+            }
+        };
+        // Promote only bytes fetched by this successful lookup. A capture left
+        // by a failed verification must never be paired with a later cache hit.
+        if !captured_bytes.is_empty() {
+            let scopes = std::str::from_utf8(&captured_bytes)
+                .map(|xml| trusted_scopes_from_metadata_xml(xml, entity_id))
+                .unwrap_or_default();
+            lock_unpoisoned(&self.trusted_scopes).insert(entity_id.to_string(), scopes);
+        }
+        let scopes = lock_unpoisoned(&self.trusted_scopes)
+            .get(entity_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok((entity, scopes))
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `gamlastan::bindings::traits::HttpRequest` adapter exposing the raw
@@ -286,7 +390,7 @@ impl Saml2Backend {
                         "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv".into(),
                     ));
                 }
-                IdpMetadata::Mdq(build_mdq_client(mdq_cfg)?)
+                IdpMetadata::Mdq(ScopeAwareMdqClient::build(mdq_cfg)?)
             }
             None => {
                 if cfg.disco_srv.is_some() {
@@ -545,12 +649,11 @@ impl Saml2Backend {
                     .get_str(&self.name, "idp_entity_id")
                     .or_else(|| self.idp_entity_id.clone())
                     .ok_or_else(|| Error::Authn("no IdP selected for this flow".into()))?;
-                let entity = client
+                let (entity, scopes) = client
                     .get(&selected)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {selected} failed: {e}")))?;
                 let verifier = idp_verifier_from_metadata(&entity)?;
-                let scopes = trusted_scopes_from_entity(&entity);
                 self.process_acs(ctx, &verifier, &selected, &scopes)
             }
         }
@@ -949,55 +1052,86 @@ impl Saml2Backend {
 }
 
 const SHIBBOLETH_METADATA_NS: &str = "urn:mace:shibboleth:metadata:1.0";
+const SAML_METADATA_NS: &str = "urn:oasis:names:tc:SAML:2.0:metadata";
 
-/// Extract Shibboleth `<Scope>` values from entity- and IdP-role-level
-/// extensions of metadata that the backend already resolved and trusted.
-fn trusted_scopes_from_entity(entity: &EntityDescriptor) -> Vec<String> {
+/// Extract direct Shibboleth `<Scope>` children of an IdP role's
+/// `<md:Extensions>` from the original accepted metadata document.
+fn trusted_scopes_from_metadata_xml(xml: &str, entity_id: &str) -> Vec<String> {
     let mut scopes = BTreeSet::new();
-    for idp in entity.idp_sso_descriptors() {
-        if let Some(extensions) = &idp.sso_base.base.extensions {
-            collect_scope_values(&extensions.raw_xml, &mut scopes);
+    let Ok(doc) = gamlastan::xml::parse_secure_metadata(xml) else {
+        return Vec::new();
+    };
+    let Some(root) = doc.document_element() else {
+        return Vec::new();
+    };
+    let Some(entity) = find_metadata_entity(&doc, root, entity_id) else {
+        return Vec::new();
+    };
+
+    for role in doc.children_iter(entity) {
+        let Some(role_element) = doc.element(role) else {
+            continue;
+        };
+        if !role_element
+            .name
+            .matches(Some(SAML_METADATA_NS), "IDPSSODescriptor")
+        {
+            continue;
+        }
+        for extensions in doc.children_iter(role) {
+            let Some(extensions_element) = doc.element(extensions) else {
+                continue;
+            };
+            if !extensions_element
+                .name
+                .matches(Some(SAML_METADATA_NS), "Extensions")
+            {
+                continue;
+            }
+            for scope in doc.children_iter(extensions) {
+                let Some(scope_element) = doc.element(scope) else {
+                    continue;
+                };
+                if scope_element
+                    .name
+                    .matches(Some(SHIBBOLETH_METADATA_NS), "Scope")
+                    && !doc
+                        .children_iter(scope)
+                        .any(|child| doc.element(child).is_some())
+                {
+                    let value = doc.text_content_deep(scope);
+                    let value = value.trim();
+                    if !value.is_empty() && !value.chars().any(char::is_control) {
+                        scopes.insert(value.to_string());
+                    }
+                }
+            }
         }
     }
     scopes.into_iter().collect()
 }
 
-fn collect_scope_values(raw_xml: &str, scopes: &mut BTreeSet<String>) {
-    if raw_xml.trim().is_empty() {
-        return;
-    }
-    // Extension fragments often inherit namespace declarations from the
-    // EntityDescriptor. Supply the common prefixes on a synthetic root while
-    // retaining Gamlastan's metadata parser limits and DTD/entity rejection.
-    let xml = format!(
-        r#"<tb:root xmlns:tb="urn:tunnelbana:metadata" xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:shibmd="{SHIBBOLETH_METADATA_NS}">{raw_xml}</tb:root>"#
-    );
-    let Ok(doc) = gamlastan::xml::parse_secure_metadata(&xml) else {
-        return;
-    };
-    let Some(root) = doc.document_element() else {
-        return;
-    };
-    collect_scope_nodes(&doc, root, scopes);
-}
-
-fn collect_scope_nodes<'a>(
+fn find_metadata_entity<'a>(
     doc: &'a gamlastan::xml::uppsala::Document<'a>,
     node: gamlastan::xml::uppsala::NodeId,
-    scopes: &mut BTreeSet<String>,
-) {
-    for child in doc.children_iter(node) {
-        if let Some(element) = doc.element(child) {
-            if element.name.matches(Some(SHIBBOLETH_METADATA_NS), "Scope") {
-                let value = doc.text_content_deep(child);
-                let value = value.trim();
-                if !value.is_empty() && !value.chars().any(char::is_control) {
-                    scopes.insert(value.to_string());
-                }
-            }
-            collect_scope_nodes(doc, child, scopes);
-        }
+    entity_id: &str,
+) -> Option<gamlastan::xml::uppsala::NodeId> {
+    let element = doc.element(node)?;
+    if element
+        .name
+        .matches(Some(SAML_METADATA_NS), "EntityDescriptor")
+    {
+        return (doc.get_attribute(node, "entityID") == Some(entity_id)).then_some(node);
     }
+    if !element
+        .name
+        .matches(Some(SAML_METADATA_NS), "EntitiesDescriptor")
+    {
+        return None;
+    }
+    doc.children_iter(node)
+        .filter(|child| doc.element(*child).is_some())
+        .find_map(|child| find_metadata_entity(doc, child, entity_id))
 }
 
 #[async_trait]
@@ -1115,7 +1249,7 @@ impl Saml2Backend {
             IdpMetadata::Mdq(client) => {
                 let target = target_idp
                     .ok_or_else(|| Error::Internal("MDQ mode without a target IdP".into()))?;
-                let entity = client
+                let (entity, _) = client
                     .get(target)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {target} failed: {e}")))?;
@@ -1607,41 +1741,26 @@ mod tests {
     }
 
     #[test]
-    fn extracts_unique_shibboleth_scopes_from_trusted_metadata_extensions() {
-        let mut scopes = BTreeSet::new();
-        collect_scope_values(
-            r#"
-            <md:Extensions>
-              <shibmd:Scope regexp="false">example.org</shibmd:Scope>
-              <shibmd:Scope> sub.example.org </shibmd:Scope>
-              <shibmd:Scope>example.org</shibmd:Scope>
-              <Scope xmlns="urn:not-shibboleth">ignored.example</Scope>
-            </md:Extensions>
-            "#,
-            &mut scopes,
-        );
-        assert_eq!(
-            scopes.into_iter().collect::<Vec<_>>(),
-            ["example.org", "sub.example.org"]
-        );
-    }
-
-    #[test]
-    fn extracts_scopes_only_from_idp_role_in_parsed_metadata() {
-        use gamlastan::xml::deserialize::SamlDeserialize;
-
+    fn extracts_direct_scopes_with_inherited_arbitrary_namespace_alias() {
         let xml = r#"
         <md:EntityDescriptor
             xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
-            xmlns:shibmd="urn:mace:shibboleth:metadata:1.0"
+            xmlns:scopealias="urn:mace:shibboleth:metadata:1.0"
+            xmlns:other="urn:not-shibboleth"
             entityID="https://idp.example.org">
           <md:Extensions>
-            <shibmd:Scope>entity-level.example</shibmd:Scope>
+            <scopealias:Scope>entity-level.example</scopealias:Scope>
           </md:Extensions>
           <md:IDPSSODescriptor
               protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
             <md:Extensions>
-              <shibmd:Scope regexp="false">role.example</shibmd:Scope>
+              <scopealias:Scope regexp="false">example.org</scopealias:Scope>
+              <scopealias:Scope> sub.example.org </scopealias:Scope>
+              <scopealias:Scope>example.org</scopealias:Scope>
+              <other:Scope>wrong-namespace.example</other:Scope>
+              <other:Wrapper>
+                <scopealias:Scope>nested.example</scopealias:Scope>
+              </other:Wrapper>
             </md:Extensions>
             <md:SingleSignOnService
                 Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
@@ -1649,24 +1768,19 @@ mod tests {
           </md:IDPSSODescriptor>
         </md:EntityDescriptor>
         "#;
-        let doc = gamlastan::xml::parse_secure_metadata(xml).unwrap();
-        let root = doc.document_element().unwrap();
-        let entity = gamlastan::metadata::EntityDescriptorRef::from_xml(&doc, root)
-            .unwrap()
-            .to_owned();
-
-        assert_eq!(trusted_scopes_from_entity(&entity), ["role.example"]);
+        assert_eq!(
+            trusted_scopes_from_metadata_xml(xml, "https://idp.example.org"),
+            ["example.org", "sub.example.org"]
+        );
     }
 
     #[test]
     fn malformed_or_dtd_scope_extensions_fail_soft() {
         for xml in [
-            "<md:Extensions><shibmd:Scope>",
-            r#"<!DOCTYPE x [<!ENTITY e "scope.example">]><shibmd:Scope>&e;</shibmd:Scope>"#,
+            "<md:EntityDescriptor>",
+            r#"<!DOCTYPE x [<!ENTITY e "scope.example">]><md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.org">&e;</md:EntityDescriptor>"#,
         ] {
-            let mut scopes = BTreeSet::new();
-            collect_scope_values(xml, &mut scopes);
-            assert!(scopes.is_empty());
+            assert!(trusted_scopes_from_metadata_xml(xml, "https://idp.example.org").is_empty());
         }
     }
 }

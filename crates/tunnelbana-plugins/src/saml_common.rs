@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use gamlastan::crypto::keys::loader;
 use gamlastan::crypto::{KeysManager, SamlVerifier};
-use gamlastan_mdq::{MdqClient, MdqTransform, RequiredRole};
+use gamlastan_mdq::{MdqClient, MdqTransform, MetadataFetcher, RequiredRole, ReqwestFetcher};
 
 use tunnelbana_core::error::{Error, Result};
 
@@ -38,11 +38,21 @@ pub struct MdqConfig {
 
 /// Build an MDQ client from the `[mdq]` config block.
 pub fn build_mdq_client(cfg: &MdqConfig) -> Result<MdqClient> {
-    let transform = match cfg.transform.as_deref() {
-        None | Some("url_encoded") => MdqTransform::UrlEncoded,
-        Some("sha1") => MdqTransform::Sha1,
-        Some(other) => return Err(Error::Config(format!("unknown mdq.transform: {other}"))),
-    };
+    let fetcher = ReqwestFetcher::try_default()
+        .map_err(|e| Error::Config(format!("building MDQ HTTP client: {e}")))?;
+    build_mdq_client_with_fetcher(cfg, fetcher)
+}
+
+/// Build an MDQ client with an explicitly supplied metadata transport.
+///
+/// The SAML backend uses this seam to retain the exact accepted metadata XML
+/// for namespace-aware extension processing; other callers use the default
+/// bounded, redirect-free fetcher through [`build_mdq_client`].
+pub fn build_mdq_client_with_fetcher<F>(cfg: &MdqConfig, fetcher: F) -> Result<MdqClient<F>>
+where
+    F: MetadataFetcher,
+{
+    let transform = mdq_transform(cfg)?;
     let role = match cfg.require_role.as_deref() {
         None | Some("idp") => RequiredRole::Idp,
         Some("sp") => RequiredRole::Sp,
@@ -50,7 +60,7 @@ pub fn build_mdq_client(cfg: &MdqConfig) -> Result<MdqClient> {
         Some(other) => return Err(Error::Config(format!("unknown mdq.require_role: {other}"))),
     };
 
-    let mut client = MdqClient::new(cfg.url.clone())
+    let mut client = MdqClient::with_fetcher(cfg.url.clone(), fetcher)
         .with_transform(transform)
         .require_role(role);
     if let Some(ttl) = cfg.fallback_ttl_secs {
@@ -73,6 +83,15 @@ pub fn build_mdq_client(cfg: &MdqConfig) -> Result<MdqClient> {
         ));
     }
     Ok(client)
+}
+
+/// Resolve the configured entity-ID path transform.
+pub fn mdq_transform(cfg: &MdqConfig) -> Result<MdqTransform> {
+    Ok(match cfg.transform.as_deref() {
+        None | Some("url_encoded") => MdqTransform::UrlEncoded,
+        Some("sha1") => MdqTransform::Sha1,
+        Some(other) => return Err(Error::Config(format!("unknown mdq.transform: {other}"))),
+    })
 }
 
 /// Build a verifier from a set of DER-encoded signing certs: each cert is both
