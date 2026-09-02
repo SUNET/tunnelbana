@@ -133,6 +133,7 @@ struct SpEntry {
     /// Kept for the future IdP-side assertion-encryption feature (F6).
     #[allow(dead_code)]
     encryption_certs_der: Vec<Vec<u8>>,
+    entity_categories: Vec<String>,
 }
 
 /// Where registered SPs are looked up.
@@ -177,10 +178,27 @@ impl SpStore {
 /// Build an [`SpEntry`] from an entity's first SPSSODescriptor, if it has one.
 fn sp_entry_from_entity(entity: &EntityDescriptor) -> Option<SpEntry> {
     let sp_sso = entity.sp_sso_descriptors().first()?;
+    let mut entity_categories = Vec::new();
+    for extensions in [
+        entity.extensions.as_ref(),
+        sp_sso.sso_base.base.extensions.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for category in gamlastan::metadata::types::MdExtensions::from_extensions(extensions)
+            .entity_categories()
+        {
+            if !entity_categories.contains(&category) {
+                entity_categories.push(category);
+            }
+        }
+    }
     Some(SpEntry {
         sp_sso: sp_sso.clone(),
         signing_certs_der: sp_sso.signing_certificates_der(),
         encryption_certs_der: sp_sso.encryption_certificates_der(),
+        entity_categories,
     })
 }
 
@@ -627,6 +645,24 @@ impl Saml2Frontend {
         );
         if let Some(rs) = &relay_state {
             ctx.state.set_str(&self.name, "relay_state", rs);
+        }
+
+        // Publish requester categories only after the entity and request have
+        // passed metadata lookup, endpoint validation, and signature policy.
+        // Step-up policy consumes this on the same request leg and persists
+        // only the selected LoA settings, not the metadata object.
+        if let Some(entry) = &entry {
+            ctx.decorate(
+                tunnelbana_core::context::KEY_REQUESTER_ENTITY_CATEGORIES,
+                serde_json::Value::Array(
+                    entry
+                        .entity_categories
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
         }
 
         // Surface the SP's RequestedAuthnContext for a request-path

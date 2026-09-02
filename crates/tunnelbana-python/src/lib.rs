@@ -50,7 +50,11 @@ const FIRST_WRITER_DECORATION_KEYS: &[&str] = &[
     tunnelbana_core::context::KEY_TARGET_ACCR_COMPARISON,
     tunnelbana_core::context::KEY_MFA_STEPUP_ACCOUNTS,
 ];
-const READ_ONLY_DECORATION_KEYS: &[&str] = &[tunnelbana_core::context::KEY_PROVIDER_SCOPES];
+const READ_ONLY_DECORATION_KEYS: &[&str] = &[
+    tunnelbana_core::context::KEY_PROVIDER_SCOPES,
+    tunnelbana_core::context::KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+    tunnelbana_core::context::KEY_REQUESTER_ENTITY_CATEGORIES,
+];
 static MODULE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static VENV_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// Serializes interpreter setup and the module-path claim. Without it, two

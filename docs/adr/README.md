@@ -54,3 +54,4 @@ accepted — supersede with a new record rather than editing history.
 | [0053](0053-disco-to-target-issuer-flow-resume.md) | `disco_to_target_issuer` and flow-resuming micro-service endpoints | Accepted |
 | [0054](0054-state-cookie-deflate-compression.md) | Deflate compression inside the sealed state cookie | Accepted |
 | [0055](0055-eduid-scim-attributes-python-adapter.md) | eduID SCIM response enrichment through embedded Python | Accepted |
+| [0056](0056-eduid-mfa-stepup.md) | Native SAML response suspension for eduID MFA step-up | Accepted |

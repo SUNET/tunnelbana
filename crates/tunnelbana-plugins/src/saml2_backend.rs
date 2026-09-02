@@ -14,9 +14,8 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use gamlastan::core::assertion::attribute::AttributeValue;
-#[cfg(test)]
-use gamlastan::core::assertion::name_id::NameId;
-use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
+use gamlastan::core::assertion::name_id::{NameId, NameIdOrEncryptedId};
+use gamlastan::core::assertion::subject::Subject;
 use gamlastan::core::constants;
 use gamlastan::crypto::keys::loader;
 use gamlastan::crypto::{
@@ -32,7 +31,9 @@ use gamlastan::xml::serialize::SamlSerialize;
 use gamlastan_mdq::{MdqClient, MdqError, MetadataFetcher, ReqwestFetcher};
 
 use tunnelbana_core::attributes::AttributeMapper;
-use tunnelbana_core::context::{Context, KEY_PROVIDER_SCOPES};
+use tunnelbana_core::context::{
+    Context, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS, KEY_PROVIDER_SCOPES,
+};
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
@@ -85,6 +86,10 @@ struct Saml2BackendConfig {
     /// backends obtain these from the selected IdP's signed metadata.
     #[serde(default)]
     idp_scopes: Vec<String>,
+    /// Trusted assurance-certification values for a statically configured
+    /// IdP. MDQ mode reads these from accepted metadata.
+    #[serde(default)]
+    idp_assurance_certifications: Vec<String>,
     /// When present, resolve the IdP's SSO endpoint and signing cert on demand
     /// from an MDQ server instead of the static `idp_sso_url` / `idp_cert_path`.
     #[serde(default)]
@@ -152,6 +157,7 @@ enum IdpMetadata {
     Static {
         sso_url: String,
         verifier: SamlVerifier,
+        assurance_certifications: Vec<String>,
     },
     /// Resolved per request from an MDQ server, keyed by `idp_entity_id`.
     Mdq(ScopeAwareMdqClient),
@@ -243,7 +249,7 @@ where
     async fn get(
         &self,
         entity_id: &str,
-    ) -> std::result::Result<(EntityDescriptor, Vec<String>), MdqError> {
+    ) -> std::result::Result<(EntityDescriptor, Vec<String>, Vec<String>), MdqError> {
         let lookup_lock = self.lookup_lock(entity_id);
         let _lookup = lookup_lock.lock().await;
         // Keep a request-local copy because a concurrent lookup for another
@@ -266,7 +272,8 @@ where
             .await?;
 
         let Some(captured_bytes) = captured_bytes else {
-            return Ok((entity, cached_scopes));
+            let assurances = trusted_assurance_certifications(&entity);
+            return Ok((entity, cached_scopes, assurances));
         };
 
         // Promote only bytes fetched and accepted by this lookup. The MDQ
@@ -282,7 +289,8 @@ where
             trusted_scopes.clear();
         }
         trusted_scopes.insert(entity_id.to_string(), scopes.clone());
-        Ok((entity, scopes))
+        let assurances = trusted_assurance_certifications(&entity);
+        Ok((entity, scopes, assurances))
     }
 
     fn lookup_lock(&self, entity_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -360,6 +368,7 @@ struct DecodedAcsResponse {
 
 pub struct Saml2Backend {
     name: String,
+    state_namespace: String,
     sp_entity_id: String,
     acs_url: String,
     idp_entity_id: Option<String>,
@@ -393,10 +402,62 @@ pub struct Saml2Backend {
     /// Certs published with `use="encryption"` in SP metadata.
     encryption_certs_b64: Vec<String>,
     mapper: Arc<AttributeMapper>,
+    /// Include `InternalData.subject_id` as an unspecified NameID in the
+    /// outbound AuthnRequest. Enabled only for the step-up micro-SP.
+    request_subject: bool,
 }
 
 impl Saml2Backend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
+        Self::build_concrete(bx, false, bx.name.clone())
+            .map(|backend| Box::new(backend) as Box<dyn Backend>)
+    }
+
+    pub(crate) fn build_stepup(bx: &BuildContext) -> Result<Self> {
+        let backend = Self::build_concrete(bx, true, format!("stepup_saml:{}", bx.name))?;
+        if !backend.sign_requests {
+            return Err(Error::Config(format!(
+                "stepup {}: sign_authn_requests must be true",
+                bx.name
+            )));
+        }
+        if backend.allow_unsolicited {
+            return Err(Error::Config(format!(
+                "stepup {}: allow_unsolicited must be false",
+                bx.name
+            )));
+        }
+        if backend.disco_srv.is_some() {
+            return Err(Error::Config(format!(
+                "stepup {}: disco_srv is not supported; the linked account selects the provider",
+                bx.name
+            )));
+        }
+        Ok(backend)
+    }
+
+    pub(crate) fn validate_stepup_target(&self, entity_id: &str) -> Result<()> {
+        if entity_id.is_empty()
+            || entity_id.chars().count() > 1024
+            || entity_id.chars().any(char::is_control)
+        {
+            return Err(Error::Authn("step-up provider entity id is invalid".into()));
+        }
+        if matches!(self.idp_metadata, IdpMetadata::Static { .. })
+            && self.idp_entity_id.as_deref() != Some(entity_id)
+        {
+            return Err(Error::Authn(
+                "linked step-up provider does not match the statically configured IdP".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn build_concrete(
+        bx: &BuildContext,
+        request_subject: bool,
+        state_namespace: String,
+    ) -> Result<Self> {
         let cfg: Saml2BackendConfig = bx.parse_config()?;
         let module_base = bx.module_base();
         let sp_entity_id = cfg
@@ -412,6 +473,16 @@ impl Saml2Backend {
         {
             return Err(Error::Config(format!(
                 "saml2 backend {}: idp_scopes entries must be non-empty and contain no control characters",
+                bx.name
+            )));
+        }
+        if cfg
+            .idp_assurance_certifications
+            .iter()
+            .any(|value| value.is_empty() || value.chars().any(char::is_control))
+        {
+            return Err(Error::Config(format!(
+                "saml2 backend {}: idp_assurance_certifications entries must be non-empty and contain no control characters",
                 bx.name
             )));
         }
@@ -431,12 +502,12 @@ impl Saml2Backend {
         // is present, else the static idp_sso_url + idp_cert_path pair.
         let idp_metadata = match &cfg.mdq {
             Some(mdq_cfg) => {
-                if !cfg.idp_scopes.is_empty() {
+                if !cfg.idp_scopes.is_empty() || !cfg.idp_assurance_certifications.is_empty() {
                     return Err(Error::Config(
-                        "saml2 backend idp_scopes is only valid in static mode; MDQ mode reads scopes from trusted metadata".into(),
+                        "saml2 backend idp_scopes and idp_assurance_certifications are only valid in static mode; MDQ mode reads them from trusted metadata".into(),
                     ));
                 }
-                if cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
+                if !request_subject && cfg.idp_entity_id.is_none() && cfg.disco_srv.is_none() {
                     return Err(Error::Config(
                         "saml2 backend in MDQ mode requires idp_entity_id and/or disco_srv".into(),
                     ));
@@ -470,7 +541,11 @@ impl Saml2Backend {
                     .decode(extract_cert_b64(&idp_cert))
                     .map_err(|e| Error::Crypto(format!("decoding idp cert: {e}")))?;
                 let verifier = verifier_from_cert_ders(&[idp_cert_der])?;
-                IdpMetadata::Static { sso_url, verifier }
+                IdpMetadata::Static {
+                    sso_url,
+                    verifier,
+                    assurance_certifications: cfg.idp_assurance_certifications,
+                }
             }
         };
 
@@ -519,8 +594,9 @@ impl Saml2Backend {
             }
         };
 
-        Ok(Box::new(Saml2Backend {
+        Ok(Saml2Backend {
             name: bx.name.clone(),
+            state_namespace,
             sp_entity_id,
             acs_url,
             idp_entity_id: cfg.idp_entity_id,
@@ -543,7 +619,8 @@ impl Saml2Backend {
             decryptors,
             encryption_certs_b64,
             mapper: bx.attribute_mapper.clone(),
-        }))
+            request_subject,
+        })
     }
 
     /// Try each configured decryptor in turn (key rotation): bergshamra only
@@ -684,12 +761,22 @@ impl Saml2Backend {
     /// Response against it.
     async fn handle_acs(&self, ctx: &mut Context) -> Result<BackendAction> {
         match &self.idp_metadata {
-            IdpMetadata::Static { verifier, .. } => {
+            IdpMetadata::Static {
+                verifier,
+                assurance_certifications,
+                ..
+            } => {
                 let expected = self
                     .idp_entity_id
                     .as_deref()
                     .ok_or_else(|| Error::Internal("static mode without idp_entity_id".into()))?;
-                self.process_acs(ctx, verifier, expected, &self.static_idp_scopes)
+                self.process_acs(
+                    ctx,
+                    verifier,
+                    expected,
+                    &self.static_idp_scopes,
+                    assurance_certifications,
+                )
             }
             IdpMetadata::Mdq(client) => {
                 // Verify against the cert for the IdP we actually sent the request
@@ -697,15 +784,21 @@ impl Saml2Backend {
                 // claimed by the Response. Falls back to the configured default.
                 let selected = ctx
                     .state
-                    .get_str(&self.name, "idp_entity_id")
+                    .get_str(&self.state_namespace, "idp_entity_id")
                     .or_else(|| self.idp_entity_id.clone())
                     .ok_or_else(|| Error::Authn("no IdP selected for this flow".into()))?;
-                let (entity, scopes) = client
+                let (entity, scopes, assurance_certifications) = client
                     .get(&selected)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {selected} failed: {e}")))?;
                 let verifier = idp_verifier_from_metadata(&entity)?;
-                self.process_acs(ctx, &verifier, &selected, &scopes)
+                self.process_acs(
+                    ctx,
+                    &verifier,
+                    &selected,
+                    &scopes,
+                    &assurance_certifications,
+                )
             }
         }
     }
@@ -716,6 +809,7 @@ impl Saml2Backend {
         verifier: &SamlVerifier,
         expected_idp_entity_id: &str,
         provider_scopes: &[String],
+        provider_assurance_certifications: &[String],
     ) -> Result<BackendAction> {
         // SAMLResponse arrives via HTTP-POST (base64 form field) or
         // HTTP-Redirect (deflated query param, optionally query-signed).
@@ -847,7 +941,7 @@ impl Saml2Backend {
                     .is_some_and(|sub| sub.value == constants::STATUS_NO_PASSIVE);
             let is_passive = ctx
                 .state
-                .get_value(&self.name, "is_passive")
+                .get_value(&self.state_namespace, "is_passive")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             if is_passive && is_no_passive {
@@ -884,7 +978,7 @@ impl Saml2Backend {
         //    unsolicited Response (no InResponseTo) and `allow_unsolicited`
         //    is on — a missing id must never silently skip the InResponseTo
         //    check (fail closed).
-        let expected_id = match ctx.state.get_str(&self.name, "authn_id") {
+        let expected_id = match ctx.state.get_str(&self.state_namespace, "authn_id") {
             Some(id) => Some(id),
             None if self.allow_unsolicited && response.base.in_response_to.is_none() => None,
             None if self.allow_unsolicited => {
@@ -1081,8 +1175,18 @@ impl Saml2Backend {
                     .collect(),
             ),
         );
+        ctx.decorate(
+            KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+            serde_json::Value::Array(
+                provider_assurance_certifications
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
 
-        ctx.state.clear_namespace(&self.name);
+        ctx.state.clear_namespace(&self.state_namespace);
 
         let response = InternalData {
             auth_info: AuthenticationInformation {
@@ -1104,6 +1208,26 @@ impl Saml2Backend {
 
 const SHIBBOLETH_METADATA_NS: &str = "urn:mace:shibboleth:metadata:1.0";
 const SAML_METADATA_NS: &str = "urn:oasis:names:tc:SAML:2.0:metadata";
+
+fn trusted_assurance_certifications(entity: &EntityDescriptor) -> Vec<String> {
+    let mut values = Vec::new();
+    let entity_extensions = entity.extensions.as_ref().into_iter();
+    let role_extensions = entity
+        .idp_sso_descriptors()
+        .iter()
+        .filter_map(|role| role.sso_base.base.extensions.as_ref());
+    for extensions in entity_extensions.chain(role_extensions) {
+        let parsed = gamlastan::metadata::types::MdExtensions::from_extensions(extensions);
+        for value in parsed.entity_attribute_values(
+            gamlastan::profiles::swedenconnect::constants::ASSURANCE_CERTIFICATION_ATTR,
+        ) {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+    }
+    values
+}
 
 /// Extract direct Shibboleth `<Scope>` children of an IdP role's
 /// `<md:Extensions>` from the original accepted metadata document.
@@ -1203,15 +1327,26 @@ impl Backend for Saml2Backend {
         // Persist the requester's authentication constraints so they survive
         // a discovery-service round-trip and reach `build_authn_redirect`.
         ctx.state.set_value(
-            &self.name,
+            &self.state_namespace,
             "force_authn",
             serde_json::Value::Bool(request.force_authn),
         );
         ctx.state.set_value(
-            &self.name,
+            &self.state_namespace,
             "is_passive",
             serde_json::Value::Bool(request.is_passive),
         );
+        if self.request_subject {
+            let subject = request
+                .subject_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    Error::Authn("step-up request has no linked-account identifier".into())
+                })?;
+            ctx.state
+                .set_str(&self.state_namespace, "requested_subject", subject);
+        }
         // Pick the target IdP. In MDQ mode the target can be chosen per
         // request — an `entityID` handed back by a discovery service
         // (SeamlessAccess/thiss.io) or a target-entity decoration left by a
@@ -1220,15 +1355,23 @@ impl Backend for Saml2Backend {
         match &self.idp_metadata {
             IdpMetadata::Static { .. } => self.build_authn_redirect(ctx, None).await,
             IdpMetadata::Mdq(_) => {
-                let target = ctx
-                    .request
-                    .param("entityID")
-                    .map(str::to_string)
-                    .or_else(|| {
-                        ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                    });
+                let decorated_target = || {
+                    ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                // A step-up target comes solely from the SCIM-derived,
+                // operator-mapped linked account. Never let an `entityID`
+                // query parameter on the initial IdP's ACS request override
+                // it. Ordinary backends retain discovery-parameter priority.
+                let target = if self.request_subject {
+                    decorated_target()
+                } else {
+                    ctx.request
+                        .param("entityID")
+                        .map(str::to_string)
+                        .or_else(decorated_target)
+                };
                 match target.or_else(|| self.idp_entity_id.clone()) {
                     Some(target) => self.build_authn_redirect(ctx, Some(&target)).await,
                     None => {
@@ -1300,12 +1443,13 @@ impl Saml2Backend {
             IdpMetadata::Mdq(client) => {
                 let target = target_idp
                     .ok_or_else(|| Error::Internal("MDQ mode without a target IdP".into()))?;
-                let (entity, _) = client
+                let (entity, _, _) = client
                     .get(target)
                     .await
                     .map_err(|e| Error::Authn(format!("MDQ lookup for {target} failed: {e}")))?;
                 let url = idp_sso_redirect_url(&entity)?;
-                ctx.state.set_str(&self.name, "idp_entity_id", target);
+                ctx.state
+                    .set_str(&self.state_namespace, "idp_entity_id", target);
                 url
             }
         };
@@ -1320,7 +1464,7 @@ impl Saml2Backend {
         // upstream so they are never silently dropped.
         let state_flag = |key: &str| {
             ctx.state
-                .get_value(&self.name, key)
+                .get_value(&self.state_namespace, key)
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
         };
@@ -1338,9 +1482,26 @@ impl Saml2Backend {
             authn_context_comparison,
             ..Default::default()
         };
-        let req = sp_profile::create_authn_request(&options)
+        let mut req = sp_profile::create_authn_request(&options)
             .map_err(|e| Error::Internal(format!("creating AuthnRequest: {e}")))?;
-        ctx.state.set_str(&self.name, "authn_id", &req.base.id);
+        if self.request_subject {
+            let subject = ctx
+                .state
+                .get_str(&self.state_namespace, "requested_subject")
+                .ok_or_else(|| Error::State("step-up request subject is missing".into()))?;
+            req.subject = Some(Subject {
+                name_id: Some(NameIdOrEncryptedId::NameId(NameId {
+                    value: subject,
+                    format: Some(constants::NAMEID_UNSPECIFIED.to_string()),
+                    name_qualifier: None,
+                    sp_name_qualifier: None,
+                    sp_provided_id: None,
+                })),
+                subject_confirmations: Vec::new(),
+            });
+        }
+        ctx.state
+            .set_str(&self.state_namespace, "authn_id", &req.base.id);
 
         let xml = req
             .to_xml_string()
@@ -1826,6 +1987,41 @@ mod tests {
         assert_eq!(
             trusted_scopes_from_metadata_xml(xml, "https://idp.example.org"),
             ["example.org", "sub.example.org"]
+        );
+    }
+
+    #[test]
+    fn extracts_trusted_assurance_certifications_from_entity_metadata() {
+        let xml = r#"
+        <md:EntityDescriptor
+            xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
+            xmlns:mdattr="urn:oasis:names:tc:SAML:metadata:attribute"
+            xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+            entityID="https://idp.example.org">
+          <md:Extensions>
+            <mdattr:EntityAttributes>
+              <saml:Attribute Name="urn:oasis:names:tc:SAML:attribute:assurance-certification">
+                <saml:AttributeValue>https://cert.example/eid</saml:AttributeValue>
+              </saml:Attribute>
+            </mdattr:EntityAttributes>
+          </md:Extensions>
+          <md:IDPSSODescriptor
+              protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <md:SingleSignOnService
+                Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+                Location="https://idp.example.org/sso"/>
+          </md:IDPSSODescriptor>
+        </md:EntityDescriptor>
+        "#;
+        let doc = gamlastan::xml::uppsala::parse(xml).unwrap();
+        let entity = gamlastan::xml::deserialize::parse_saml::<
+            gamlastan::metadata::types::entity_descriptor::EntityDescriptorRef<'_>,
+        >(&doc)
+        .unwrap()
+        .to_owned();
+        assert_eq!(
+            trusted_assurance_certifications(&entity),
+            ["https://cert.example/eid"]
         );
     }
 

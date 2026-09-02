@@ -24,6 +24,11 @@ pub trait MicroService: Send + Sync {
     async fn process_response(&self, ctx: &mut Context, data: InternalData)
         -> Result<InternalData> { Ok(data) }
 
+    /// Transform or interrupt the response path. The default delegates to
+    /// process_response and returns Continue(data).
+    async fn process_response_action(&self, ctx: &mut Context, data: InternalData)
+        -> Result<MicroServiceResponseAction>;
+
     /// Optional own endpoints (e.g. a consent callback page).
     fn register_endpoints(&self) -> Vec<Route> { Vec::new() }
 
@@ -95,7 +100,11 @@ Key facts that follow from this:
   `ResumeRequest { request }` to re-enter the request path with restored flow
   data - the proxy then runs the micro-services listed *after* the resuming
   one and dispatches to a backend as usual. `disco_to_target_issuer` uses the
-  resume action to route a flow after an external discovery hop.
+  resume action to route a flow after an external discovery hop. A service
+  whose `process_response_action` returned `Respond(response)` may later return
+  `ResumeResponse { response }`; the proxy runs only the later response
+  services and renders through the original frontend. `stepup` uses this for
+  its SAML ACS.
 
 ## Decorations: passing signals between services
 

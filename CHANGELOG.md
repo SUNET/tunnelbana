@@ -2,12 +2,21 @@
 
 ## Unreleased
 
+- **eduID MFA step-up (ADR 0056):** add the native `stepup` micro-service,
+  consuming the optional Python SCIM adapter's linked-account decoration. It
+  sends a signed, subject-bound exact-LoA SAML request; reuses the hardened
+  SAML backend for metadata, signature, audience, time, correlation and replay
+  validation; verifies the linked issuer and identifier; merges assurance
+  values; and resumes the original response chain. The core now supports
+  response-path interruption/resumption. Trusted requester entity categories
+  and provider assurance certifications support eduID's LoA policy mappings.
+  Configure services in `ScimAttributes`, `stepup`, `accr` order.
 - **eduID SCIM response attributes (ADR 0055):** add the bundled
   `ScimAttributes` Python adapter, an opt-in detached attribute-map constructor
   argument, and trusted SAML IdP scope publication for SCIM data-owner
   selection. The adapter enriches profiles and group entitlements and publishes
-  linked MFA accounts as JSON for a later step-up implementation; it does not
-  add step-up routing or endpoints. Provider scopes are read-only to Python and
+  linked MFA accounts as JSON for the separately configured native step-up
+  service; the adapter itself adds no routing or endpoints. Provider scopes are read-only to Python and
   become available only after successful SAML response validation. An
   explicitly configured adapter imports its eduID database classes during
   startup and fails fast when the optional dependency is unavailable.

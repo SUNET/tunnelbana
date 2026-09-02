@@ -5,7 +5,7 @@
 # tunnelbana
 
 A high-performance, SATOSA-like **identity proxy** in Rust. It translates between
-identity protocols (OpenID Connect, OAuth 2.0, OpenID Federation, and — planned —
+identity protocols (OpenID Connect, OAuth 2.0, OpenID Federation, and
 SAML 2.0) using a plugin architecture: a **frontend** speaks to downstream
 relying parties / service providers, a **backend** speaks to upstream identity
 / OpenID providers, and the two are decoupled by a protocol-agnostic
@@ -44,7 +44,7 @@ purely by config + which plugins are loaded:
 | -------------------- | ---- |
 | `tunnelbana-core`    | Framework: `Context`, `InternalData`, encrypted state cookie, plugin traits + registry, router, proxy orchestrator, TOML config, attribute mapping, key loading (PEM **and** JWK), TTL/disk cache. |
 | `tunnelbana-oidc`    | Thin compatibility **shim** re-exporting the [`grindvakt`](https://github.com/kushaldas/grindvakt) protocol surface (OAuth2 / OIDC / **OpenID Federation 1.1** — OP engine, RP flow, stateless tokens, PKCE, `private_key_jwt`, entity statements, trust-chain resolution, metadata policies) so plugins keep using `tunnelbana_oidc::*` paths. New code should depend on `grindvakt` directly. |
-| `tunnelbana-plugins` | Concrete plugins: `oidc` frontend (OP), `oidc` backend (RP), `oidc_federation` frontend, `saml2` frontend (IdP) and backend (SP) via gamlastan, and micro-services (`static_attributes`, `filter_attributes`, `custom_routing`). |
+| `tunnelbana-plugins` | Concrete plugins: `oidc` frontend (OP), `oidc` backend (RP), `oidc_federation` frontend, `saml2` frontend (IdP) and backend (SP) via gamlastan, and native transformation, routing, ACCR and MFA step-up micro-services. |
 | `tunnelbana-python`  | Isolated embedded-CPython boundary for trusted synchronous Python micro-services, strict data/context conversion, and global execution controls. |
 | `tunnelbana`         | The actix-web binary: config loading, plugin instantiation, `reqwest`-backed HTTP client, request/response glue. |
 
@@ -103,7 +103,8 @@ changes.
   `federation_resolve_endpoint`, unpacks request objects (RFC 9101), accepts
   `private_key_jwt` (RFC 7523). Metadata-policy operators implemented.
 - **Micro-services**: built-in Rust transformations plus trusted synchronous
-  Python classes with strict data/context dictionaries and bounded execution.
+  Python classes with strict data/context dictionaries and bounded execution;
+  optional eduID SCIM enrichment and a native linked-account SAML MFA step-up.
 - The full proxy flow (route → state → dispatch → micro-services → state).
 
 This project is being developed heavily. So, it will a few months to be tested

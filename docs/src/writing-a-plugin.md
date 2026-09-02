@@ -45,6 +45,8 @@ pub trait MicroService: Send + Sync {
     fn name(&self) -> &str;
     async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData>;
     async fn process_response(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData>;
+    async fn process_response_action(&self, ctx: &mut Context, data: InternalData)
+        -> Result<MicroServiceResponseAction>;
     fn register_endpoints(&self) -> Vec<Route> { Vec::new() }
     async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<MicroServiceAction>;
 }
@@ -70,6 +72,11 @@ pub enum BackendAction {
 pub enum MicroServiceAction {
     Respond(Response),                       // a finished HTTP response (e.g. a consent page)
     ResumeRequest { request: InternalData }, // resume the request-path pipeline
+    ResumeResponse { response: InternalData }, // resume the response-path pipeline
+}
+pub enum MicroServiceResponseAction {
+    Continue(InternalData), // keep running response services
+    Respond(Response),      // suspend with a browser challenge
 }
 ```
 
@@ -82,6 +89,9 @@ request-path pipeline with the restored `InternalData`, running only the
 micro-services listed *after* the resuming one, then dispatches to a backend
 as usual. The resuming service must restore `ctx.target_frontend` (and set any
 routing decorations such as `KEY_TARGET_ENTITYID`) before returning it.
+`ResumeResponse` is the symmetric callback action for a service that suspended
+`process_response_action`; the proxy resumes with only later response services
+and then invokes the originating frontend.
 
 ## Supporting types
 

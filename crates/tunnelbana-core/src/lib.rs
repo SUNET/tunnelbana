@@ -29,7 +29,7 @@ pub use grindvakt::http::{HttpClient, HttpFetchResponse, HttpRequestData, Respon
 pub use internal::{AuthenticationInformation, InternalData, SubjectType};
 pub use plugin::{
     Backend, BackendAction, BuildContext, Frontend, FrontendAction, MicroService,
-    MicroServiceAction, Registry, Route,
+    MicroServiceAction, MicroServiceResponseAction, Registry, Route,
 };
 pub use proxy::Proxy;
 pub use state::{State, StateSealer};

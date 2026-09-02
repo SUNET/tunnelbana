@@ -73,4 +73,5 @@ pub fn register_all(registry: &mut Registry) {
     );
     registry.register_microservice("nameid", microservices::NameId::build);
     registry.register_microservice("accr", microservices::Accr::build);
+    registry.register_microservice("stepup", microservices::StepUp::build);
 }
