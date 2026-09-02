@@ -3,8 +3,10 @@
 //! via HTTP-Redirect, then at the ACS verify the signature, validate the Response
 //! (32-check `AssertionValidator` via `process_response`) and map attributes.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -46,6 +48,11 @@ use crate::saml_common::{
 const SIGALG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
 const SAML_ASSERTION_NS: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
 const XMLDSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+const MDQ_CACHE_CAPACITY: usize = 1024;
+
+tokio::task_local! {
+    static CAPTURED_MDQ_METADATA: RefCell<Option<Bytes>>;
+}
 
 #[derive(Debug, Deserialize)]
 struct Saml2BackendConfig {
@@ -152,24 +159,59 @@ enum IdpMetadata {
 }
 
 #[derive(Clone)]
-struct CapturingMetadataFetcher {
-    inner: ReqwestFetcher,
-    capture: Arc<StdMutex<MetadataCapture>>,
+struct CapturingMetadataFetcher<F = ReqwestFetcher> {
+    inner: F,
+}
+
+impl<F> MetadataFetcher for CapturingMetadataFetcher<F>
+where
+    F: MetadataFetcher + Sync,
+{
+    async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
+        let bytes = self.inner.fetch(url).await?;
+        CAPTURED_MDQ_METADATA
+            .try_with(|capture| capture.replace(Some(bytes.clone())))
+            .map_err(|_| MdqError::Transport("MDQ capture context is unavailable".into()))?;
+        Ok(bytes)
+    }
+}
+
+struct TrustedScopeEntry {
+    scopes: Vec<String>,
+    fetched_sequence: u64,
 }
 
 #[derive(Default)]
-struct MetadataCapture {
-    generation: u64,
-    bytes: Bytes,
+struct TrustedScopeCache {
+    entries: BTreeMap<String, TrustedScopeEntry>,
 }
 
-impl MetadataFetcher for CapturingMetadataFetcher {
-    async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
-        let bytes = self.inner.fetch(url).await?;
-        let mut capture = lock_unpoisoned(&self.capture);
-        capture.generation = capture.generation.wrapping_add(1);
-        capture.bytes = bytes.clone();
-        Ok(bytes)
+impl TrustedScopeCache {
+    fn insert(&mut self, entity_id: String, scopes: Vec<String>, fetched_sequence: u64) {
+        if !self.entries.contains_key(&entity_id) && self.entries.len() >= MDQ_CACHE_CAPACITY {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.fetched_sequence)
+                .map(|(entity_id, _)| entity_id.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            entity_id,
+            TrustedScopeEntry {
+                scopes,
+                fetched_sequence,
+            },
+        );
+    }
+
+    fn get(&self, entity_id: &str) -> Vec<String> {
+        self.entries
+            .get(entity_id)
+            .map(|entry| entry.scopes.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -178,71 +220,81 @@ impl MetadataFetcher for CapturingMetadataFetcher {
 /// `EntityDescriptor` intentionally keeps extension XML as a detached source
 /// slice, which loses namespace declarations inherited from ancestors. The
 /// capture lets scope parsing use the original namespace-aware document after
-/// (and only after) the normal MDQ client has accepted that same fetch. The
-/// async lock makes fetch, verification and capture promotion one atomic
-/// sequence for this backend.
-struct ScopeAwareMdqClient {
-    client: MdqClient<CapturingMetadataFetcher>,
-    capture: Arc<StdMutex<MetadataCapture>>,
-    trusted_scopes: StdMutex<BTreeMap<String, Vec<String>>>,
-    lookup_lock: tokio::sync::Mutex<()>,
+/// (and only after) the normal MDQ client has accepted that same fetch. Capture
+/// is task-local so unrelated network lookups remain concurrent. Weakly held
+/// per-entity locks make each entity/scopes cache update atomic without
+/// accumulating a second persistent entity map.
+struct ScopeAwareMdqClient<F = ReqwestFetcher> {
+    client: MdqClient<CapturingMetadataFetcher<F>>,
+    trusted_scopes: StdMutex<TrustedScopeCache>,
+    next_fetch_sequence: AtomicU64,
+    lookup_locks: StdMutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
-impl ScopeAwareMdqClient {
+impl ScopeAwareMdqClient<ReqwestFetcher> {
     fn build(config: &MdqConfig) -> Result<Self> {
-        let capture = Arc::new(StdMutex::new(MetadataCapture::default()));
         let inner = ReqwestFetcher::try_default()
             .map_err(|e| Error::Config(format!("building MDQ HTTP client: {e}")))?;
-        let fetcher = CapturingMetadataFetcher {
-            inner,
-            capture: Arc::clone(&capture),
-        };
-        let client = build_mdq_client_with_fetcher(config, fetcher)?;
-        Ok(Self {
+        let fetcher = CapturingMetadataFetcher { inner };
+        let client =
+            build_mdq_client_with_fetcher(config, fetcher)?.with_cache_capacity(MDQ_CACHE_CAPACITY);
+        Ok(Self::new(client))
+    }
+}
+
+impl<F> ScopeAwareMdqClient<F>
+where
+    F: MetadataFetcher + Sync,
+{
+    fn new(client: MdqClient<CapturingMetadataFetcher<F>>) -> Self {
+        Self {
             client,
-            capture,
-            trusted_scopes: StdMutex::new(BTreeMap::new()),
-            lookup_lock: tokio::sync::Mutex::new(()),
-        })
+            trusted_scopes: StdMutex::new(TrustedScopeCache::default()),
+            next_fetch_sequence: AtomicU64::new(0),
+            lookup_locks: StdMutex::new(BTreeMap::new()),
+        }
     }
 
     async fn get(
         &self,
         entity_id: &str,
     ) -> std::result::Result<(EntityDescriptor, Vec<String>), MdqError> {
-        let _lookup = self.lookup_lock.lock().await;
-        let before_generation = lock_unpoisoned(&self.capture).generation;
-        let entity = match self.client.get(entity_id).await {
-            Ok(entity) => entity,
-            Err(error) => {
-                let mut capture = lock_unpoisoned(&self.capture);
-                if capture.generation != before_generation {
-                    capture.bytes = Bytes::new();
-                }
-                return Err(error);
-            }
-        };
-        let captured_bytes = {
-            let mut capture = lock_unpoisoned(&self.capture);
-            if capture.generation != before_generation {
-                std::mem::take(&mut capture.bytes)
-            } else {
-                Bytes::new()
-            }
-        };
-        // Promote only bytes fetched by this successful lookup. A capture left
-        // by a failed verification must never be paired with a later cache hit.
-        if !captured_bytes.is_empty() {
+        let lookup_lock = self.lookup_lock(entity_id);
+        let _lookup = lookup_lock.lock().await;
+        let fetched_sequence = self.next_fetch_sequence.fetch_add(1, Ordering::Relaxed);
+        let (entity, captured_bytes) = CAPTURED_MDQ_METADATA
+            .scope(RefCell::new(None), async {
+                let entity = self.client.get(entity_id).await?;
+                let captured = CAPTURED_MDQ_METADATA.with(|capture| capture.borrow_mut().take());
+                Ok::<_, MdqError>((entity, captured))
+            })
+            .await?;
+
+        // Promote only bytes fetched and accepted by this lookup. Cache hits
+        // reuse the scopes promoted with the cached entity.
+        if let Some(captured_bytes) = captured_bytes {
             let scopes = std::str::from_utf8(&captured_bytes)
                 .map(|xml| trusted_scopes_from_metadata_xml(xml, entity_id))
                 .unwrap_or_default();
-            lock_unpoisoned(&self.trusted_scopes).insert(entity_id.to_string(), scopes);
+            lock_unpoisoned(&self.trusted_scopes).insert(
+                entity_id.to_string(),
+                scopes,
+                fetched_sequence,
+            );
         }
-        let scopes = lock_unpoisoned(&self.trusted_scopes)
-            .get(entity_id)
-            .cloned()
-            .unwrap_or_default();
+        let scopes = lock_unpoisoned(&self.trusted_scopes).get(entity_id);
         Ok((entity, scopes))
+    }
+
+    fn lookup_lock(&self, entity_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = lock_unpoisoned(&self.lookup_locks);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(entity_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(entity_id.to_string(), Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -1597,6 +1649,10 @@ fn idp_verifier_from_metadata(entity: &EntityDescriptor) -> Result<SamlVerifier>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    use gamlastan_mdq::RequiredRole;
 
     fn empty_mapper() -> AttributeMapper {
         AttributeMapper::from_toml("").expect("empty mapper")
@@ -1782,5 +1838,77 @@ mod tests {
         ] {
             assert!(trusted_scopes_from_metadata_xml(xml, "https://idp.example.org").is_empty());
         }
+    }
+
+    #[test]
+    fn trusted_scope_cache_matches_mdq_capacity() {
+        let mut cache = TrustedScopeCache::default();
+        for sequence in 0..=MDQ_CACHE_CAPACITY as u64 {
+            cache.insert(
+                format!("https://idp-{sequence}.example.org"),
+                vec![format!("scope-{sequence}.example.org")],
+                sequence,
+            );
+        }
+
+        assert_eq!(cache.entries.len(), MDQ_CACHE_CAPACITY);
+        assert!(cache.get("https://idp-0.example.org").is_empty());
+        assert_eq!(
+            cache.get(&format!("https://idp-{}.example.org", MDQ_CACHE_CAPACITY)),
+            [format!("scope-{}.example.org", MDQ_CACHE_CAPACITY)]
+        );
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentMetadataFetcher {
+        first_entity_id: String,
+        second_entity_id: String,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    impl MetadataFetcher for ConcurrentMetadataFetcher {
+        async fn fetch(&self, url: &str) -> std::result::Result<Bytes, MdqError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+
+            let (entity_id, scope) = if url.contains("first.example.org") {
+                (&self.first_entity_id, "first.scope.example.org")
+            } else {
+                (&self.second_entity_id, "second.scope.example.org")
+            };
+            Ok(Bytes::from(format!(
+                r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:scope="urn:mace:shibboleth:metadata:1.0" entityID="{entity_id}"><md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:Extensions><scope:Scope>{scope}</scope:Scope></md:Extensions><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.org/sso"/></md:IDPSSODescriptor></md:EntityDescriptor>"#
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_aware_mdq_lookups_are_concurrent_and_request_scoped() {
+        let first_entity_id = "https://first.example.org/idp".to_string();
+        let second_entity_id = "https://second.example.org/idp".to_string();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let fetcher = CapturingMetadataFetcher {
+            inner: ConcurrentMetadataFetcher {
+                first_entity_id: first_entity_id.clone(),
+                second_entity_id: second_entity_id.clone(),
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+            },
+        };
+        let client = MdqClient::with_fetcher("https://mdq.example.org/", fetcher)
+            .require_role(RequiredRole::Idp)
+            .allow_unverified()
+            .with_cache_capacity(MDQ_CACHE_CAPACITY);
+        let client = ScopeAwareMdqClient::new(client);
+
+        let (first, second) =
+            tokio::join!(client.get(&first_entity_id), client.get(&second_entity_id));
+        assert_eq!(first.unwrap().1, ["first.scope.example.org"]);
+        assert_eq!(second.unwrap().1, ["second.scope.example.org"]);
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
     }
 }

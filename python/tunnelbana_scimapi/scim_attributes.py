@@ -90,9 +90,11 @@ class ScimAttributes:
         del name, base_url
         if not isinstance(config, dict):
             raise TypeError("config must be a dictionary")
-        unknown = set(config) - _CONFIG_KEYS
+        unknown = sorted(set(config) - _CONFIG_KEYS)
         if unknown:
-            raise TypeError("unknown ScimAttributes configuration keys")
+            raise TypeError(
+                f"unknown ScimAttributes configuration keys: {', '.join(unknown)}"
+            )
 
         self.mongo_uri = _string(config.get("mongo_uri"), "mongo_uri")
         self.neo4j_uri = _string(config.get("neo4j_uri"), "neo4j_uri", optional=True)

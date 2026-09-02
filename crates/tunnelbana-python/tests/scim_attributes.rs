@@ -301,3 +301,25 @@ fn configured_adapter_fails_startup_when_eduid_dependency_cannot_load() {
 
     assert!(runtime().build_microservice(&bx, &[]).is_err());
 }
+
+#[test]
+fn unknown_configuration_keys_are_reported_in_sorted_order() {
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyStringMethods};
+
+    let _runtime = runtime();
+    pyo3::Python::attach(|py| {
+        let module = py.import("tunnelbana_scimapi.scim_attributes").unwrap();
+        let class = module.getattr("ScimAttributes").unwrap();
+        let settings = PyDict::new(py);
+        settings.set_item("z_typo", true).unwrap();
+        settings.set_item("a_typo", true).unwrap();
+        let error = class
+            .call1(("scim", "https://proxy.example", settings, PyDict::new(py)))
+            .unwrap_err();
+        let message = error.value(py).str().unwrap();
+        assert_eq!(
+            message.to_str().unwrap(),
+            "unknown ScimAttributes configuration keys: a_typo, z_typo"
+        );
+    });
+}

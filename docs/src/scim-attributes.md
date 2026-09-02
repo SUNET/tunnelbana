@@ -23,12 +23,13 @@ call_timeout_seconds = 30
 ```
 
 The virtual environment must contain the eduID package that provides
-`eduid.userdb.scimapi`, plus its PyMongo dependencies. Neo4j dependencies are
-needed only when `neo4j_uri` is configured. Tunnelbana never installs packages
-at startup. Configuring `ScimAttributes` imports its eduID user and group
-database classes during plugin construction, so a missing or incompatible
-package fails Tunnelbana startup even when group lookup is disabled. When the
-micro-service is not configured, the eduID package is not imported or required.
+`eduid.userdb.scimapi`, including its PyMongo and Neo4j dependencies. The eduID
+package imports its group database and Neo4j driver at module load even when
+`neo4j_uri` is omitted and group lookup is disabled. Tunnelbana never installs
+packages at startup. Configuring `ScimAttributes` imports the eduID user and
+group database classes during plugin construction, so a missing or incompatible
+dependency fails Tunnelbana startup. When the micro-service is not configured,
+the eduID package and its dependencies are not imported or required.
 
 Configure MongoDB and Neo4j connection, server-selection and socket timeouts
 below `python.call_timeout_seconds`. A timed-out Python call cannot be killed;
