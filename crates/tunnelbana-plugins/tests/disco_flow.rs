@@ -202,7 +202,8 @@ fn req(path: &str, method: &str, cookie: Option<&str>) -> HttpRequestData {
     };
     if let Some((p, q)) = path.split_once('?') {
         r.path = p.trim_start_matches('/').to_string();
-        r.query = form_parse(q);
+        r.query_pairs = form_urlencoded::parse(q.as_bytes()).into_owned().collect();
+        r.query = r.query_pairs.iter().cloned().collect();
     }
     if let Some(c) = cookie {
         if let Some((k, v)) = c.split_once('=') {

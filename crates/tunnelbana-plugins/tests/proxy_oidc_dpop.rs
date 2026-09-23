@@ -1,19 +1,50 @@
 //! DPoP (RFC 9449) end-to-end through the OIDC OP frontend: a DPoP-bound
 //! `client_credentials` token, the discovery advertisement, replay rejection,
-//! and the `use_dpop_nonce` challenge.
+//! the `use_dpop_nonce` challenge, and authorization-code tokens at UserInfo.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tunnelbana_core::attributes::AttributeMapper;
+use tunnelbana_core::context::Context;
+use tunnelbana_core::error::Result;
 use tunnelbana_core::http::{HttpRequestData, Response};
-use tunnelbana_core::plugin::Backend;
+use tunnelbana_core::internal::InternalData;
+use tunnelbana_core::plugin::{Backend, BackendAction, Route};
 use tunnelbana_core::plugin::{BuildContext, Frontend, NullHttpClient};
 use tunnelbana_core::proxy::Proxy;
 use tunnelbana_core::state::StateSealer;
 
 const ISSUER: &str = "https://proxy.example.com/OIDC";
 const TOKEN_URL: &str = "https://proxy.example.com/OIDC/token";
+const RP_REDIRECT: &str = "https://rp.example.com/callback";
+
+/// Supply an end-user authentication result for DPoP UserInfo tests, which must
+/// use an authorization-code grant rather than a service-only credential grant.
+struct MockLogin;
+
+#[async_trait]
+impl Backend for MockLogin {
+    fn name(&self) -> &str {
+        "Login"
+    }
+
+    fn register_endpoints(&self) -> Vec<Route> {
+        vec![Route::exact("Login/callback", "callback")]
+    }
+
+    async fn start_auth(&self, _ctx: &mut Context, _request: InternalData) -> Result<Response> {
+        Ok(Response::redirect("/Login/callback"))
+    }
+
+    async fn handle_endpoint(&self, _ctx: &mut Context, _route_id: &str) -> Result<BackendAction> {
+        Ok(BackendAction::AuthResponse(InternalData {
+            subject_id: Some("test-user".into()),
+            ..Default::default()
+        }))
+    }
+}
 
 fn mapper() -> Arc<AttributeMapper> {
     Arc::new(AttributeMapper::from_toml("").unwrap())
@@ -32,9 +63,10 @@ fn build_frontend(require_nonce: bool) -> Box<dyn Frontend> {
         "clients": [{
             "client_id": "svc-1",
             "client_secret": "svc-secret",
-            "grant_types": ["client_credentials"],
+            "grant_types": ["client_credentials", "authorization_code"],
+            "redirect_uris": [RP_REDIRECT],
             "token_endpoint_auth_method": "client_secret_post",
-            "scope": "read write"
+            "scope": "openid read write"
         }]
     });
 
@@ -54,7 +86,7 @@ fn proxy(require_nonce: bool) -> Proxy {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
     Proxy::new(
         vec![build_frontend(require_nonce)],
-        Vec::<Box<dyn Backend>>::new(),
+        vec![Box::new(MockLogin)],
         vec![],
         sealer,
     )
@@ -99,6 +131,7 @@ fn token_req(proof: Option<&str>) -> HttpRequestData {
     form.insert("client_id".to_string(), "svc-1".to_string());
     form.insert("client_secret".to_string(), "svc-secret".to_string());
     form.insert("scope".to_string(), "read".to_string());
+    r.form_pairs = form.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     r.form = form;
     if let Some(p) = proof {
         r.headers.insert("dpop".to_string(), p.to_string());
@@ -131,7 +164,12 @@ async fn discovery_advertises_dpop() {
     );
     assert_eq!(
         disco["grant_types_supported"],
-        serde_json::json!(["authorization_code", "client_credentials", "refresh_token"])
+        serde_json::json!([
+            "authorization_code",
+            "implicit",
+            "client_credentials",
+            "refresh_token"
+        ])
     );
     assert_eq!(disco["issuer"], ISSUER);
 }
@@ -275,10 +313,62 @@ fn userinfo_req(token: &str, scheme: &str, proof: Option<&str>) -> HttpRequestDa
     r
 }
 
-/// Mint a DPoP-bound `client_credentials` token signed with `key`.
+/// Complete an end-user code flow and bind its OpenID access token to `key` at
+/// exchange time, so UserInfo tests reach the DPoP checks with a valid scope.
 async fn mint_bound_token(p: &Proxy, key: &jose_rs::jwk::Jwk) -> String {
+    let query =
+        format!("client_id=svc-1&response_type=code&redirect_uri={RP_REDIRECT}&scope=openid");
+    let query_pairs: Vec<_> = form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    let authorization = p
+        .run(HttpRequestData {
+            path: "OIDC/authorization".into(),
+            method: "GET".into(),
+            query: query_pairs.iter().cloned().collect(),
+            query_pairs,
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(authorization.status, 302);
+    let cookie = header(&authorization, "set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (name, value) = cookie.split_once('=').unwrap();
+    let callback = p
+        .run(HttpRequestData {
+            path: "Login/callback".into(),
+            method: "GET".into(),
+            cookies: [(name.into(), value.into())].into(),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(callback.status, 302);
+    let redirect = url::Url::parse(header(&callback, "location").unwrap()).unwrap();
+    let code = redirect
+        .query_pairs()
+        .find(|(name, _)| name == "code")
+        .unwrap()
+        .1
+        .into_owned();
     let (proof, _) = proof_with_key(key, "POST", TOKEN_URL, None, None);
-    let r = p.run(token_req(Some(&proof))).await;
+    let mut request = token_req(Some(&proof));
+    request
+        .form
+        .insert("grant_type".into(), "authorization_code".into());
+    request.form.insert("code".into(), code);
+    request
+        .form
+        .insert("redirect_uri".into(), RP_REDIRECT.into());
+    request.form.remove("scope");
+    request.form_pairs = request
+        .form
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let r = p.run(request).await;
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
     let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
     assert_eq!(body["token_type"], "DPoP");
@@ -312,7 +402,7 @@ async fn userinfo_accepts_matching_dpop_proof() {
     let r = p.run(userinfo_req(&token, "DPoP", Some(&proof))).await;
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
     let claims: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-    assert_eq!(claims["sub"], "svc-1");
+    assert_eq!(claims["sub"], "test-user");
 }
 
 #[tokio::test]
@@ -326,7 +416,7 @@ async fn userinfo_accepts_lowercase_auth_scheme() {
     let r = p.run(userinfo_req(&token, "dpop", Some(&proof))).await;
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
     let claims: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-    assert_eq!(claims["sub"], "svc-1");
+    assert_eq!(claims["sub"], "test-user");
 }
 
 /// A proof signed by a *different* key (an attacker who captured the token and

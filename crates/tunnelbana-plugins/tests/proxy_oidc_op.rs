@@ -202,7 +202,8 @@ fn req(path: &str, method: &str, cookie: Option<&str>) -> HttpRequestData {
     };
     if let Some((p, q)) = path.split_once('?') {
         r.path = p.trim_start_matches('/').to_string();
-        r.query = form_parse(q);
+        r.query_pairs = form_urlencoded::parse(q.as_bytes()).into_owned().collect();
+        r.query = r.query_pairs.iter().cloned().collect();
     }
     if let Some(c) = cookie {
         if let Some((k, v)) = c.split_once('=') {
@@ -210,6 +211,10 @@ fn req(path: &str, method: &str, cookie: Option<&str>) -> HttpRequestData {
         }
     }
     r
+}
+
+fn parse_pairs(s: &str) -> Vec<(String, String)> {
+    form_urlencoded::parse(s.as_bytes()).into_owned().collect()
 }
 
 fn form_parse(s: &str) -> BTreeMap<String, String> {
@@ -252,10 +257,10 @@ async fn prompt_none_returns_login_required_without_interactive_redirect() {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
     let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
 
-    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop-abc";
     let challenge = pkce::s256_challenge(verifier);
     let authz_url = format!(
-        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=silent-state&nonce=no-1&code_challenge={}&code_challenge_method=S256&prompt=none",
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email%20profile&state=silent-state&nonce=no-1&code_challenge={}&code_challenge_method=S256&prompt=none",
         urlenc("https://rp.example.com/cb"),
         challenge
     );
@@ -275,6 +280,64 @@ async fn prompt_none_returns_login_required_without_interactive_redirect() {
     );
 }
 
+/// A failed silent login returns its error and state in the explicitly requested
+/// fragment, keeping error delivery consistent with the validated response mode.
+#[tokio::test]
+async fn prompt_none_error_honors_fragment_response_mode() {
+    let seen = Arc::new(Mutex::new(None));
+    let proxy = Proxy::new(
+        vec![build_frontend(attribute_mapper())],
+        vec![Box::new(PromptProbeBackend { seen })],
+        vec![],
+        StateSealer::new("test-secret", "TB_STATE").with_secure(false),
+    );
+    let challenge = pkce::s256_challenge("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG");
+    let response = proxy.run(req(&format!(
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid&state=silent-state&code_challenge={challenge}&code_challenge_method=S256&prompt=none&response_mode=fragment",
+        urlenc("https://rp.example.com/cb"),
+    ), "GET", None)).await;
+    assert_eq!(response.status, 302);
+    let redirect = location(&response);
+    assert!(redirect.starts_with("https://rp.example.com/cb#"));
+    assert_eq!(
+        query_param(&redirect, "error").as_deref(),
+        Some("login_required")
+    );
+    assert_eq!(
+        query_param(&redirect, "state").as_deref(),
+        Some("silent-state")
+    );
+}
+
+/// Both OP protocol entry points reject repeated single-valued parameters
+/// instead of accepting whichever value survived conversion into a map.
+#[tokio::test]
+async fn oidc_endpoints_reject_duplicate_parameters() {
+    let proxy = Proxy::new(
+        vec![build_frontend(attribute_mapper())],
+        vec![],
+        vec![],
+        StateSealer::new("test-secret", "TB_STATE").with_secure(false),
+    );
+    let authorization = req(
+        "OIDC/authorization?client_id=rp-1&client_id=rp-1",
+        "GET",
+        None,
+    );
+    let mut token = req("OIDC/token", "POST", None);
+    token.form_pairs = parse_pairs("grant_type=authorization_code&grant_type=refresh_token");
+    for request in [authorization, token] {
+        let response = proxy.run(request).await;
+        assert_eq!(response.status, 400);
+        let error: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(error["error"], "invalid_request");
+        assert!(error["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate"));
+    }
+}
+
 #[tokio::test]
 async fn oidc_op_full_flow_through_proxy() {
     let mapper = attribute_mapper();
@@ -285,12 +348,12 @@ async fn oidc_op_full_flow_through_proxy() {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
     let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
 
-    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop-abc";
     let challenge = pkce::s256_challenge(verifier);
 
     // 1) Authorization request → should redirect into the backend.
     let authz_url = format!(
-        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email%20profile&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
         urlenc("https://rp.example.com/cb"),
         challenge
     );
@@ -309,7 +372,7 @@ async fn oidc_op_full_flow_through_proxy() {
 
     // 3) Token exchange (PKCE) → 200 with id_token + access_token.
     let mut token_req = req("OIDC/token", "POST", None);
-    token_req.form = form_parse(&format!(
+    token_req.form_pairs = parse_pairs(&format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id=rp-1&code_verifier={}",
         urlenc(&code),
         urlenc("https://rp.example.com/cb"),
@@ -409,12 +472,12 @@ async fn oidc_op_refresh_token_flow_through_proxy() {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
     let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
 
-    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop-abc";
     let challenge = pkce::s256_challenge(verifier);
 
     // Authorization → backend callback → code redirect to RP.
     let authz_url = format!(
-        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email%20profile&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
         urlenc("https://rp.example.com/cb"),
         challenge
     );
@@ -425,7 +488,7 @@ async fn oidc_op_refresh_token_flow_through_proxy() {
 
     // Code exchange returns a refresh token.
     let mut token_req = req("OIDC/token", "POST", None);
-    token_req.form = form_parse(&format!(
+    token_req.form_pairs = parse_pairs(&format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id=rp-1&code_verifier={}",
         urlenc(&code),
         urlenc("https://rp.example.com/cb"),
@@ -441,7 +504,7 @@ async fn oidc_op_refresh_token_flow_through_proxy() {
 
     // Refresh exchange returns fresh tokens and a rotated refresh token.
     let mut refresh_req = req("OIDC/token", "POST", None);
-    refresh_req.form = form_parse(&format!(
+    refresh_req.form_pairs = parse_pairs(&format!(
         "grant_type=refresh_token&refresh_token={}&client_id=rp-1",
         urlenc(&refresh),
     ));
@@ -508,10 +571,10 @@ async fn response_microservice_sees_restored_requester() {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
     let proxy = Proxy::new(vec![frontend], vec![backend], vec![probe], sealer);
 
-    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop-abc";
     let challenge = pkce::s256_challenge(verifier);
     let authz_url = format!(
-        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email%20profile&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
         urlenc("https://rp.example.com/cb"),
         challenge
     );
@@ -550,10 +613,10 @@ async fn frontend_backend_pin_overrides_request_routing_and_default() {
         sealer,
     );
 
-    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop-abc";
     let challenge = pkce::s256_challenge(verifier);
     let authz_url = format!(
-        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
+        "OIDC/authorization?client_id=rp-1&response_type=code&redirect_uri={}&scope=openid%20email%20profile&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",
         urlenc("https://rp.example.com/cb"),
         challenge
     );
@@ -607,7 +670,7 @@ async fn client_loaded_from_clients_file_can_authorize() {
     let sealer = StateSealer::new("test-secret", "TB_STATE").with_secure(false);
     let proxy = Proxy::new(vec![frontend], vec![backend], vec![], sealer);
 
-    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop";
+    let verifier = "verifier-abcdefghijklmnop-abcdefghijklmnop-abc";
     let challenge = pkce::s256_challenge(verifier);
     let authz_url = format!(
         "OIDC/authorization?client_id=rp-file&response_type=code&redirect_uri={}&scope=openid&state=st-1&nonce=no-1&code_challenge={}&code_challenge_method=S256",

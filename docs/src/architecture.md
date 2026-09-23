@@ -16,6 +16,28 @@ projects can consume it. It depends only on `jose-rs` plus crypto crates - no
 proxy or runtime coupling; outbound HTTP is injected via
 `grindvakt::http::HttpClient`. SAML lives in the separate `gamlastan` crate.
 
+With Grindvakt 0.8, HTTP adapters must populate `HttpRequestData.query_pairs`
+and `form_pairs` directly from the query string and form body, preserving order
+and duplicate names. The OIDC and federation authorization/token endpoints
+consume these lists and reject duplicate single-valued parameters; rebuilding
+them from the convenience `query` / `form` maps loses this validation. Keep those
+maps populated as well for existing application lookups. Repeated `resource`
+parameters are preserved in the authorization request, but this does not add
+resource-specific token audiences.
+
+Each OP frontend explicitly supplies its own `InMemoryTokenUseStore` to
+Grindvakt's fallible provider constructor, retaining the existing process-local
+replay protection. Authorization response generation is now asynchronous, and
+error redirects use the validated request's query/fragment response mode.
+
+Both OP frontends use Grindvakt 0.8.1's caller-managed subject resolver. A compact
+registration fingerprint in the authenticated login state binds the response
+pipeline's subject to the client validated before login. The resolver compares
+that binding against its issuance-time client before preserving the existing
+`subject_id` / attribute-composition order. See
+[ADR 0058](../adr/0058-grindvakt-081-subject-compatibility.md) for pairwise policy
+and upgrade compatibility.
+
 ## The request flow
 
 Every request is routed to exactly one module endpoint. Authentication flows

@@ -97,8 +97,8 @@ impl HttpClient for MockFederation {
                 "openid_relying_party": {
                     "redirect_uris": [RP_REDIRECT],
                     "client_name": "Federation RP",
-                    "jwks": self.rp_key.to_public_jwks(),
-                    "subject_type": "pairwise"
+                    // Omit subject_type to exercise the historical pairwise default.
+                    "jwks": self.rp_key.to_public_jwks()
                 }
             });
             let mut claims = jose_rs::jwt::Claims {
@@ -240,9 +240,10 @@ fn req(path: &str, method: &str, cookie: Option<&str>) -> HttpRequestData {
     };
     if let Some((p, q)) = path.split_once('?') {
         r.path = p.trim_start_matches('/').to_string();
-        r.query = form_urlencoded::parse(q.as_bytes())
+        r.query_pairs = form_urlencoded::parse(q.as_bytes())
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
+        r.query = r.query_pairs.iter().cloned().collect();
     } else {
         r.path = path.trim_start_matches('/').to_string();
     }
@@ -375,7 +376,7 @@ async fn auto_registration_and_private_key_jwt_flow() {
     let token_url = "https://proxy.example.com/OIDFed/token";
     let assertion = tunnelbana_oidc::rp::build_client_assertion(&rp_key, RP_ID, token_url).unwrap();
     let mut treq = req("OIDFed/token", "POST", None);
-    treq.form = [
+    treq.form_pairs = [
         ("grant_type", "authorization_code"),
         ("code", code.as_str()),
         ("redirect_uri", RP_REDIRECT),
@@ -528,6 +529,71 @@ fn build_frontend_with_clients(
         previous_secrets: Vec::new(),
     };
     tunnelbana_plugins::federation_frontend::FederationFrontend::build(&bx)
+}
+
+/// Reject ambiguous federation requests before client resolution or JAR merging,
+/// and apply the same duplicate check at the token endpoint.
+#[tokio::test]
+async fn federation_endpoints_reject_duplicates_before_resolution() {
+    let frontend = build_frontend_with_clients(serde_json::json!([]), None).unwrap();
+    for (route, pairs) in [
+        ("authorization", "client_id=unknown&client_id=unknown"),
+        ("authorization", "client_id=unknown&request=one&request=two"),
+        (
+            "token",
+            "grant_type=authorization_code&grant_type=refresh_token",
+        ),
+    ] {
+        let mut request = req(&format!("OIDFed/{route}?{pairs}"), "GET", None);
+        if route == "token" {
+            request.method = "POST".into();
+            request.form_pairs = std::mem::take(&mut request.query_pairs);
+            request.query.clear();
+        }
+        let mut ctx = Context::new(request, Default::default());
+        let action = frontend.handle_endpoint(&mut ctx, route).await.unwrap();
+        let tunnelbana_core::plugin::FrontendAction::Respond(response) = action else {
+            panic!("duplicate parameters must not start authentication");
+        };
+        assert_eq!(response.status, 400);
+        let error: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(error["error"], "invalid_request");
+        assert!(error["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate"));
+    }
+}
+
+/// Repeated RFC 8707 resource indicators remain ordered in the stored request;
+/// unlike single-valued protocol fields, they must survive frontend parsing.
+#[tokio::test]
+async fn federation_authorization_preserves_repeated_resources() {
+    let frontend = build_frontend_with_clients(
+        serde_json::json!([{
+            "client_id": "rp", "redirect_uris": [RP_REDIRECT],
+            "token_endpoint_auth_method": "private_key_jwt"
+        }]),
+        None,
+    )
+    .unwrap();
+    let request = req(&format!(
+        "OIDFed/authorization?client_id=rp&redirect_uri={}&response_type=code&scope=openid&resource=https%3A%2F%2Ffirst.example&resource=https%3A%2F%2Fsecond.example",
+        enc(RP_REDIRECT)
+    ), "GET", None);
+    let mut ctx = Context::new(request, Default::default());
+    assert!(matches!(
+        frontend
+            .handle_endpoint(&mut ctx, "authorization")
+            .await
+            .unwrap(),
+        tunnelbana_core::plugin::FrontendAction::StartAuth { .. }
+    ));
+    let stored = ctx.state.get_value("OIDFed", "authz_request").unwrap();
+    assert_eq!(
+        stored["resources"],
+        serde_json::json!(["https://first.example", "https://second.example"])
+    );
 }
 
 /// The federation frontend seeds statically pre-registered clients from

@@ -15,15 +15,14 @@ license = "BSD-2-Clause"
 rust-version = "1.88"
 
 [workspace.dependencies]
-grindvakt = "0.7.2"
+grindvakt = "0.8.1"
 jose-rs = { version = "0.7.0", default-features = false }
 gamlastan = "0.9.0"
 gamlastan-mdq = "0.9.0"
 
 # Async / web
-actix-web = "4"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
+actix-web = "4.15.0"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 

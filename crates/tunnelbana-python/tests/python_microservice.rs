@@ -67,6 +67,8 @@ fn context() -> Context {
         path: "frontend/start".into(),
         method: "POST".into(),
         uri: "https://proxy.example/frontend/start?secret=hidden".into(),
+        query_pairs: vec![("prompt".into(), "login".into())],
+        form_pairs: vec![("client_id".into(), "requester".into())],
         query: [("prompt".into(), "login".into())].into(),
         form: [("client_id".into(), "requester".into())].into(),
         body: b"secret body".to_vec(),

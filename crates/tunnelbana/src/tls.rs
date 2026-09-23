@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ParsedCertificate, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
@@ -133,7 +133,7 @@ fn read(path: &Path) -> io::Result<Vec<u8>> {
 /// trust, validity dates and hostname during their handshake.
 fn load_identity(cert_path: &Path, key_path: &Path) -> io::Result<CertifiedKey> {
     let cert_pem = read(cert_path)?;
-    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
+    let certs = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<Vec<_>, _>>()
         // PEM parser errors can contain input lines. Never log those lines.
         .map_err(|_| invalid(cert_path, "invalid certificate PEM"))?;
@@ -150,13 +150,8 @@ fn load_identity(cert_path: &Path, key_path: &Path) -> io::Result<CertifiedKey> 
     let mut key: Option<PrivateKeyDer<'static>> = None;
     // Scan the entire PEM instead of selecting the first key, so an ambiguous
     // bundle or malformed trailing section cannot silently pass loading.
-    for item in rustls_pemfile::read_all(&mut key_pem.as_slice()) {
-        let candidate = match item.map_err(|_| invalid(key_path, "invalid private-key PEM"))? {
-            rustls_pemfile::Item::Pkcs1Key(k) => k.into(),
-            rustls_pemfile::Item::Pkcs8Key(k) => k.into(),
-            rustls_pemfile::Item::Sec1Key(k) => k.into(),
-            _ => continue,
-        };
+    for item in PrivateKeyDer::pem_slice_iter(&key_pem) {
+        let candidate = item.map_err(|_| invalid(key_path, "invalid private-key PEM"))?;
         if key.replace(candidate).is_some() {
             return Err(invalid(key_path, "expected exactly one private key"));
         }
@@ -276,6 +271,33 @@ mod tests {
         std::fs::write(&key, pem.repeat(2)).unwrap();
         assert!(load_identity(&cert, &key).is_err());
         std::fs::remove_file(&key).unwrap();
+        assert!(load_identity(&cert, &key).is_err());
+    }
+
+    /// The supported PEM API must scan beyond a valid item: unrelated valid
+    /// sections are allowed, but malformed trailing sections still reject the
+    /// complete identity instead of silently accepting its valid prefix.
+    #[test]
+    fn loader_scans_all_pem_sections_after_parser_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pair(dir.path());
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        let cert_pem = std::fs::read_to_string(&cert).unwrap();
+        let key_pem = std::fs::read_to_string(&key).unwrap();
+
+        // Preserve mixed-file compatibility: only supported private keys count
+        // toward the one-key rule, and only certificates form the chain.
+        std::fs::write(&key, format!("{cert_pem}{key_pem}{cert_pem}")).unwrap();
+        std::fs::write(&cert, format!("{key_pem}{cert_pem}")).unwrap();
+        assert!(load_identity(&cert, &key).is_ok());
+
+        let malformed = "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n";
+        // Even a malformed non-key section after a valid key must be noticed.
+        std::fs::write(&key, format!("{key_pem}{malformed}")).unwrap();
+        assert!(load_identity(&cert, &key).is_err());
+        std::fs::write(&key, &key_pem).unwrap();
+        std::fs::write(&cert, format!("{cert_pem}{malformed}")).unwrap();
         assert!(load_identity(&cert, &key).is_err());
     }
 

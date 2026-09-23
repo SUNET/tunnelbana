@@ -81,6 +81,19 @@ IdP and an OIDC OP over the same backend).
 
 ### `oidc` frontend - OpenID Provider
 
+The OP supports public and caller-managed pairwise subject identifiers through
+Grindvakt 0.8.1. Existing subject selection is preserved: the response pipeline's
+`subject_id` takes precedence over `user_id_from_attrs` composition. No new
+hashing or automatic preference for `pairwise-id` is introduced. Operators using
+pairwise registrations own sector validation and must ensure the selected value
+has the required stability and isolation. A changed registration during login
+requires a new authorization. Older in-flight pairwise logins without a
+registration binding must restart once after upgrading; public login cookies
+remain usable. See [ADR 0058](../adr/0058-grindvakt-081-subject-compatibility.md).
+
+Standard claims are released according to the requested scopes
+(`profile` for names, `email` for email claims), and UserInfo requires `openid`.
+
 ```toml
 [[frontend]]
 type = "oidc"
@@ -183,6 +196,14 @@ DPoP proofs on the token and userinfo endpoints, and issues sender-constrained
 access tokens (`token_type = "DPoP"`).
 
 ### `oidc_federation` frontend - Federation OP
+
+As with the ordinary OP frontend, public and caller-managed pairwise subjects
+are supported without changing existing subject values. Automatic registration
+retains its historical `pairwise` default when `subject_type` is omitted; static
+client registrations default to `public`. The configured response pipeline must
+supply the appropriate subject for each registered client. See
+[ADR 0058](../adr/0058-grindvakt-081-subject-compatibility.md) for the registration
+binding and rollout behavior.
 
 A federation-aware OP: it serves a signed entity configuration, auto-registers
 unknown RPs by resolving them through a trust anchor, unpacks request objects
@@ -381,6 +402,7 @@ name = "Upstream"
   client_secret              = "upstream-rp-secret"      # for client_secret_* methods
   token_endpoint_auth_method = "client_secret_basic"
   scope                      = "openid profile email"
+  id_token_signed_response_alg = "RS256"  # default; match the upstream registration
 
   # For private_key_jwt, supply a signing key instead of a secret:
   # signing_key_path  = "keys/rp.key"
@@ -392,6 +414,15 @@ Always uses PKCE (S256). The callback is served at `…/Upstream/`.
 When UserInfo is advertised, its response must contain a `sub` exactly equal to
 the verified ID Token subject before any UserInfo attributes are merged.
 
+`id_token_signed_response_alg` pins the accepted upstream ID-token signature
+algorithm, independently of `signing_algorithm` used for outbound client
+assertions. It defaults to `RS256`; set it explicitly (for example, `ES256`) when
+the upstream registration uses another algorithm. HMAC (`HS*`) is rejected at
+startup because validation uses public JWKS. ID tokens must target this RP's
+client ID without additional audiences. Token responses must include a nonempty
+ID token, access token, and Bearer token type. Remote issuers cannot use loopback
+HTTP endpoints; the HTTP development exception requires a loopback HTTP issuer.
+
 ### `oidc_federation` backend - Federation Relying Party
 
 The federation-aware RP (ADR 0033, superseding parts of ADR 0024): no pre-registered client, no
@@ -399,6 +430,10 @@ The federation-aware RP (ADR 0033, superseding parts of ADR 0024): no pre-regist
 configuration, resolves the upstream OP through the configured trust
 anchors, and authenticates with `private_key_jwt` using its **entity id as
 the client id** (automatic registration, OpenID Federation 1.1 section 12.1).
+
+The upstream ID-token, audience, UserInfo, and endpoint policies described for
+the `oidc` backend also apply here. `id_token_signed_response_alg` is published
+in the signed RP metadata so upstream OPs know which algorithm to use.
 
 ```toml
 [[backend]]
@@ -415,6 +450,7 @@ name = "OIDFedRP"
   # Mutually exclusive with [backend.config.discovery]; set exactly one.
   op_entity_id = "https://op.example.org"
   scope        = "openid profile email"
+  id_token_signed_response_alg = "RS256"  # default; published in RP metadata
 
   # Instead of a fixed op_entity_id, enable OP discovery: send the user to an
   # external OpenID Federation discovery service (e.g. upptackt) which returns

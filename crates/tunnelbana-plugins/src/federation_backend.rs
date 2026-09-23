@@ -24,6 +24,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use jose_rs::jwk::JwkSet;
+use jose_rs::JwsAlgorithm;
 use serde::Deserialize;
 use serde_json::Value;
 use tunnelbana_core::attributes::AttributeMapper;
@@ -124,6 +125,9 @@ struct DiscoveryConfig {
 
 #[derive(Debug, Deserialize)]
 struct FederationBackendConfig {
+    /// Registered algorithm accepted for upstream ID tokens (RS256 by default).
+    #[serde(default = "crate::oidc_common::default_id_token_algorithm")]
+    id_token_signed_response_alg: JwsAlgorithm,
     /// Federation entity identifier of this RP. It is also the OAuth2
     /// `client_id` sent upstream (automatic registration). Defaults to the
     /// module base (`<base_url>/<name>`); the entity configuration must be
@@ -196,6 +200,7 @@ pub struct FederationBackend {
     op_entity_id: Option<String>,
     discovery: Option<Discovery>,
     client: RpClient,
+    id_token_signed_response_alg: JwsAlgorithm,
     client_jwks: JwkSet,
     http: Arc<dyn HttpClient>,
     mapper: Arc<AttributeMapper>,
@@ -215,6 +220,7 @@ pub struct FederationBackend {
 impl FederationBackend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
         let cfg: FederationBackendConfig = bx.parse_config()?;
+        crate::oidc_common::validate_id_token_algorithm(cfg.id_token_signed_response_alg)?;
         let module_base = bx.module_base();
         let entity_id = cfg.entity_id.clone().unwrap_or_else(|| module_base.clone());
         let redirect_uri = format!("{module_base}/callback");
@@ -327,6 +333,7 @@ impl FederationBackend {
             op_entity_id: cfg.op_entity_id.clone(),
             discovery,
             client,
+            id_token_signed_response_alg: cfg.id_token_signed_response_alg,
             client_jwks,
             http: bx.http_client.clone(),
             mapper: bx.attribute_mapper.clone(),
@@ -352,6 +359,10 @@ impl FederationBackend {
         relying_party.insert(
             "client_registration_types".into(),
             serde_json::json!(["automatic"]),
+        );
+        relying_party.insert(
+            "id_token_signed_response_alg".into(),
+            serde_json::to_value(self.id_token_signed_response_alg)?,
         );
         relying_party.insert("response_types".into(), serde_json::json!(["code"]));
         relying_party.insert(
@@ -536,7 +547,7 @@ impl FederationBackend {
             &nonce,
             Some(&challenge),
             &[("request", &request_object)],
-        );
+        )?;
         Ok(Response::redirect(url))
     }
 
@@ -819,10 +830,7 @@ impl FederationBackend {
         )
         .await?;
 
-        let id_token = tokens
-            .id_token
-            .as_ref()
-            .ok_or_else(|| Error::Authn("no id_token in token response".into()))?;
+        let id_token = &tokens.id_token;
         let jwks = self.op_jwks(&op).await?;
         let id_claims = rp::verify_id_token(
             &jwks,
@@ -830,6 +838,8 @@ impl FederationBackend {
             &op.provider.issuer,
             &self.client.client_id,
             Some(&nonce),
+            &[self.id_token_signed_response_alg],
+            &[],
         )?;
 
         let sub = id_claims
@@ -839,10 +849,15 @@ impl FederationBackend {
 
         // Merge id_token claims and userinfo.
         let mut merged = serde_json::to_value(&id_claims.extra).unwrap_or_default();
-        if let (Some(userinfo_ep), Some(access_token)) =
-            (&op.provider.userinfo_endpoint, &tokens.access_token)
-        {
-            let userinfo = rp::fetch_userinfo(&self.http, userinfo_ep, access_token).await?;
+        if let Some(userinfo_ep) = &op.provider.userinfo_endpoint {
+            let userinfo = rp::fetch_userinfo(
+                &self.http,
+                userinfo_ep,
+                &tokens.access_token,
+                &sub,
+                &op.provider.issuer,
+            )
+            .await?;
             require_matching_userinfo_subject(&userinfo, &sub)?;
             merge_json(&mut merged, &userinfo);
         }

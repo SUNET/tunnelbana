@@ -160,6 +160,9 @@ name = "OIDFedRP"
   # <entity_id>/.well-known/openid-federation (see the reverse-proxy section).
   entity_id = "https://proxy.example.com"
   scope     = "openid email profile"
+  # Algorithm required for upstream ID tokens, published in this RP's metadata.
+  # Independent of the federation/client-assertion signing key below.
+  id_token_signed_response_alg = "RS256"
 
   # OP discovery via upptackt (ADR 0025). Mutually exclusive with op_entity_id:
   # set exactly one. start_auth redirects the browser here; the service verifies

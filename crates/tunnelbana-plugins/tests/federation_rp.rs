@@ -388,8 +388,20 @@ fn build_backend(
     fed_jwk: serde_json::Value,
     ta_pub: serde_json::Value,
 ) -> Box<dyn Backend> {
+    build_backend_with_id_token_algorithm(http, fed_jwk, ta_pub, "ES256")
+}
+
+/// Configure the inbound ID-token algorithm independently of the RP's ES256
+/// federation key so tests can exercise the verification policy boundary.
+fn build_backend_with_id_token_algorithm(
+    http: Arc<dyn HttpClient>,
+    fed_jwk: serde_json::Value,
+    ta_pub: serde_json::Value,
+    id_token_algorithm: &str,
+) -> Box<dyn Backend> {
     let config = serde_json::json!({
         "op_entity_id": OP_ID,
+        "id_token_signed_response_alg": id_token_algorithm,
         "scope": "openid email",
         "federation": {
             "signing_jwk": fed_jwk,
@@ -419,6 +431,7 @@ fn build_discovery_backend(
 ) -> Box<dyn Backend> {
     let config = serde_json::json!({
         "scope": "openid email",
+        "id_token_signed_response_alg": "ES256",
         "discovery": {
             "enable": true,
             "service": DISCO_SERVICE
@@ -524,6 +537,7 @@ async fn rp_entity_configuration_is_served_and_self_signed() {
         serde_json::json!(["automatic"])
     );
     assert_eq!(rp_meta["token_endpoint_auth_method"], "private_key_jwt");
+    assert_eq!(rp_meta["id_token_signed_response_alg"], "ES256");
     assert!(
         rp_meta.get("jwks").is_some(),
         "client keys must be published"
@@ -545,6 +559,38 @@ async fn start_auth_rejects_authn_constraints_it_cannot_honor() {
     let mut passive = InternalData::request("https://sp.example");
     passive.is_passive = true;
     assert!(backend.start_auth(&mut ctx(), passive).await.is_err());
+}
+
+/// A valid signature from the resolved OP must still use the algorithm
+/// registered by this RP; possession of another accepted public key is insufficient.
+#[tokio::test]
+async fn callback_rejects_unregistered_id_token_algorithm() {
+    let (net, fed_jwk, ta_pub) = network(&ec_jwk("rp-fed-1"));
+    let backend = build_backend_with_id_token_algorithm(net.clone(), fed_jwk, ta_pub, "RS256");
+    let mut context = ctx();
+    let response = backend
+        .start_auth(&mut context, InternalData::request("https://sp.example"))
+        .await
+        .unwrap();
+    let url = location(&response);
+    *net.nonce.lock().unwrap() = qp(&url, "nonce");
+    context
+        .request
+        .query
+        .insert("state".into(), qp(&url, "state").unwrap());
+    context
+        .request
+        .query
+        .insert("code".into(), "authcode-1".into());
+    let error = backend
+        .handle_endpoint(&mut context, "callback")
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().to_lowercase().contains("algorithm"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -700,6 +746,7 @@ async fn build_requires_trust_anchor() {
     let fed_jwk: serde_json::Value = ec_jwk("rp-fed-1");
     let config = serde_json::json!({
         "op_entity_id": OP_ID,
+        "id_token_signed_response_alg": "ES256",
         "federation": {
             "signing_jwk": fed_jwk,
             "signing_algorithm": "ES256",
@@ -939,6 +986,7 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
     // Both set -> error.
     let both = serde_json::json!({
         "op_entity_id": OP_ID,
+        "id_token_signed_response_alg": "ES256",
         "discovery": { "enable": true, "service": DISCO_SERVICE },
         "federation": fed.clone()
     });
@@ -952,6 +1000,7 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
 
     // Discovery enabled without a service URL -> error.
     let no_service = serde_json::json!({
+        "id_token_signed_response_alg": "ES256",
         "discovery": { "enable": true },
         "federation": fed.clone()
     });
@@ -961,6 +1010,7 @@ async fn build_rejects_op_entity_id_and_discovery_together() {
 
     // Discovery enabled with an unparseable service URL -> error.
     let bad_service = serde_json::json!({
+        "id_token_signed_response_alg": "ES256",
         "discovery": { "enable": true, "service": "not a url" },
         "federation": fed
     });

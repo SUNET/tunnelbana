@@ -1,13 +1,116 @@
-//! Shared OpenID Connect frontend claim, request, and error handling.
+//! Shared OpenID Connect claim, request, validation, and error handling.
 
 use std::collections::BTreeMap;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use jose_rs::JwsAlgorithm;
+use sha2::{Digest, Sha256};
 use tunnelbana_core::attributes::AttributeMapper;
+use tunnelbana_core::context::Context;
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::internal::InternalData;
+use tunnelbana_oidc::client::Client;
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
 use tunnelbana_oidc::request::AuthorizationRequest;
+
+/// Compact registration binding stored inside the authenticated flow cookie.
+const AUTHORIZATION_CLIENT: &str = "authorization_client_v1";
+
+/// Hash all registration fields without storing client secrets or JWKs in the
+/// flow cookie. Separate flattened JWK extensions and canonicalize object order
+/// so neither overlapping field names nor map iteration affect the binding.
+fn client_fingerprint(client: &Client) -> Result<String> {
+    let mut registration = client.clone();
+    let extensions = registration.jwks.as_mut().map(|jwks| {
+        jwks.keys
+            .iter_mut()
+            .map(|key| std::mem::take(&mut key.extra))
+            .collect::<Vec<_>>()
+    });
+    let mut value = serde_json::to_value((registration, extensions))?;
+    value.sort_all_objects();
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&value)?)))
+}
+
+/// Bind response-pipeline output to the registration validated before login.
+pub(crate) fn bind_authorization_client(
+    ctx: &mut Context,
+    frontend: &str,
+    client: &Client,
+) -> Result<()> {
+    ctx.state.set_value(
+        frontend,
+        AUTHORIZATION_CLIENT,
+        serde_json::Value::String(client_fingerprint(client)?),
+    );
+    Ok(())
+}
+
+/// Resolve the established subject only after matching the issuance registration
+/// to the login snapshot. Keep the historical subject_id/composition precedence;
+/// the configured response pipeline owns pairwise derivation and sector policy.
+/// A missing binding is accepted only for public clients, allowing pre-upgrade
+/// public login cookies to complete without accepting unbound pairwise output.
+pub(crate) fn resolve_authorization_subject(
+    ctx: &Context,
+    frontend: &str,
+    client: &Client,
+    response: &InternalData,
+    mapper: &AttributeMapper,
+) -> std::result::Result<String, OAuthError> {
+    match ctx.state.get_value(frontend, AUTHORIZATION_CLIENT) {
+        Some(saved) => {
+            let current = client_fingerprint(client).map_err(|_| {
+                OAuthError::new(
+                    OAuthErrorCode::ServerError,
+                    "cannot compare client registration",
+                )
+            })?;
+            if saved.as_str() != Some(current.as_str()) {
+                return Err(OAuthError::new(
+                    OAuthErrorCode::UnauthorizedClient,
+                    "client registration changed during login; restart authorization",
+                ));
+            }
+        }
+        None if client.subject_type != "public" => {
+            return Err(OAuthError::new(
+                OAuthErrorCode::UnauthorizedClient,
+                "pairwise login predates registration binding; restart authorization",
+            ));
+        }
+        None => {}
+    }
+    response
+        .subject_id
+        .clone()
+        .or_else(|| mapper.compose_subject_id(&response.attributes))
+        .ok_or_else(|| {
+            OAuthError::new(
+                OAuthErrorCode::AccessDenied,
+                "no subject identifier available",
+            )
+        })
+}
+
+/// OIDC's default registered ID-token signing algorithm.
+pub(crate) fn default_id_token_algorithm() -> JwsAlgorithm {
+    JwsAlgorithm::RS256
+}
+
+/// Upstream JWKS contain public keys, so they cannot establish HMAC trust.
+pub(crate) fn validate_id_token_algorithm(algorithm: JwsAlgorithm) -> Result<()> {
+    if matches!(
+        algorithm,
+        JwsAlgorithm::HS256 | JwsAlgorithm::HS384 | JwsAlgorithm::HS512
+    ) {
+        return Err(Error::Config(
+            "id_token_signed_response_alg must be an asymmetric signing algorithm".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Reserved internal attribute whose OpenID mapping controls release of the
 /// OP-asserted upstream authentication authority.
@@ -130,6 +233,48 @@ pub(crate) fn backend_authorization_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fingerprints cover registration policy and key fields while treating
+    /// harmless JSON object ordering as equivalent across federation refreshes.
+    #[test]
+    fn registration_fingerprint_is_complete_and_canonical() {
+        let mut client: Client = serde_json::from_value(serde_json::json!({
+            "client_id": "rp", "subject_type": "pairwise",
+            "jwks": {"keys": [{"kty": "EC", "kid": "original", "x-extra": {"a": 1, "b": 2}}]}
+        }))
+        .unwrap();
+        let original = client_fingerprint(&client).unwrap();
+        let key = &mut client.jwks.as_mut().unwrap().keys[0];
+        // preserve_order is enabled in Tunnelbana: equivalent incoming objects
+        // must hash identically even when their insertion order differs.
+        key.extra.insert(
+            "x-extra".into(),
+            serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap(),
+        );
+        assert_eq!(client_fingerprint(&client).unwrap(), original);
+        client.client_name = Some("updated name".into());
+        assert_ne!(client_fingerprint(&client).unwrap(), original);
+        client.client_name = None;
+        client.subject_type = "public".into();
+        assert_ne!(client_fingerprint(&client).unwrap(), original);
+    }
+
+    /// Programmatic flattened JWK extensions must not hide a changed dedicated
+    /// field when comparing the login registration with the issuance snapshot.
+    #[test]
+    fn registration_fingerprint_keeps_jwk_extensions_separate() {
+        let mut client: Client = serde_json::from_value(serde_json::json!({
+            "client_id": "rp", "jwks": {"keys": [{"kty": "EC", "kid": "original"}]}
+        }))
+        .unwrap();
+        client.jwks.as_mut().unwrap().keys[0]
+            .extra
+            .insert("kid".into(), serde_json::json!("extension"));
+        let original = client_fingerprint(&client).unwrap();
+        // The extension is unchanged; the independently accessible field is not.
+        client.jwks.as_mut().unwrap().keys[0].kid = Some("updated".into());
+        assert_ne!(client_fingerprint(&client).unwrap(), original);
+    }
 
     #[test]
     fn authenticating_authority_uses_configured_name_and_trusted_value() {
