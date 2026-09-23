@@ -1,0 +1,13 @@
+# Standalone HTTPS transport example: serves / and /health without identity
+# plugins. See the runnable TLS/HUP walkthrough in docs/src/configuration.md.
+# Set the three environment variables below before starting the server.
+base_url = "https://localhost:8443"
+state_encryption_key = "${TUNNELBANA_STATE_KEY}"
+
+[tls]
+cert_path = "${TUNNELBANA_TLS_CERT}"
+key_path = "${TUNNELBANA_TLS_KEY}"
+
+[logging]
+level = "info"
+format = "pretty"

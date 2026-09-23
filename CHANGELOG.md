@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 [2026-09-23]
 
+- **Dependencies:** align the workspace `kryptering` requirement with 0.5.0
+  and update `gamlastan` and `gamlastan-mdq` to 0.9.0, bringing the transitive
+  Bergshamra XML security crates to 0.9.1.
+- **Optional inbound TLS (ADR 0057):** configure `[tls]` with PEM `cert_path`
+  and `key_path` to serve HTTPS on `TUNNELBANA_BIND`. Unix SIGHUP atomically
+  reloads the pair for new full handshakes, retaining the previous certificate
+  on failure and preserving established connections. Omitting TLS keeps HTTP;
+  invalid startup material fails closed. The container health URL is selectable
+  through `TUNNELBANA_HEALTHCHECK_URL` for direct-TLS deployments.
 - **eduID MFA step-up (ADR 0056):** add the native `stepup` micro-service,
   consuming the optional Python SCIM adapter's linked-account decoration. It
   sends a signed, subject-bound exact-LoA SAML request; reuses the hardened
