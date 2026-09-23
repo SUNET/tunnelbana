@@ -1,6 +1,7 @@
 //! The tunnelbana identity proxy server (actix-web).
 
 mod reqwest_client;
+mod tls;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,8 +29,26 @@ async fn main() -> std::io::Result<()> {
 
     init_tracing(&cfg.logging);
 
+    // Register before binding so a ready server always has a HUP handler.
+    // Actix retains responsibility for its usual shutdown signals.
+    #[cfg(unix)]
+    let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+
+    // Validate the initial identity before opening a listener; a broken TLS
+    // configuration must never silently start a plain-HTTP server.
+    let tls = cfg
+        .tls
+        .as_ref()
+        .map(|config| tls::ReloadableTls::new(config, &config_path))
+        .transpose()?;
+
     let bind = std::env::var("TUNNELBANA_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    tracing::info!(base_url = %cfg.base_url, %bind, "starting tunnelbana");
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    tracing::info!(base_url = %cfg.base_url, %bind, scheme, "starting tunnelbana");
+    #[cfg(not(unix))]
+    if tls.is_some() {
+        tracing::warn!("SIGHUP certificate reload is available only on Unix; restart to renew TLS");
+    }
 
     // Resolve the index page once at boot. A configured but unreadable file is a
     // fatal config error (fail-fast), never a silent fall-back to the default.
@@ -45,7 +64,7 @@ async fn main() -> std::io::Result<()> {
     });
     let proxy = web::Data::new(Arc::new(proxy));
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(proxy.clone())
             .app_data(index_page.clone())
@@ -53,10 +72,30 @@ async fn main() -> std::io::Result<()> {
             .route("/assets/tunnelbana.png", web::get().to(logo))
             .route("/health", web::get().to(health))
             .default_service(web::to(handle))
-    })
-    .bind(&bind)?
-    .run()
-    .await
+    });
+    // Both transports use the same application and bind address. The TLS
+    // configuration's shared resolver remains reachable by the HUP loop.
+    let server = match &tls {
+        Some(tls) => server.bind_rustls_0_23(&bind, tls.server_config()?)?,
+        None => server.bind(&bind)?,
+    }
+    .run();
+
+    #[cfg(unix)]
+    {
+        // Dropping the reload future when the server stops prevents a detached
+        // signal task from extending the server's lifetime.
+        tokio::pin!(server);
+        tokio::select! {
+            result = &mut server => result,
+            () = tls::reload_on_hup(hup, tls) => {
+                tracing::error!("SIGHUP listener closed; certificate reload is unavailable");
+                server.await
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    server.await
 }
 
 fn init_tracing(logging: &tunnelbana_core::config::LoggingConfig) {

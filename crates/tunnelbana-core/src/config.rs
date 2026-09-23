@@ -113,6 +113,17 @@ impl PluginConfig {
     }
 }
 
+/// Optional inbound HTTPS identity. Paths are resolved relative to the main
+/// config file by the server; omitting this block selects plain HTTP.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// PEM certificate chain, with the server certificate first.
+    pub cert_path: String,
+    /// PEM unencrypted PKCS#1, PKCS#8, or SEC1 private key.
+    pub key_path: String,
+}
+
 /// The top-level proxy configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyConfig {
@@ -165,6 +176,9 @@ pub struct ProxyConfig {
     pub index_html: Option<String>,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Inbound TLS configuration, independent of the public `base_url` scheme.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
     /// Embedded Python runtime configuration. Required when a Python
     /// micro-service is configured.
     #[serde(default)]
@@ -245,6 +259,15 @@ impl ProxyConfig {
     }
 
     fn validate(&self) -> Result<()> {
+        // Absence selects HTTP; an explicitly configured TLS block must contain
+        // usable path strings. File and key validation belong to server startup.
+        if let Some(tls) = &self.tls {
+            if tls.cert_path.trim().is_empty() || tls.key_path.trim().is_empty() {
+                return Err(Error::Config(
+                    "tls.cert_path and tls.key_path must not be empty".into(),
+                ));
+            }
+        }
         if self.base_url.is_empty() {
             return Err(Error::Config("base_url must be set".into()));
         }
@@ -401,6 +424,47 @@ pub fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Preserve HTTP defaults while requiring a complete, non-empty TLS block
+    /// and rejecting unknown TLS settings before server startup.
+    #[test]
+    fn tls_configuration_is_optional_and_strict() {
+        let base = "base_url = \"https://x\"\nstate_encryption_key = \"a-32-byte-or-longer-test-secret!!\"\n";
+        assert!(ProxyConfig::from_str(base).unwrap().tls.is_none());
+        let cfg = ProxyConfig::from_str(&format!(
+            "{base}[tls]\ncert_path = \"../keys/fullchain.pem\"\nkey_path = \"/keys/key.pem\""
+        ))
+        .unwrap();
+        let tls = cfg.tls.unwrap();
+        assert_eq!(tls.cert_path, "../keys/fullchain.pem");
+        assert_eq!(tls.key_path, "/keys/key.pem");
+        for fields in [
+            "",
+            "cert_path = \"cert.pem\"",
+            "key_path = \"key.pem\"",
+            "cert_path = \" \"\nkey_path = \"key.pem\"",
+            "cert_path = \"cert.pem\"\nkey_path = \"\"",
+            "cert_path = \"cert.pem\"\nkey_path = \"key.pem\"\nenabled = true",
+        ] {
+            assert!(ProxyConfig::from_str(&format!("{base}[tls]\n{fields}")).is_err());
+        }
+    }
+
+    /// Resolve environment-backed TLS paths through the same interpolation
+    /// mechanism used by the rest of the proxy configuration.
+    #[test]
+    fn tls_paths_support_environment_interpolation() {
+        // A test-specific name avoids collisions with other environment tests.
+        std::env::set_var("TB_TEST_TLS_CERT_PATH", "/test/fullchain.pem");
+        let cfg = ProxyConfig::from_str(
+            "base_url = \"https://x\"\n\
+             state_encryption_key = \"a-32-byte-or-longer-test-secret!!\"\n\
+             [tls]\ncert_path = \"${TB_TEST_TLS_CERT_PATH}\"\nkey_path = \"key.pem\"",
+        )
+        .unwrap();
+        assert_eq!(cfg.tls.unwrap().cert_path, "/test/fullchain.pem");
+        std::env::remove_var("TB_TEST_TLS_CERT_PATH");
+    }
 
     #[test]
     fn parse_basic_config_with_plugins() {

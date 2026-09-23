@@ -2,6 +2,10 @@
 
 <img class="intro-logo" src="assets/tunnelbana.png" alt="tunnelbana logo">
 
+This guide covers tunnelbana **0.5.0**, released on **2026-09-23**, including
+[direct TLS with SIGHUP certificate renewal](configuration.md#inbound-tls-and-certificate-renewal),
+[eduID SCIM attributes](scim-attributes.md), and [MFA step-up](stepup.md).
+
 **tunnelbana** is a high-performance identity proxy written in Rust. Like
 [SATOSA](https://github.com/IdentityPython/SATOSA), it sits between identity
 protocols and translates between them: a **frontend** speaks to downstream
@@ -56,12 +60,19 @@ Two end-to-end **tutorials** then wire real federations together:
 
 ## A 30-second example
 
+For a standalone transport check, see the
+[runnable HTTPS and HUP example](configuration.md#runnable-local-https-and-hup-example).
+It demonstrates certificate renewal without an upstream IdP. The OIDC example
+below requires your upstream provider and client settings and uses a plain-HTTP
+listener behind an HTTPS reverse proxy.
+
 ```bash
 # Generate an EC P-256 signing key:
 mkdir -p keys
 openssl ecparam -genkey -name prime256v1 -noout -out keys/op.key
 
-# Run with a config file:
+# Configure the upstream in the TOML below, then run with a state secret:
+export TUNNELBANA_STATE_KEY="$(openssl rand -base64 48)"
 TUNNELBANA_BIND=127.0.0.1:8080 cargo run -p tunnelbana -- config/proxy.toml
 ```
 

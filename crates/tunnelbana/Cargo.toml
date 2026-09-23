@@ -15,7 +15,12 @@ tunnelbana-core = { path = "../tunnelbana-core" }
 tunnelbana-oidc = { path = "../tunnelbana-oidc" }
 tunnelbana-plugins = { path = "../tunnelbana-plugins" }
 tunnelbana-python = { path = "../tunnelbana-python" }
-actix-web.workspace = true
+actix-web = { workspace = true, features = ["rustls-0_23"] }
+# actix-tls selects newer actix-rt releases with opt-in signal support;
+# actix-server's built-in shutdown handling requires that feature.
+actix-rt = { version = "2.14", default-features = false, features = ["signal"] }
+rustls.workspace = true
+rustls-pemfile.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -25,3 +30,11 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 form_urlencoded.workspace = true
+
+[dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+tempfile = "3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.30", default-features = false, features = ["signal"] }

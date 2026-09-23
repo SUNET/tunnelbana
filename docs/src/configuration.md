@@ -10,11 +10,14 @@ TUNNELBANA_BIND=0.0.0.0:8080 tunnelbana config/proxy.toml
 `TUNNELBANA_BIND` (env) sets the listen address; it defaults to
 `127.0.0.1:8080`. Everything else lives in the config file.
 
+The container image also accepts `TUNNELBANA_HEALTHCHECK_URL` for its curl probe;
+this does not configure the server listener.
+
 ## Top-level keys
 
 ```toml
 base_url             = "https://proxy.example.com"  # required, no trailing slash
-state_encryption_key = "a-long-random-secret"       # required, >= 32 bytes
+state_encryption_key = "${TUNNELBANA_STATE_KEY}"     # required, >= 32 bytes
 cookie_name          = "TUNNELBANA_STATE"           # default
 cookie_secure        = true                          # default; set false for local http
 cookie_same_site     = "None"                        # default; None|Lax|Strict
@@ -44,6 +47,186 @@ index_html           = "index.html"                  # optional, custom landing 
 | `attributes` | | - | Path to the [attribute map](#the-attribute-map). Without it, no attribute translation happens. |
 | `cache_dir` | | - | Directory for cache persistence snapshots (e.g. federation metadata). |
 | `index_html` | | - | Path to a custom HTML file served verbatim at `/`. Without it, a [built-in landing page](#the-index-page) is served. |
+
+### Inbound TLS and certificate renewal
+
+Without a `[tls]` table the listener serves plain HTTP. This is also the mode
+to use behind Caddy or another TLS-terminating reverse proxy. To terminate TLS
+in tunnelbana, add:
+
+```toml
+[tls]
+cert_path = "../keys/fullchain.pem"
+key_path = "../keys/privkey.pem"
+```
+
+Place this top-level table after scalar settings such as `base_url` and
+`state_encryption_key`, and outside any plugin's configuration. For a main file
+at `config/proxy.toml`, these paths refer to `keys/fullchain.pem` and
+`keys/privkey.pem` in the repository root. These are the HTTPS identity files;
+the OIDC/SAML signing keys configured under plugins are separate.
+
+Both paths are required and must be non-empty; unknown keys in this table are
+rejected. Relative paths are resolved against the main config file's directory,
+and absolute paths and environment interpolation are supported. The certificate
+file contains PEM certificates in leaf-first order followed by intermediates.
+The key file contains exactly one unencrypted PKCS#1, PKCS#8, or SEC1 private
+key supported by rustls's ring provider. Certificate parsing and the leaf/key
+match are checked before listening; invalid material fails startup rather than
+falling back to HTTP. Clients still validate the hostname, validity dates and
+trust chain: the loader does not establish that the certificate is trusted.
+
+TLS uses the same `TUNNELBANA_BIND` address and port as HTTP, with TLS 1.2/1.3
+and HTTP/1.1 or HTTP/2. There is one selected transport, no additional HTTP
+listener or automatic redirect. Set `base_url` to the externally visible URL;
+it does not select the listener transport. Cookie settings remain explicit:
+keep `cookie_secure = true` for HTTPS, including HTTPS terminated at a reverse
+proxy. Local plain-HTTP testing requires appropriate cookie settings separately.
+
+On Unix, run the built binary directly so the saved PID identifies tunnelbana:
+
+```bash
+# Run from the repository root after configuring proxy.toml and its TLS files.
+cargo build --locked -p tunnelbana
+TUNNELBANA_BIND=127.0.0.1:8443 ./target/debug/tunnelbana config/proxy.toml &
+tunnelbana_pid=$!
+
+# After the renewal tool has installed BOTH files at the configured paths:
+kill -HUP "$tunnelbana_pid"
+```
+
+Set `base_url` to the public HTTPS URL, including the port when it is not 443.
+Send HUP to the server process, not a `cargo run` wrapper. Sending the signal
+does not wait for loading to finish; look for `TLS certificate reloaded` in the
+server log and verify the served certificate on a fresh connection. For a
+container use `docker kill --signal=HUP <container>`; for Compose use
+`docker compose kill --signal=HUP <service>`. Substitute the actual name without
+angle brackets. The image's exec-form entrypoint delivers HUP to tunnelbana.
+
+Each delivered SIGHUP reads both files again. Successful loading atomically
+replaces the complete certificate/key identity across all workers. New full TLS
+handshakes receive the new certificate; existing connections and ordinary TLS
+session resumption are unaffected. A failed reload logs an error and retains
+the last successfully loaded identity. Fix the files and send another HUP to
+retry. Rapid signals can be coalesced by the OS, so a renewal hook should signal
+once after publishing the pair. Log messages report successful reloads and
+failures without certificate or key contents.
+
+Symlinks are followed afresh on reload. Publishing a new directory containing
+the pair and atomically replacing a `live` symlink works. With separate file
+replacement, install both files before signaling. Mount certificate directories
+and any symlink targets in containers, rather than individual files whose
+bind mounts may keep pointing at an old inode. Give the running user read
+access on renewal too; the packaged image runs as UID/GID 10001. Keep private
+keys out of images and restrict their filesystem permissions.
+
+HUP does **not** reload `proxy.toml`, TLS paths, protocol signing keys, plugins,
+cookie secrets or the landing page. Those changes require a restart. In HTTP
+mode HUP is logged and ignored. SIGTERM retains Actix's graceful shutdown
+behavior. Non-Unix systems support HTTPS but require a restart for renewal.
+This feature does not provision certificates, configure mTLS or select multiple
+identities through SNI.
+
+#### Runnable local HTTPS and HUP example
+
+The following Unix walkthrough uses Bash, OpenSSL 3, curl with
+`--retry-all-errors` support, and the project's Rust/CPython build prerequisites.
+Run all blocks in the **same shell from the repository root**. Port 8443 must be
+free. The bundled `config/tls-example.toml` serves `/` and `/health` without
+frontends or backends, so this checks transport and renewal without an upstream
+identity provider. It uses environment interpolation for the certificate paths;
+`TUNNELBANA_TLS_CERT` and `TUNNELBANA_TLS_KEY` are example variables, not built-in
+server options.
+
+Create isolated test files and a short-lived self-signed localhost certificate:
+
+```bash
+cargo build --locked -p tunnelbana
+tls_demo_dir="$(mktemp -d)"
+export TUNNELBANA_STATE_KEY="$(openssl rand -base64 48)"
+export TUNNELBANA_TLS_CERT="$tls_demo_dir/fullchain.pem"
+export TUNNELBANA_TLS_KEY="$tls_demo_dir/privkey.pem"
+
+(umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -noenc -days 2 -set_serial 1 -subj /CN=localhost \
+  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+  -keyout "$TUNNELBANA_TLS_KEY" -out "$TUNNELBANA_TLS_CERT")
+
+TUNNELBANA_BIND=127.0.0.1:8443 \
+  ./target/debug/tunnelbana config/tls-example.toml \
+  > "$tls_demo_dir/server.log" 2>&1 &
+tls_demo_pid=$!
+
+curl --noproxy '*' --resolve localhost:8443:127.0.0.1 \
+  --retry 10 --retry-connrefused --retry-delay 1 --retry-max-time 15 --max-time 3 \
+  --fail --show-error --cacert "$TUNNELBANA_TLS_CERT" \
+  https://localhost:8443/health
+```
+
+Expect `{"status":"ok"}`. Curl trusts only the explicitly supplied test
+certificate for this example and verifies the localhost hostname; no `--insecure`
+option is needed. For production use your supplied certificate chain and key
+in your real proxy configuration.
+
+Generate a replacement with a new key and serial, install both files, then HUP:
+
+```bash
+(umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -noenc -days 2 -set_serial 2 -subj /CN=localhost \
+  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+  -keyout "$tls_demo_dir/next-key.pem" -out "$tls_demo_dir/next-cert.pem")
+
+mv "$tls_demo_dir/next-key.pem" "$TUNNELBANA_TLS_KEY"
+mv "$tls_demo_dir/next-cert.pem" "$TUNNELBANA_TLS_CERT"
+kill -HUP "$tls_demo_pid"
+
+# A fresh curl process verifies the server against the replacement certificate.
+# Brief retries allow the asynchronous HUP reload to finish.
+curl --noproxy '*' --resolve localhost:8443:127.0.0.1 \
+  --retry 10 --retry-all-errors --retry-delay 1 --retry-max-time 15 --max-time 3 \
+  --fail --show-error --cacert "$TUNNELBANA_TLS_CERT" \
+  https://localhost:8443/health
+
+grep 'TLS certificate reloaded' "$tls_demo_dir/server.log"
+kill -0 "$tls_demo_pid"
+```
+
+Expect another `{"status":"ok"}`, a `TLS certificate reloaded` log entry,
+and a successful `kill -0` confirming that the same process is still running.
+The new self-signed certificate has a different key, so the fresh curl request
+also checks that the replacement is actually being served. Before reload
+finishes, curl may report a certificate verification failure and then retry.
+
+Stop the demo when finished:
+
+```bash
+kill -TERM "$tls_demo_pid"
+wait "$tls_demo_pid"
+```
+
+The generated files and logs remain in `$tls_demo_dir` for inspection. For plain
+HTTP, omit the entire `[tls]` table in your configuration and use an `http://`
+health URL; HUP is then a logged no-op.
+
+#### Container health checks with direct TLS
+
+The image defaults to `TUNNELBANA_HEALTHCHECK_URL=http://127.0.0.1:8080/health`.
+When enabling TLS, use an HTTPS URL whose hostname matches the certificate and
+resolves to the local listener. Supply a trusted CA bundle for private PKI
+(for example through curl's `CURL_CA_BUNDLE` environment variable). Certificate
+verification remains enabled. Alternatively, override the Compose health check
+to explicitly resolve the certificate hostname to loopback:
+
+```yaml
+healthcheck:
+  test: ["CMD", "curl", "-fsS", "--resolve", "proxy.example.com:8080:127.0.0.1", "https://proxy.example.com:8080/health"]
+  interval: 30s
+  timeout: 3s
+  retries: 3
+```
+
+Use the configured listening port in both the URL and `--resolve`. Deployments
+that terminate TLS in Caddy continue to use the default HTTP health check.
 
 ### The index page
 

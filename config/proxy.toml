@@ -43,6 +43,18 @@ http_max_response_bytes = 8388608
 
 attributes = "config/attributes.toml"
 
+# Optional inbound HTTPS on TUNNELBANA_BIND. Omit this block for plain HTTP,
+# including deployments behind a TLS-terminating reverse proxy. Paths are
+# relative to this config file; provide the leaf certificate followed by its
+# intermediate certificates, and one unencrypted private key.
+# [tls]
+# cert_path = "../keys/fullchain.pem"
+# key_path = "../keys/privkey.pem"
+# Replace both files before `kill -HUP <server-pid>`; failed reloads retain
+# the previous certificate. TLS paths and other config changes need a restart.
+# See docs/src/configuration.md for a runnable HTTPS/HUP walkthrough using
+# config/tls-example.toml, including startup and certificate verification.
+
 [logging]
 level = "info"      # tracing EnvFilter directive, e.g. "info,tunnelbana=debug"
 format = "pretty"   # "pretty" or "json"

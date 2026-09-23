@@ -4,6 +4,8 @@
 
 # tunnelbana
 
+Current release: **0.5.0** (2026-09-23). See the [changelog](CHANGELOG.md#050-2026-09-23).
+
 A high-performance, SATOSA-like **identity proxy** in Rust. It translates between
 identity protocols (OpenID Connect, OAuth 2.0, OpenID Federation, and
 SAML 2.0) using a plugin architecture: a **frontend** speaks to downstream
@@ -142,6 +144,25 @@ TUNNELBANA_BIND=127.0.0.1:8080 cargo run -p tunnelbana -- config/proxy.toml
 ```
 
 Then e.g. `GET http://127.0.0.1:8080/OIDC/.well-known/openid-configuration`.
+
+To serve HTTPS directly, add a `[tls]` table to `proxy.toml`:
+
+```toml
+[tls]
+cert_path = "../keys/fullchain.pem"
+key_path = "../keys/privkey.pem"
+```
+
+Paths are relative to the config file. Replace both PEM files before sending
+`kill -HUP <pid>` (Unix) to renew the TLS identity without restarting. Failed
+reloads retain the previous certificate; existing connections stay open. Omit
+`[tls]` to keep plain HTTP, including behind a TLS-terminating reverse proxy.
+See the [TLS and renewal guide](docs/src/configuration.md#inbound-tls-and-certificate-renewal)
+for container health checks, file permissions, and reload limits.
+The [runnable HTTPS/HUP walkthrough](docs/src/configuration.md#runnable-local-https-and-hup-example)
+uses [config/tls-example.toml](config/tls-example.toml) to create a localhost
+certificate, start the binary with its actual PID, replace both files, signal
+HUP, and verify the replacement with curl. It requires no upstream IdP.
 
 ## Configuration
 
