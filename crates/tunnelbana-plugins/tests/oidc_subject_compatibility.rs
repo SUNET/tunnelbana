@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
+use tunnelbana_core::error::Error;
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, NullHttpClient};
@@ -22,6 +23,16 @@ fn signing_jwk() -> serde_json::Value {
 
 /// Build either OP using the same old-style configuration and subject pipeline.
 fn frontend(federation: bool, key: &serde_json::Value, kind: &str) -> Box<dyn Frontend> {
+    frontend_with_registration(federation, key, kind, Some(REDIRECT))
+}
+
+/// Rebuild either frontend with a replaced redirect or a removed registration.
+fn frontend_with_registration(
+    federation: bool,
+    key: &serde_json::Value,
+    kind: &str,
+    redirect: Option<&str>,
+) -> Box<dyn Frontend> {
     let mapper = AttributeMapper::from_toml(
         r#"
         user_id_from_attrs = ["existing-id"]
@@ -44,6 +55,11 @@ fn frontend(federation: bool, key: &serde_json::Value, kind: &str) -> Box<dyn Fr
             "subject_type": kind
         }]
     });
+    if let Some(redirect) = redirect {
+        config["clients"][0]["redirect_uris"] = serde_json::json!([redirect]);
+    } else {
+        config["clients"] = serde_json::json!([]);
+    }
     if federation {
         config["federation"] = serde_json::json!({
             "signing_jwk": key,
@@ -302,30 +318,125 @@ async fn registration_changes_across_login_are_rejected() {
     }
 }
 
-/// Pre-upgrade public cookies remain usable; an unbound pairwise login must
-/// restart because no validated registration snapshot exists for comparison.
+/// Every pre-upgrade cookie lacks trustworthy registration provenance, even
+/// when the current client is public. Both unchanged and changed policies must
+/// restart without issuing artifacts, retaining state and response mode.
 #[tokio::test]
-async fn pre_upgrade_cookies_have_an_explicit_compatibility_boundary() {
+async fn pre_upgrade_cookies_require_a_new_bound_login() {
+    let key = signing_jwk();
+    for federation in [false, true] {
+        for original_kind in ["public", "pairwise"] {
+            let old = frontend(federation, &key, original_kind);
+            for current_kind in ["public", "pairwise"] {
+                let current = frontend(federation, &key, current_kind);
+                for response_type in ["code", "code id_token token"] {
+                    let mut ctx = start(old.as_ref(), response_type).await;
+                    let request = ctx.state.get_value("OP", "authz_request").unwrap().clone();
+                    // Older cookies held the request but no client snapshot.
+                    // The current public/pairwise value cannot fill that gap.
+                    ctx.state.clear_namespace("OP");
+                    ctx.state.set_value("OP", "authz_request", request);
+                    let response = current
+                        .handle_authn_response(&mut ctx, identity(true))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        parameter(&response, "error").as_deref(),
+                        Some("unauthorized_client")
+                    );
+                    assert_eq!(
+                        parameter(&response, "state").as_deref(),
+                        Some("existing-state")
+                    );
+                    for name in ["code", "id_token", "access_token"] {
+                        assert!(parameter(&response, name).is_none());
+                    }
+                    let location = &response
+                        .headers
+                        .iter()
+                        .find(|(key, _)| key == "location")
+                        .unwrap()
+                        .1;
+                    assert_eq!(location.contains('#'), response_type != "code");
+                }
+            }
+        }
+    }
+}
+
+/// A stored request cannot authorize error redirects after the redirect URI or
+/// entire client registration is removed, on either completion or backend error.
+#[tokio::test]
+async fn invalidated_registrations_receive_local_errors() {
+    let key = signing_jwk();
+    for federation in [false, true] {
+        for kind in ["public", "pairwise"] {
+            let old = frontend(federation, &key, kind);
+            for redirect in [None, Some("https://rp.example.com/replacement")] {
+                let current = frontend_with_registration(federation, &key, kind, redirect);
+                for response_type in ["code", "code id_token token"] {
+                    let mut ctx = start(old.as_ref(), response_type).await;
+                    // Model an operator changing the registration during login.
+                    // Neither error path may navigate to its former redirect.
+                    let completion = current
+                        .handle_authn_response(&mut ctx, identity(true))
+                        .await
+                        .unwrap();
+                    let failure = current
+                        .handle_backend_error(&mut ctx, &Error::Authn("denied".into()))
+                        .await
+                        .unwrap();
+                    for response in [completion, failure] {
+                        assert!((400..600).contains(&response.status));
+                        assert!(!response
+                            .headers
+                            .iter()
+                            .any(|(name, _)| name.eq_ignore_ascii_case("location")));
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&response.body).unwrap();
+                        assert!(body["error"].is_string());
+                        for name in ["code", "id_token", "access_token"] {
+                            assert!(body.get(name).is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Backend errors still redirect with their original state and response mode
+/// when the registered client and redirect remain valid.
+#[tokio::test]
+async fn valid_registrations_keep_backend_error_redirects() {
     let key = signing_jwk();
     for federation in [false, true] {
         for kind in ["public", "pairwise"] {
             let frontend = frontend(federation, &key, kind);
-            let mut ctx = start(frontend.as_ref(), "code").await;
-            let request = ctx.state.get_value("OP", "authz_request").unwrap().clone();
-            // Old cookies contain the request but no registration fingerprint.
-            ctx.state.clear_namespace("OP");
-            ctx.state.set_value("OP", "authz_request", request);
-            let response = frontend
-                .handle_authn_response(&mut ctx, identity(true))
-                .await
-                .unwrap();
-            if kind == "public" {
-                assert!(parameter(&response, "code").is_some());
-            } else {
+            for response_type in ["code", "code id_token token"] {
+                let mut ctx = start(frontend.as_ref(), response_type).await;
+                // This legitimate control exercises the same renderer as the
+                // rejected stale-registration cases, including fragment mode.
+                let response = frontend
+                    .handle_backend_error(&mut ctx, &Error::Authn("denied".into()))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status, 302);
                 assert_eq!(
                     parameter(&response, "error").as_deref(),
-                    Some("unauthorized_client")
+                    Some("access_denied")
                 );
+                assert_eq!(
+                    parameter(&response, "state").as_deref(),
+                    Some("existing-state")
+                );
+                let location = &response
+                    .headers
+                    .iter()
+                    .find(|(key, _)| key == "location")
+                    .unwrap()
+                    .1;
+                assert_eq!(location.contains('#'), response_type != "code");
             }
         }
     }

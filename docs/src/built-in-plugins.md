@@ -87,9 +87,13 @@ Grindvakt 0.8.1. Existing subject selection is preserved: the response pipeline'
 hashing or automatic preference for `pairwise-id` is introduced. Operators using
 pairwise registrations own sector validation and must ensure the selected value
 has the required stability and isolation. A changed registration during login
-requires a new authorization. Older in-flight pairwise logins without a
-registration binding must restart once after upgrading; public login cookies
-remain usable. See [ADR 0058](../adr/0058-grindvakt-081-subject-compatibility.md).
+requires a new authorization. Every older in-flight OIDC login without a
+registration binding must restart once after upgrading, including public clients.
+Use a coordinated cutover and rollback: old and new workers must not consume
+each other's login cookies. Current registration validation also gates error
+redirects; removed clients or revoked redirects receive local errors. See
+[ADR 0058](../adr/0058-grindvakt-081-subject-compatibility.md) for the deployment
+procedure. Existing account identifiers and refresh tokens are preserved.
 
 Standard claims are released according to the requested scopes
 (`profile` for names, `email` for email claims), and UserInfo requires `openid`.

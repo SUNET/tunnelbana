@@ -50,9 +50,13 @@ consistency check, not an authentication credential.
 
 At issuance, Grindvakt passes the currently validated client to the resolver.
 Tunnelbana compares it with the login fingerprint before selecting the subject.
-A mismatch returns `unauthorized_client` with the request's original state and
-response mode. Grindvakt then checks for further registration changes or removal
-before minting. This is snapshot consistency, not a transaction excluding all
+A missing binding or mismatch returns `unauthorized_client`. Before redirecting
+any issuance or backend error, revalidate the stored authorization request
+against the current registration. Preserve the original state and response mode
+only while that validation succeeds; otherwise return the error locally without
+a `Location` header. A revoked redirect or removed client must never receive an
+error redirect based solely on old login state. Grindvakt also checks for further
+registration changes or removal before minting. This is snapshot consistency, not a transaction excluding all
 later writes; external sector policy remains operator-owned.
 
 ## Subject selection and operator responsibilities
@@ -91,12 +95,40 @@ derivation, token representations, and configured response services remain the
 same. Codes and refresh tokens keep their original subject at exchange; the
 upgrade does not derive it again. Process-local replay-store behavior is unchanged.
 
-New logins always carry a registration fingerprint. A public login cookie made
-by older code, without that field, may still complete. An older in-flight
-pairwise login must restart once: its registration cannot be bound safely after
-the fact. Do not fabricate a missing fingerprint from the current registration.
-Drain ongoing logins before rollout when even this one-time interruption is
-unacceptable. Already-issued refresh tokens do not require a login fingerprint.
+New logins always carry a registration fingerprint. Every older in-flight OIDC
+login without that field must restart once, including currently public clients:
+the current registration cannot prove which subject policy applied before login.
+Do not fabricate a missing fingerprint from the current registration. Already-
+issued refresh tokens do not require a login fingerprint.
+
+This upgrade requires a coordinated cutover, not a rolling deployment with
+mixed old/new workers sharing login cookies. Older code can decrypt the unchanged
+cookie envelope and ignore the added fingerprint. Therefore, a registration
+binding is enforced only when every worker that can consume its flow state
+implements these checks. Sticky routing alone is insufficient, including during
+failover or worker replacement.
+
+Deployment procedure:
+
+1. Stop admitting new authorization flows. Allow existing flows to drain on the
+   old workers if a one-time login restart is unacceptable.
+2. Remove and stop all old workers that can receive login callbacks before
+   routing any new login traffic to the upgraded deployment. New workers may be
+   prepared in isolation, but must not issue login cookies while old workers can
+   still consume them.
+3. Route authorization and callback traffic only to upgraded workers, including
+   failover capacity, then resume new logins. Unbound old flows restart safely.
+
+Rollback must also be coordinated. Stop new authorizations and stop issuing bound
+login state. Draining flows may reduce disruption, but completion only deletes
+the browser cookie; saved copies remain valid. Before older workers receive
+callbacks, every issued bound cookie must have expired under the rollback
+workers' configured finite `state_cookie_max_age`, allowing for clock skew, or
+that login state must be explicitly invalidated. With `state_cookie_max_age=0`,
+expiry is disabled, so draining or waiting is insufficient and explicit
+invalidation is required. Prefer expiry to rotating shared token secrets, which
+also invalidates existing codes and refresh tokens. No runtime mixed-version
+detection is provided by this change.
 
 The protocol hardening in Grindvakt 0.8 remains active: ordered query/form pairs,
 validated response modes, scope filtering, explicit RP signing-algorithm policy,
@@ -109,8 +141,11 @@ does not restore acceptance of malformed protocol requests or unsafe algorithms.
 pairwise clients, explicit subjects and attribute composition, code/implicit/
 hybrid responses, verified ID tokens, UserInfo, and refresh exchange after a
 frontend restart. It also checks registration changes across login and the
-pre-upgrade-cookie boundary. The existing federation test covers an omitted
-subject type during automatic registration. Existing full-proxy tests cover
+mandatory rejection of legacy cookies across original/current public and
+pairwise policies. It verifies local errors after redirect revocation or client
+removal, and preserves error redirects for unchanged valid registrations. The
+existing federation test covers an omitted subject type during automatic
+registration. Existing full-proxy tests cover
 requester restoration, silent login, DPoP, typed claims and refresh behavior.
 
 ## Alternatives

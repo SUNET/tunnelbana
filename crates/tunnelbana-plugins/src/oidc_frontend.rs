@@ -232,20 +232,31 @@ impl Frontend for OidcFrontend {
             .await
         {
             Ok(r) => Ok(r),
-            Err(e) => Ok(e.to_redirect(&req.redirect_uri, req.use_fragment())),
+            Err(error) => {
+                Ok(
+                    crate::oidc_common::authorization_error_response(&self.provider, &req, error)
+                        .await,
+                )
+            }
         }
     }
 
     async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result<Response> {
         tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
-        // If we have the in-flight request, redirect the error to the RP.
+        // A stored request may outlive its registration. Revalidate before
+        // redirecting any backend error to the RP.
         if let Some(req) = self.load_authz_request(ctx) {
             let oerr = crate::oidc_common::backend_authorization_error(
                 &req,
                 error,
                 ctx.interaction_required(),
             );
-            return Ok(oerr.to_redirect(&req.redirect_uri, req.use_fragment()));
+            return Ok(crate::oidc_common::authorization_error_response(
+                &self.provider,
+                &req,
+                oerr,
+            )
+            .await);
         }
         Ok(Response::text(500, "authentication could not be completed"))
     }

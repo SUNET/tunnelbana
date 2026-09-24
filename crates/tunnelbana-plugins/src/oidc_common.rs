@@ -8,10 +8,12 @@ use sha2::{Digest, Sha256};
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
 use tunnelbana_core::error::{Error, Result};
+use tunnelbana_core::http::Response;
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_oidc::client::Client;
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
+use tunnelbana_oidc::provider::Provider;
 use tunnelbana_oidc::request::AuthorizationRequest;
 
 /// Compact registration binding stored inside the authenticated flow cookie.
@@ -50,8 +52,8 @@ pub(crate) fn bind_authorization_client(
 /// Resolve the established subject only after matching the issuance registration
 /// to the login snapshot. Keep the historical subject_id/composition precedence;
 /// the configured response pipeline owns pairwise derivation and sector policy.
-/// A missing binding is accepted only for public clients, allowing pre-upgrade
-/// public login cookies to complete without accepting unbound pairwise output.
+/// Every login needs a binding: the current subject type cannot establish the
+/// policy used by older code when it created an unbound login cookie.
 pub(crate) fn resolve_authorization_subject(
     ctx: &Context,
     frontend: &str,
@@ -74,13 +76,12 @@ pub(crate) fn resolve_authorization_subject(
                 ));
             }
         }
-        None if client.subject_type != "public" => {
+        None => {
             return Err(OAuthError::new(
                 OAuthErrorCode::UnauthorizedClient,
-                "pairwise login predates registration binding; restart authorization",
+                "login has no registration binding; restart authorization",
             ));
         }
-        None => {}
     }
     response
         .subject_id
@@ -92,6 +93,22 @@ pub(crate) fn resolve_authorization_subject(
                 "no subject identifier available",
             )
         })
+}
+
+/// Redirect an authorization error only while the stored request still passes
+/// current registration validation. Login state alone does not authorize a
+/// revoked redirect URI; return the error locally when revalidation fails.
+/// Like issuance, this is a snapshot check rather than a lock on later writes.
+pub(crate) async fn authorization_error_response(
+    provider: &Provider,
+    req: &AuthorizationRequest,
+    error: OAuthError,
+) -> Response {
+    if provider.validate_authorization_request(req).await.is_ok() {
+        error.to_redirect(&req.redirect_uri, req.use_fragment())
+    } else {
+        error.to_response()
+    }
 }
 
 /// OIDC's default registered ID-token signing algorithm.

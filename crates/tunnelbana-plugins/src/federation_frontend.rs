@@ -684,7 +684,12 @@ impl Frontend for FederationFrontend {
             .await
         {
             Ok(r) => Ok(r),
-            Err(e) => Ok(e.to_redirect(&req.redirect_uri, req.use_fragment())),
+            Err(error) => {
+                Ok(
+                    crate::oidc_common::authorization_error_response(&self.provider, &req, error)
+                        .await,
+                )
+            }
         }
     }
 
@@ -696,7 +701,12 @@ impl Frontend for FederationFrontend {
                 error,
                 ctx.interaction_required(),
             );
-            return Ok(oerr.to_redirect(&req.redirect_uri, req.use_fragment()));
+            return Ok(crate::oidc_common::authorization_error_response(
+                &self.provider,
+                &req,
+                oerr,
+            )
+            .await);
         }
         Ok(Response::text(500, "authentication could not be completed"))
     }

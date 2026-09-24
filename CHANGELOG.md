@@ -15,8 +15,10 @@
   subject resolvers, preserving existing public/pairwise subjects and the
   federation registration default of `pairwise`. Login state binds the validated
   client registration to issuance; changes require a fresh authorization.
-  Pre-upgrade public login cookies remain usable; in-flight pairwise logins
-  without this binding must restart once. Standard claims follow the granted
+  All pre-upgrade OIDC logins without a binding must restart once. Deployment
+  and rollback require a coordinated cutover without mixed old/new workers
+  sharing login cookies. Error redirects revalidate the current registration;
+  removed clients and revoked redirects receive local errors. Standard claims follow the granted
   scopes, and UserInfo requires an end-user `openid` grant. Custom HTTP adapters must populate
   `HttpRequestData.query_pairs` / `form_pairs` for OIDC endpoints.
 - **Dependencies:** align the workspace `kryptering` requirement with 0.5.0

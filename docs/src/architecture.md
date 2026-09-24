@@ -28,7 +28,9 @@ resource-specific token audiences.
 Each OP frontend explicitly supplies its own `InMemoryTokenUseStore` to
 Grindvakt's fallible provider constructor, retaining the existing process-local
 replay protection. Authorization response generation is now asynchronous, and
-error redirects use the validated request's query/fragment response mode.
+error redirects use the validated request's query/fragment response mode. Both
+issuance and backend errors revalidate the request against the current client
+registration before redirecting; failed validation returns an error locally.
 
 Both OP frontends use Grindvakt 0.8.1's caller-managed subject resolver. A compact
 registration fingerprint in the authenticated login state binds the response
