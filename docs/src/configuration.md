@@ -569,11 +569,12 @@ must support the selected algorithm and jose-rs's AKP representation. Composite
 ML-DSA uses the draft JOSE representation implemented by jose-rs 0.7.0.
 
 Use authorization code flow (`response_type=code`) for PQC ID tokens. Grindvakt
-0.8.1 rejects hybrid and implicit combinations that require `c_hash` or `at_hash`
-because it does not define PQC hash mappings for those claims. Token signatures
-and public keys are larger, so size HTTP limits for the chosen algorithm.
-Enabling these algorithms does not change existing signing keys or the default
-upstream `RS256` verification policy; opt in through configuration.
+0.8.1 rejects hybrid and implicit combinations that require `c_hash` or
+`at_hash` because it does not define PQC hash mappings for those claims. Token
+signatures and public keys are larger, so increase HTTP size limits for the
+chosen algorithm. Enabling these algorithms does not change existing signing
+keys or the default upstream `RS256` verification policy; opt in through
+configuration.
 
 ## Validation
 
