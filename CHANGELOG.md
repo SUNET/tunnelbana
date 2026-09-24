@@ -1,10 +1,46 @@
 # Changelog
 
-## 0.5.0 [2026-09-23]
+## 0.5.0 [2026-09-24]
 
+- **Grindvakt 0.8.1 (ADR 0058):** migrate OIDC and federation frontends/backends
+  to the new protocol APIs, explicitly retain per-frontend in-memory token replay
+  stores, and preserve ordered query/form parameters so duplicate protocol
+  fields are rejected before parsing or federation resolution. Authorization
+  errors honor the validated query/fragment response mode. Upstream ID-token
+  verification now pins `id_token_signed_response_alg` (default `RS256`) and
+  accepts only the RP's own audience; deployments using another signing
+  algorithm must configure it explicitly. Reject unsupported crypto algorithms
+  such as `ES256K` at startup, alongside HMAC policies. Federation RP metadata publishes
+  that algorithm, and JWKS/UserInfo requests carry the issuer context required
+  by Grindvakt's endpoint validation. Both OP frontends use caller-managed
+  subject resolvers, preserving existing public/pairwise subjects and the
+  federation registration default of `pairwise`. Login state binds the validated
+  client registration to issuance; changes require a fresh authorization.
+  All pre-upgrade OIDC logins without a binding must restart once. Deployment
+  and rollback require a coordinated cutover without mixed old/new workers
+  sharing login cookies. Error redirects revalidate the current registration;
+  removed clients and revoked redirects receive local errors. Standard claims follow the granted
+  scopes, and UserInfo requires an end-user `openid` grant. Custom HTTP adapters must populate
+  `HttpRequestData.query_pairs` / `form_pairs` for OIDC endpoints.
+- **OIDC PQC signatures:** enable jose-rs 0.7.0's ML-DSA and composite ML-DSA
+  support in standard builds. Both OP frontends can issue PQC-signed ID tokens
+  in code flow; both RP backends can pin and verify these algorithms. AKP JWK
+  signing keys require an explicit `signing_algorithm`. Existing keys and the
+  default upstream `RS256` policy remain unchanged. Document configuration and
+  Grindvakt's restriction on response types requiring PQC `c_hash`/`at_hash`.
 - **Dependencies:** align the workspace `kryptering` requirement with 0.5.0
   and update `gamlastan` and `gamlastan-mdq` to 0.9.0, bringing the transitive
-  Bergshamra XML security crates to 0.9.1.
+  Bergshamra XML security crates to 0.9.1. Update `cryptoki` to 0.12.1
+  to address RUSTSEC-2026-0286 in the optional PKCS#11 backend.
+- **Security dependencies:** require rustls 0.23.45 (RUSTSEC-2026-0285),
+  update `actix-web` to 4.15.0, `actix-http` to 3.13.6, and the yanked
+  `chacha20` 0.10.1 to 0.10.2,
+  and replace the unmaintained `rustls-pemfile` wrapper with the maintained
+  `rustls-pki-types` PEM API re-exported by rustls. Preserve full-chain parsing,
+  exactly-one-key validation, sanitized errors, and TLS reload behavior.
+  The `h2` 0.3 advisory remains blocked by Actix's dependency constraint;
+  the RSA timing advisory still has no patched release. See
+  [dependency security notes](docs/dependency-security.md) for the constraints.
 - **Optional inbound TLS (ADR 0057):** configure `[tls]` with PEM `cert_path`
   and `key_path` to serve HTTPS on `TUNNELBANA_BIND`. Unix SIGHUP atomically
   reloads the pair for new full handshakes, retaining the previous certificate

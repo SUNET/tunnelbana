@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use jose_rs::JwsAlgorithm;
 use serde::Deserialize;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
@@ -18,6 +19,9 @@ use crate::keyload::load_signing_key;
 
 #[derive(Debug, Deserialize)]
 struct OidcBackendConfig {
+    /// Registered algorithm accepted for upstream ID tokens (RS256 by default).
+    #[serde(default = "crate::oidc_common::default_id_token_algorithm")]
+    id_token_signed_response_alg: JwsAlgorithm,
     /// Upstream issuer for discovery (used when explicit endpoints are absent).
     #[serde(default)]
     issuer: Option<String>,
@@ -62,6 +66,7 @@ pub struct OidcBackend {
 impl OidcBackend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
         let cfg: OidcBackendConfig = bx.parse_config()?;
+        crate::oidc_common::validate_id_token_algorithm(cfg.id_token_signed_response_alg)?;
 
         // Statically configured endpoints require an explicit `issuer`:
         // falling back to the authorization endpoint as the expected `iss`
@@ -210,7 +215,7 @@ impl Backend for OidcBackend {
             &nonce,
             Some(&challenge),
             extra,
-        );
+        )?;
         Ok(Response::redirect(url))
     }
 
@@ -269,21 +274,20 @@ impl Backend for OidcBackend {
         .await?;
 
         // Verify the id_token.
-        let id_token = tokens
-            .id_token
-            .as_ref()
-            .ok_or_else(|| Error::Authn("no id_token in token response".into()))?;
+        let id_token = &tokens.id_token;
         let jwks_uri = provider
             .jwks_uri
             .as_ref()
             .ok_or_else(|| Error::Config("provider has no jwks_uri".into()))?;
-        let jwks = rp::fetch_jwks(&self.http, jwks_uri).await?;
+        let jwks = rp::fetch_jwks(&self.http, jwks_uri, &provider.issuer).await?;
         let id_claims = rp::verify_id_token(
             &jwks,
             id_token,
             &provider.issuer,
             &self.client.client_id,
             Some(&nonce),
+            &[self.config.id_token_signed_response_alg],
+            &[],
         )?;
 
         let sub = id_claims
@@ -293,10 +297,15 @@ impl Backend for OidcBackend {
 
         // Merge id_token claims and userinfo.
         let mut merged = serde_json::to_value(&id_claims.extra).unwrap_or_default();
-        if let (Some(userinfo_ep), Some(access_token)) =
-            (&provider.userinfo_endpoint, &tokens.access_token)
-        {
-            let userinfo = rp::fetch_userinfo(&self.http, userinfo_ep, access_token).await?;
+        if let Some(userinfo_ep) = &provider.userinfo_endpoint {
+            let userinfo = rp::fetch_userinfo(
+                &self.http,
+                userinfo_ep,
+                &tokens.access_token,
+                &sub,
+                &provider.issuer,
+            )
+            .await?;
             require_matching_userinfo_subject(&userinfo, &sub)?;
             merge_json(&mut merged, &userinfo);
         }
@@ -496,6 +505,40 @@ mod build_tests {
             "token_endpoint": "https://op.example.com/token",
             "client_id": "rp-1",
         })
+    }
+
+    /// Reject HMAC ID-token policy at startup because this backend authenticates
+    /// the upstream signer using public JWKS, independently of client secrets.
+    #[test]
+    fn symmetric_id_token_policy_is_rejected_at_build() {
+        // Every HMAC variant maps to crypto but is unsuitable for public JWKS.
+        for algorithm in ["HS256", "HS384", "HS512"] {
+            let mut config = static_endpoints();
+            config["id_token_signed_response_alg"] = serde_json::json!(algorithm);
+            let error = OidcBackend::build(&bx(config))
+                .err()
+                .expect("build must fail");
+            assert!(matches!(error, Error::Config(_)), "{error}");
+            assert!(error.to_string().contains("asymmetric"), "{error}");
+        }
+    }
+
+    /// Fail startup for a recognized JOSE algorithm without crypto support,
+    /// instead of deferring the configuration failure to every login callback.
+    #[test]
+    fn unsupported_id_token_policy_is_rejected_at_build() {
+        let mut config = static_endpoints();
+        // jose-rs exposes ES256K in its enum but cannot verify its signatures.
+        config["id_token_signed_response_alg"] = serde_json::json!("ES256K");
+        let error = OidcBackend::build(&bx(config))
+            .err()
+            .expect("unsupported algorithm must fail at startup");
+        assert!(matches!(error, Error::Config(_)), "{error}");
+        assert!(error.to_string().contains("ES256K"), "{error}");
+        assert!(
+            error.to_string().contains("crypto implementation"),
+            "{error}"
+        );
     }
 
     #[test]

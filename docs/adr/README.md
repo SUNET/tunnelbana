@@ -56,3 +56,4 @@ accepted — supersede with a new record rather than editing history.
 | [0055](0055-eduid-scim-attributes-python-adapter.md) | eduID SCIM response enrichment through embedded Python | Accepted |
 | [0056](0056-eduid-mfa-stepup.md) | Native SAML response suspension for eduID MFA step-up | Accepted |
 | [0057](0057-inbound-tls-reload.md) | Optional inbound TLS with SIGHUP renewal | Accepted |
+| [0058](0058-grindvakt-081-subject-compatibility.md) | Grindvakt 0.8.1 and OIDC subject compatibility | Accepted |

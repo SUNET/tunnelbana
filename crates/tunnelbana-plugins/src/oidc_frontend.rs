@@ -13,7 +13,7 @@ use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, Route};
 use tunnelbana_oidc::client::InMemoryClientStore;
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
-use tunnelbana_oidc::provider::{Provider, TokenLifetimes};
+use tunnelbana_oidc::provider::{InMemoryTokenUseStore, Provider, TokenLifetimes};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::tokens::TokenCodec;
 
@@ -130,7 +130,17 @@ impl OidcFrontend {
             id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
             refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
-        let mut provider = Provider::new(metadata, signing_key, clients, codec, lifetimes);
+        let mut provider = Provider::new(
+            metadata,
+            signing_key,
+            clients,
+            codec,
+            lifetimes,
+            Arc::new(InMemoryTokenUseStore::new()),
+        )?
+        // Tunnelbana's configured response pipeline supplies the final subject.
+        // Keep existing identifiers and enable Grindvakt's bound resolver API.
+        .with_caller_managed_pairwise_subjects();
         if let Some(max_age) = cfg.client_assertion_max_age {
             provider = provider.with_client_assertion_max_age(max_age);
         }
@@ -193,13 +203,6 @@ impl Frontend for OidcFrontend {
         // Map internal attributes to OpenID claims.
         let mut external = self.mapper.from_internal("openid", &response.attributes);
 
-        // Subject id: explicit, else composed from configured attrs, else error.
-        let sub = response
-            .subject_id
-            .clone()
-            .or_else(|| self.mapper.compose_subject_id(&response.attributes))
-            .ok_or_else(|| Error::Authn("no subject identifier available".into()))?;
-
         let acr = response.auth_info.auth_class_ref.clone();
 
         let extra_claims = crate::oidc_common::authenticating_authority_claims(
@@ -208,28 +211,52 @@ impl Frontend for OidcFrontend {
             response.auth_info.issuer.as_deref(),
         );
 
-        match self.provider.authorization_redirect_with_claims(
-            &req,
-            &sub,
-            &external,
-            acr,
-            &extra_claims,
-        ) {
+        match self
+            .provider
+            .authorization_redirect_with_claims_and_subject_resolver(
+                &req,
+                |client| {
+                    crate::oidc_common::resolve_authorization_subject(
+                        ctx,
+                        &self.name,
+                        client,
+                        &response,
+                        &self.mapper,
+                    )
+                    .map_err(|error| error.with_state(req.state.clone()))
+                },
+                &external,
+                acr,
+                &extra_claims,
+            )
+            .await
+        {
             Ok(r) => Ok(r),
-            Err(e) => Ok(e.to_redirect(&req.redirect_uri)),
+            Err(error) => {
+                Ok(
+                    crate::oidc_common::authorization_error_response(&self.provider, &req, error)
+                        .await,
+                )
+            }
         }
     }
 
     async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result<Response> {
         tracing::warn!(frontend = %self.name, error = %error, "backend authentication failed");
-        // If we have the in-flight request, redirect the error to the RP.
+        // A stored request may outlive its registration. Revalidate before
+        // redirecting any backend error to the RP.
         if let Some(req) = self.load_authz_request(ctx) {
             let oerr = crate::oidc_common::backend_authorization_error(
                 &req,
                 error,
                 ctx.interaction_required(),
             );
-            return Ok(oerr.to_redirect(&req.redirect_uri));
+            return Ok(crate::oidc_common::authorization_error_response(
+                &self.provider,
+                &req,
+                oerr,
+            )
+            .await);
         }
         Ok(Response::text(500, "authentication could not be completed"))
     }
@@ -237,8 +264,8 @@ impl Frontend for OidcFrontend {
 
 impl OidcFrontend {
     async fn handle_authorization(&self, ctx: &mut Context) -> Result<FrontendAction> {
-        let params = ctx.request.query.clone();
-        let req = match AuthorizationRequest::from_params(&params) {
+        let params = &ctx.request.query_pairs;
+        let req = match AuthorizationRequest::from_pairs(params) {
             Ok(r) => r,
             Err(e) => return Ok(FrontendAction::Respond(e.to_response())),
         };
@@ -251,6 +278,7 @@ impl OidcFrontend {
 
         // Persist the request for the response path.
         self.store_authz_request(ctx, &req)?;
+        crate::oidc_common::bind_authorization_client(ctx, &self.name, &client)?;
 
         let mut request = InternalData::request(req.client_id.clone());
         if let Some(name) = client.client_name {
@@ -264,7 +292,7 @@ impl OidcFrontend {
     }
 
     async fn handle_token(&self, ctx: &mut Context) -> Response {
-        let form = ctx.request.form.clone();
+        let form = ctx.request.form_pairs.clone();
         let auth_header = ctx.request.authorization().map(|s| s.to_string());
         let method = ctx.request.method.clone();
         let token_url = format!("{}/token", self.issuer);
@@ -412,7 +440,7 @@ impl OidcFrontend {
             Ok(p) => p,
             Err(resp) => return resp,
         };
-        let presented_jkt = proof.as_ref().map(|p| p.jkt.as_str());
+        let presented_jkt = proof.as_ref().map(|p| p.jkt());
 
         match self.provider.userinfo(&token, presented_jkt).await {
             Ok(claims) => Response::json(&claims).unwrap_or_else(|e| {

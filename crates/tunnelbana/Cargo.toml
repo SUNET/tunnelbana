@@ -20,7 +20,6 @@ actix-web = { workspace = true, features = ["rustls-0_23"] }
 # actix-server's built-in shutdown handling requires that feature.
 actix-rt = { version = "2.14", default-features = false, features = ["signal"] }
 rustls.workspace = true
-rustls-pemfile.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true

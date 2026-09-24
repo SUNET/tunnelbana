@@ -20,7 +20,12 @@ without stopping the server or interrupting authentication flows.
   its existing shutdown handler when the TLS dependency selects newer runtimes.
 - Load a leaf-first PEM certificate chain and exactly one unencrypted supported
   private key, parse every certificate, and verify the leaf/key match before
-  accepting connections. Invalid startup material is fatal.
+  accepting connections. Invalid startup material is fatal. Parse PEM through
+  rustls's `pki_types::pem::PemObject` API, replacing the unmaintained
+  `rustls-pemfile` wrapper. Consume the complete iterator so duplicate keys and
+  malformed trailing sections remain errors; valid unrelated sections remain
+  allowed. Require rustls 0.23.45 or newer in the 0.23 series for the TLS 1.3
+  handshake encryption-level fix (RUSTSEC-2026-0285).
 - Share one `RwLock<Arc<CertifiedKey>>` resolver across all workers. Handshakes
   only clone the current identity under the read lock. On Unix SIGHUP, one
   serial loop loads a complete candidate on the blocking pool, then replaces

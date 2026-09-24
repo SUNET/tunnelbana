@@ -4,7 +4,7 @@
 //!
 //! Reproduces the behavior of the `satosa-federation` OpenIDFederationFrontend.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ use tunnelbana_oidc::client::{Client, ClientStore, InMemoryClientStore, AUTH_PRI
 use tunnelbana_oidc::federation::{self, TrustAnchors};
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
-use tunnelbana_oidc::provider::{Provider, TokenLifetimes};
+use tunnelbana_oidc::provider::{InMemoryTokenUseStore, Provider, TokenLifetimes};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::tokens::TokenCodec;
 
@@ -207,7 +207,6 @@ impl FederationFrontend {
             "client_registration_types_supported".into(),
             serde_json::json!(["automatic"]),
         );
-        metadata.request_parameter_supported = true;
 
         let client_list =
             crate::client_loader::load_clients(cfg.clients, cfg.clients_file.as_deref())?;
@@ -228,7 +227,19 @@ impl FederationFrontend {
             id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
             refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
-        let mut provider = Provider::new(metadata, op_key, dyn_store, codec, lifetimes);
+        let mut provider = Provider::new(
+            metadata,
+            op_key,
+            dyn_store,
+            codec,
+            lifetimes,
+            Arc::new(InMemoryTokenUseStore::new()),
+        )?
+        // Tunnelbana's configured response pipeline supplies the final subject.
+        // Keep existing identifiers and enable Grindvakt's bound resolver API.
+        .with_caller_managed_pairwise_subjects();
+        // This frontend validates signed request objects before calling the provider.
+        provider.metadata.request_parameter_supported = true;
         if let Some(max_age) = cfg.client_assertion_max_age {
             provider = provider.with_client_assertion_max_age(max_age);
         }
@@ -366,6 +377,8 @@ impl FederationFrontend {
                 .get("scope")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            // Preserve the federation frontend's historical pairwise default.
+            // The configured response pipeline owns the final subject mapping.
             subject_type: rp_meta
                 .get("subject_type")
                 .and_then(|v| v.as_str())
@@ -381,15 +394,16 @@ impl FederationFrontend {
     }
 
     /// Unpack and verify an RFC 9101 request object, merging its claims into the
-    /// flat parameter map.
+    /// ordered parameters without discarding repeated resource indicators.
     async fn unpack_request_object(
         &self,
-        params: &mut BTreeMap<String, String>,
+        params: &mut Vec<(String, String)>,
         client: &Client,
     ) -> Result<()> {
-        let Some(request_jwt) = params.remove("request") else {
+        let Some(index) = params.iter().position(|(name, _)| name == "request") else {
             return Ok(());
         };
+        let (_, request_jwt) = params.remove(index);
         let jwks = client
             .jwks
             .as_ref()
@@ -419,12 +433,14 @@ impl FederationFrontend {
         if let Some(obj) = merged.as_object() {
             for (k, v) in obj {
                 if let Some(s) = v.as_str() {
-                    if params.get(k).is_some_and(|outer| outer != s) {
+                    if params.iter().any(|(name, outer)| name == k && outer != s) {
                         return Err(Error::Authn(format!(
                             "request object parameter {k} conflicts with outer request"
                         )));
                     }
-                    params.insert(k.clone(), s.to_string());
+                    if !params.iter().any(|(name, _)| name == k) {
+                        params.push((k.clone(), s.to_string()));
+                    }
                 }
             }
         }
@@ -443,13 +459,27 @@ impl FederationFrontend {
     }
 
     async fn handle_authorization(&self, ctx: &mut Context) -> Result<FrontendAction> {
-        let mut params = ctx.request.query.clone();
+        let mut params = ctx.request.query_pairs.clone();
+        // JAR may supply required fields later, but duplicates must be rejected
+        // before client lookup or request-object merging can erase ambiguity.
+        let mut names = std::collections::BTreeSet::new();
+        for (name, _) in &params {
+            if name != "resource" && !names.insert(name) {
+                return Ok(FrontendAction::Respond(
+                    OAuthError::invalid_request(format!(
+                        "duplicate authorization parameter: {name}"
+                    ))
+                    .to_response(),
+                ));
+            }
+        }
 
         // The client_id is required to look up keys (for request objects) and to
         // auto-register.
         let client_id = params
-            .get("client_id")
-            .cloned()
+            .iter()
+            .find(|(name, _)| name == "client_id")
+            .map(|(_, value)| value.clone())
             .ok_or_else(|| Error::BadRequest("missing client_id".into()))?;
 
         // Ensure the client is known (auto-register from the federation if not).
@@ -480,7 +510,7 @@ impl FederationFrontend {
         };
 
         // Unpack a request object if present.
-        if params.contains_key("request") {
+        if params.iter().any(|(name, _)| name == "request") {
             if let Err(e) = self.unpack_request_object(&mut params, &client).await {
                 tracing::warn!(frontend = %self.name, client_id = %client_id, error = %e, "request object validation failed");
                 return Ok(FrontendAction::Respond(
@@ -490,15 +520,17 @@ impl FederationFrontend {
             }
         }
 
-        let req = match AuthorizationRequest::from_params(&params) {
+        let req = match AuthorizationRequest::from_pairs(&params) {
             Ok(r) => r,
             Err(e) => return Ok(FrontendAction::Respond(e.to_response())),
         };
-        if let Err(e) = self.provider.validate_authorization_request(&req).await {
-            return Ok(FrontendAction::Respond(e.to_response()));
-        }
+        let client = match self.provider.validate_authorization_request(&req).await {
+            Ok(client) => client,
+            Err(error) => return Ok(FrontendAction::Respond(error.to_response())),
+        };
 
         self.store_authz_request(ctx, &req)?;
+        crate::oidc_common::bind_authorization_client(ctx, &self.name, &client)?;
         let mut request = InternalData::request(req.client_id.clone());
         if let Some(name) = client.client_name {
             request.requester_name = vec![name];
@@ -511,7 +543,7 @@ impl FederationFrontend {
     }
 
     async fn handle_token(&self, ctx: &mut Context) -> Response {
-        let form = ctx.request.form.clone();
+        let form = ctx.request.form_pairs.clone();
         let auth_header = ctx.request.authorization().map(|s| s.to_string());
         // Audience for `private_key_jwt` is the advertised token endpoint, which
         // lives under the endpoint base — not necessarily the issuer/entity_id.
@@ -625,26 +657,39 @@ impl Frontend for FederationFrontend {
             .load_authz_request(ctx)
             .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
         let mut external = self.mapper.from_internal("openid", &response.attributes);
-        let sub = response
-            .subject_id
-            .clone()
-            .or_else(|| self.mapper.compose_subject_id(&response.attributes))
-            .ok_or_else(|| Error::Authn("no subject identifier available".into()))?;
         let acr = response.auth_info.auth_class_ref.clone();
         let extra_claims = crate::oidc_common::authenticating_authority_claims(
             &self.mapper,
             &mut external,
             response.auth_info.issuer.as_deref(),
         );
-        match self.provider.authorization_redirect_with_claims(
-            &req,
-            &sub,
-            &external,
-            acr,
-            &extra_claims,
-        ) {
+        match self
+            .provider
+            .authorization_redirect_with_claims_and_subject_resolver(
+                &req,
+                |client| {
+                    crate::oidc_common::resolve_authorization_subject(
+                        ctx,
+                        &self.name,
+                        client,
+                        &response,
+                        &self.mapper,
+                    )
+                    .map_err(|error| error.with_state(req.state.clone()))
+                },
+                &external,
+                acr,
+                &extra_claims,
+            )
+            .await
+        {
             Ok(r) => Ok(r),
-            Err(e) => Ok(e.to_redirect(&req.redirect_uri)),
+            Err(error) => {
+                Ok(
+                    crate::oidc_common::authorization_error_response(&self.provider, &req, error)
+                        .await,
+                )
+            }
         }
     }
 
@@ -656,7 +701,12 @@ impl Frontend for FederationFrontend {
                 error,
                 ctx.interaction_required(),
             );
-            return Ok(oerr.to_redirect(&req.redirect_uri));
+            return Ok(crate::oidc_common::authorization_error_response(
+                &self.provider,
+                &req,
+                oerr,
+            )
+            .await);
         }
         Ok(Response::text(500, "authentication could not be completed"))
     }

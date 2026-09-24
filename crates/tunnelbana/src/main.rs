@@ -312,7 +312,8 @@ fn build_request_data(req: &HttpRequest, body: &web::Bytes) -> HttpRequestData {
     let path = req.path().trim_start_matches('/').to_string();
     let method = req.method().as_str().to_uppercase();
 
-    let query: BTreeMap<String, String> = form_urlencoded_parse(req.query_string());
+    let query_pairs = form_urlencoded_parse(req.query_string());
+    let query = query_pairs.iter().cloned().collect();
 
     let mut headers = BTreeMap::new();
     for (name, value) in req.headers() {
@@ -326,11 +327,12 @@ fn build_request_data(req: &HttpRequest, body: &web::Bytes) -> HttpRequestData {
         .get("content-type")
         .map(|c| c.starts_with("application/x-www-form-urlencoded"))
         .unwrap_or(false);
-    let form = if is_form {
+    let form_pairs = if is_form {
         form_urlencoded_parse(std::str::from_utf8(body).unwrap_or(""))
     } else {
-        BTreeMap::new()
+        Vec::new()
     };
+    let form = form_pairs.iter().cloned().collect();
 
     let cookies = parse_cookies(headers.get("cookie").map(|s| s.as_str()).unwrap_or(""));
 
@@ -345,7 +347,9 @@ fn build_request_data(req: &HttpRequest, body: &web::Bytes) -> HttpRequestData {
         path,
         method,
         uri,
+        query_pairs,
         query,
+        form_pairs,
         form,
         body: body.to_vec(),
         headers,
@@ -353,7 +357,7 @@ fn build_request_data(req: &HttpRequest, body: &web::Bytes) -> HttpRequestData {
     }
 }
 
-fn form_urlencoded_parse(s: &str) -> BTreeMap<String, String> {
+fn form_urlencoded_parse(s: &str) -> Vec<(String, String)> {
     form_urlencoded::parse(s.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect()
@@ -384,6 +388,39 @@ fn to_actix(resp: Response) -> HttpResponse {
 mod tests {
     use super::*;
     use actix_web::{http::StatusCode, test};
+
+    /// Preserve repeated query/form fields through the HTTP adapter so protocol
+    /// parsers can reject duplicates without losing application convenience maps.
+    #[actix_web::test]
+    async fn request_adapter_preserves_duplicate_protocol_parameters() {
+        let request = test::TestRequest::post()
+            .uri("/OIDC/token?resource=first&resource=second&state=one&state=two")
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .to_http_request();
+        let body = web::Bytes::from_static(b"grant_type=first&grant_type=second");
+        let data = build_request_data(&request, &body);
+        assert_eq!(
+            data.query_pairs,
+            vec![
+                ("resource".into(), "first".into()),
+                ("resource".into(), "second".into()),
+                ("state".into(), "one".into()),
+                ("state".into(), "two".into()),
+            ]
+        );
+        assert_eq!(
+            data.form_pairs,
+            vec![
+                ("grant_type".into(), "first".into()),
+                ("grant_type".into(), "second".into()),
+            ]
+        );
+        assert_eq!(data.query.get("state").map(String::as_str), Some("two"));
+        assert_eq!(
+            data.form.get("grant_type").map(String::as_str),
+            Some("second")
+        );
+    }
 
     #[actix_web::test]
     async fn health_returns_status_ok() {
