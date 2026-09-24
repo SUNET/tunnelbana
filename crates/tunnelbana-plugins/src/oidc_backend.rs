@@ -511,12 +511,34 @@ mod build_tests {
     /// the upstream signer using public JWKS, independently of client secrets.
     #[test]
     fn symmetric_id_token_policy_is_rejected_at_build() {
+        // Every HMAC variant maps to crypto but is unsuitable for public JWKS.
+        for algorithm in ["HS256", "HS384", "HS512"] {
+            let mut config = static_endpoints();
+            config["id_token_signed_response_alg"] = serde_json::json!(algorithm);
+            let error = OidcBackend::build(&bx(config))
+                .err()
+                .expect("build must fail");
+            assert!(matches!(error, Error::Config(_)), "{error}");
+            assert!(error.to_string().contains("asymmetric"), "{error}");
+        }
+    }
+
+    /// Fail startup for a recognized JOSE algorithm without crypto support,
+    /// instead of deferring the configuration failure to every login callback.
+    #[test]
+    fn unsupported_id_token_policy_is_rejected_at_build() {
         let mut config = static_endpoints();
-        config["id_token_signed_response_alg"] = serde_json::json!("HS256");
+        // jose-rs exposes ES256K in its enum but cannot verify its signatures.
+        config["id_token_signed_response_alg"] = serde_json::json!("ES256K");
         let error = OidcBackend::build(&bx(config))
             .err()
-            .expect("build must fail");
-        assert!(error.to_string().contains("asymmetric"), "{error}");
+            .expect("unsupported algorithm must fail at startup");
+        assert!(matches!(error, Error::Config(_)), "{error}");
+        assert!(error.to_string().contains("ES256K"), "{error}");
+        assert!(
+            error.to_string().contains("crypto implementation"),
+            "{error}"
+        );
     }
 
     #[test]

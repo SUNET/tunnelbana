@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 [2026-09-23]
+## 0.5.0 [2026-09-24]
 
 - **Grindvakt 0.8.1 (ADR 0058):** migrate OIDC and federation frontends/backends
   to the new protocol APIs, explicitly retain per-frontend in-memory token replay
@@ -9,7 +9,8 @@
   errors honor the validated query/fragment response mode. Upstream ID-token
   verification now pins `id_token_signed_response_alg` (default `RS256`) and
   accepts only the RP's own audience; deployments using another signing
-  algorithm must configure it explicitly. Federation RP metadata publishes
+  algorithm must configure it explicitly. Reject unsupported crypto algorithms
+  such as `ES256K` at startup, alongside HMAC policies. Federation RP metadata publishes
   that algorithm, and JWKS/UserInfo requests carry the issuer context required
   by Grindvakt's endpoint validation. Both OP frontends use caller-managed
   subject resolvers, preserving existing public/pairwise subjects and the
@@ -21,6 +22,12 @@
   removed clients and revoked redirects receive local errors. Standard claims follow the granted
   scopes, and UserInfo requires an end-user `openid` grant. Custom HTTP adapters must populate
   `HttpRequestData.query_pairs` / `form_pairs` for OIDC endpoints.
+- **OIDC PQC signatures:** enable jose-rs 0.7.0's ML-DSA and composite ML-DSA
+  support in standard builds. Both OP frontends can issue PQC-signed ID tokens
+  in code flow; both RP backends can pin and verify these algorithms. AKP JWK
+  signing keys require an explicit `signing_algorithm`. Existing keys and the
+  default upstream `RS256` policy remain unchanged. Document configuration and
+  Grindvakt's restriction on response types requiring PQC `c_hash`/`at_hash`.
 - **Dependencies:** align the workspace `kryptering` requirement with 0.5.0
   and update `gamlastan` and `gamlastan-mdq` to 0.9.0, bringing the transitive
   Bergshamra XML security crates to 0.9.1. Update `cryptoki` to 0.12.1

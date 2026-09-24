@@ -117,6 +117,8 @@ pub(crate) fn default_id_token_algorithm() -> JwsAlgorithm {
 }
 
 /// Upstream JWKS contain public keys, so they cannot establish HMAC trust.
+/// Also require a crypto implementation; a recognized JOSE name alone does not
+/// guarantee verification support. This includes implemented PQC algorithms.
 pub(crate) fn validate_id_token_algorithm(algorithm: JwsAlgorithm) -> Result<()> {
     if matches!(
         algorithm,
@@ -126,6 +128,11 @@ pub(crate) fn validate_id_token_algorithm(algorithm: JwsAlgorithm) -> Result<()>
             "id_token_signed_response_alg must be an asymmetric signing algorithm".into(),
         ));
     }
+    algorithm.to_crypto().map_err(|_| {
+        Error::Config(format!(
+            "id_token_signed_response_alg {algorithm} has no supported crypto implementation"
+        ))
+    })?;
     Ok(())
 }
 

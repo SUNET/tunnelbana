@@ -422,7 +422,12 @@ the verified ID Token subject before any UserInfo attributes are merged.
 algorithm, independently of `signing_algorithm` used for outbound client
 assertions. It defaults to `RS256`; set it explicitly (for example, `ES256`) when
 the upstream registration uses another algorithm. HMAC (`HS*`) is rejected at
-startup because validation uses public JWKS. ID tokens must target this RP's
+startup because validation uses public JWKS. Algorithms without a crypto
+implementation, including `ES256K` in jose-rs 0.7.0, also fail at startup.
+ML-DSA and composite ML-DSA algorithms are available in standard builds; pin the
+exact algorithm used by the upstream registration (see
+[PQC signing keys](configuration.md#pqc-signing-keys-for-oidc)).
+ID tokens must target this RP's
 client ID without additional audiences. Token responses must include a nonempty
 ID token, access token, and Bearer token type. Remote issuers cannot use loopback
 HTTP endpoints; the HTTP development exception requires a loopback HTTP issuer.

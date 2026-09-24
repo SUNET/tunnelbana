@@ -16,7 +16,8 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 grindvakt = "0.8.1"
-jose-rs = { version = "0.7.0", default-features = false }
+# Make ML-DSA and composite ML-DSA available to OIDC signing and verification.
+jose-rs = { version = "0.7.0", default-features = false, features = ["post-quantum"] }
 gamlastan = "0.9.0"
 gamlastan-mdq = "0.9.0"
 

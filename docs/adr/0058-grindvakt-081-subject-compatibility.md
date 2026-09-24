@@ -135,6 +135,14 @@ validated response modes, scope filtering, explicit RP signing-algorithm policy,
 and upstream issuer checks. This decision preserves subject compatibility; it
 does not restore acceptance of malformed protocol requests or unsafe algorithms.
 
+Enable jose-rs 0.7.0's `post-quantum` feature for the workspace so configured
+ML-DSA and composite ML-DSA algorithms work for OIDC and federation. Upstream
+ID-token policy rejects HMAC and algorithms whose `to_crypto()` mapping fails,
+rather than restricting verification to a fixed list of classical algorithms.
+Default verification remains `RS256`. PQC signing uses AKP JWKs and an explicit
+algorithm; code flow avoids the undefined PQC `c_hash`/`at_hash` mappings rejected
+by Grindvakt. See the [PQC configuration guide](../src/configuration.md#pqc-signing-keys-for-oidc).
+
 ## Validation
 
 `oidc_subject_compatibility.rs` exercises both OP frontends with public and
@@ -147,6 +155,9 @@ removal, and preserves error redirects for unchanged valid registrations. The
 existing federation test covers an omitted subject type during automatic
 registration. Existing full-proxy tests cover
 requester restoration, silent login, DPoP, typed claims and refresh behavior.
+PQC integration tests exercise all nine jose-rs algorithms through both OP
+frontends and both RP backends, including public JWKS, federation signatures and
+client assertions. They retain default-policy and unsupported-flow rejection.
 
 ## Alternatives
 

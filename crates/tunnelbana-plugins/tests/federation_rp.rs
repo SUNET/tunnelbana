@@ -2,6 +2,8 @@
 //! a mocked trust-anchor resolve endpoint, and a full code flow with
 //! private_key_jwt client authentication and id_token verification.
 
+mod pqc;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -391,7 +393,7 @@ fn build_backend(
     build_backend_with_id_token_algorithm(http, fed_jwk, ta_pub, "ES256")
 }
 
-/// Configure the inbound ID-token algorithm independently of the RP's ES256
+/// Configure the inbound ID-token algorithm independently of the RP's
 /// federation key so tests can exercise the verification policy boundary.
 fn build_backend_with_id_token_algorithm(
     http: Arc<dyn HttpClient>,
@@ -405,7 +407,7 @@ fn build_backend_with_id_token_algorithm(
         "scope": "openid email",
         "federation": {
             "signing_jwk": fed_jwk,
-            "signing_algorithm": "ES256",
+            "signing_algorithm": fed_jwk["alg"],
             "signing_key_id": "rp-fed-1",
             "authority_hints": [TA_ID],
             "organization_name": "Tunnelbana Test RP",
@@ -486,14 +488,23 @@ fn network_with(
     rp_fed_jwk: &serde_json::Value,
     config: NetworkConfig,
 ) -> (Arc<MockNetwork>, serde_json::Value, serde_json::Value) {
+    network_with_op_key(rp_fed_jwk, config, ec_key("op-1"))
+}
+
+/// Choose an independent OP signing key to exercise upstream PQC verification.
+fn network_with_op_key(
+    rp_fed_jwk: &serde_json::Value,
+    config: NetworkConfig,
+    op_key: SigningKey,
+) -> (Arc<MockNetwork>, serde_json::Value, serde_json::Value) {
     let ta_key = ec_key("ta-1");
-    let op_key = ec_key("op-1");
     let ta_pub: serde_json::Value =
         serde_json::from_str(&ta_key.public_jwk().to_json().unwrap()).unwrap();
     // The RP's federation private signing JWK is fed to the backend as config;
     // the network serves its public companion.
     let rp_fed_key =
-        signing_key_from_jwk_json(&rp_fed_jwk.to_string(), Some("ES256"), None).unwrap();
+        signing_key_from_jwk_json(&rp_fed_jwk.to_string(), rp_fed_jwk["alg"].as_str(), None)
+            .unwrap();
     let fed_jwk = rp_fed_jwk.clone();
     let net = Arc::new(MockNetwork {
         ta_key,
@@ -504,6 +515,105 @@ fn network_with(
         token_form: Mutex::new(Vec::new()),
     });
     (net, fed_jwk, ta_pub)
+}
+
+/// Reject unsupported algorithms during federation RP construction, including
+/// HMAC variants that have crypto implementations but cannot use public JWKS.
+#[test]
+fn unsupported_id_token_policy_is_rejected_at_build() {
+    for algorithm in ["HS256", "HS384", "HS512", "ES256K"] {
+        let bx = BuildContext {
+            name: "OIDFedRP".into(),
+            base_url: "https://proxy.example.com".into(),
+            // Algorithm validation precedes key loading or network resolution.
+            config: serde_json::json!({"id_token_signed_response_alg": algorithm, "op_entity_id": OP_ID, "federation": {"trust_anchor": []}}),
+            attribute_mapper: mapper(),
+            http_client: Arc::new(tunnelbana_core::plugin::NullHttpClient),
+            secret: "s".into(),
+            previous_secrets: Vec::new(),
+        };
+        let error = tunnelbana_plugins::federation_backend::FederationBackend::build(&bx)
+            .err()
+            .expect("algorithm must fail at startup");
+        assert!(
+            matches!(error, tunnelbana_core::error::Error::Config(_)),
+            "{error}"
+        );
+        let expected = if algorithm == "ES256K" {
+            "crypto implementation"
+        } else {
+            "asymmetric"
+        };
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+/// Verify every supported PQC algorithm across federation metadata, request
+/// objects, client assertions and the upstream ID token, using real signatures.
+#[tokio::test]
+async fn pqc_full_code_flow_via_resolved_op() {
+    for (op_jwk, mut rp_jwk) in pqc::signing_keys().into_iter().zip(pqc::signing_keys()) {
+        let algorithm = op_jwk.alg.as_deref().unwrap();
+        let op_key =
+            signing_key_from_jwk_json(&op_jwk.to_json().unwrap(), Some(algorithm), None).unwrap();
+        // A separate RP key prevents accidental success with the OP's key.
+        assert_eq!(rp_jwk.alg, op_jwk.alg);
+        rp_jwk.kid = Some("rp-fed-1".into());
+        let (net, fed_jwk, ta_pub) = network_with_op_key(
+            &serde_json::to_value(rp_jwk).unwrap(),
+            NetworkConfig::default(),
+            op_key,
+        );
+        let backend =
+            build_backend_with_id_token_algorithm(net.clone(), fed_jwk, ta_pub, algorithm);
+
+        let BackendAction::Respond(response) = backend
+            .handle_endpoint(&mut ctx(), "entity_configuration")
+            .await
+            .unwrap()
+        else {
+            panic!("expected entity configuration");
+        };
+        let statement = tunnelbana_oidc::federation::verify_self_signed(
+            std::str::from_utf8(&response.body).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            statement.metadata("openid_relying_party").unwrap()["id_token_signed_response_alg"],
+            algorithm
+        );
+
+        let mut context = ctx();
+        let response = backend
+            .start_auth(&mut context, InternalData::request("https://sp.example"))
+            .await
+            .unwrap();
+        let url = location(&response);
+        let jar = qp(&url, "request").unwrap();
+        let validation = jose_rs::jwt::Validation::new()
+            .with_issuer(RP_ENTITY)
+            .with_audience(OP_ID);
+        tunnelbana_oidc::jwt::verify_with_jwks(&net.rp_pub_jwks, &jar, &validation).unwrap();
+        *net.nonce.lock().unwrap() = qp(&url, "nonce");
+        context
+            .request
+            .query
+            .insert("state".into(), qp(&url, "state").unwrap());
+        context
+            .request
+            .query
+            .insert("code".into(), "authcode-1".into());
+        // MockNetwork verifies the PQC client assertion before issuing the token.
+        let BackendAction::AuthResponse(data) = backend
+            .handle_endpoint(&mut context, "callback")
+            .await
+            .unwrap()
+        else {
+            panic!("expected verified authentication");
+        };
+        assert_eq!(data.subject_id.as_deref(), Some("fed-user-1"));
+        assert_eq!(data.auth_info.issuer.as_deref(), Some(OP_ID));
+    }
 }
 
 #[tokio::test]

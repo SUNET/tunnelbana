@@ -32,3 +32,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 form_urlencoded.workspace = true
+kryptering.workspace = true
