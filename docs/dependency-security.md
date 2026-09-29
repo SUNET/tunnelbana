@@ -1,8 +1,8 @@
 # Dependency security updates
 
-Reviewed on 2026-09-23 using `cargo audit --deny warnings` and the resolved
-dependency graph. This records targeted advisory remediation, not a general
-upgrade of unrelated dependencies or RustCrypto trait generations.
+Reviewed again for 0.5.1 on 2026-09-29 using `cargo audit --deny warnings`
+and the resolved dependency graph.
+The table below records the earlier 0.5.0 advisory remediations.
 
 | Dependency | Change | Result |
 | --- | --- | --- |
@@ -23,9 +23,9 @@ certificate files, SIGHUP renewal and HTTP/2 negotiation remain supported.
 ## Remaining advisories
 
 - **[RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258.html):**
-  `tunnelbana -> actix-web 4.15.0 -> actix-http 3.13.6 -> h2 0.3.27`.
+  `tunnelbana -> actix-web 4.15.0 -> actix-http 3.18.12 -> h2 0.3.27`.
   Actix Web 4.15.0 requires `actix-http = "3.13.3"`; the resolved
-  `actix-http` 3.13.6 still declares `h2 = "0.3.27"` and uses `http`
+  `actix-http` 3.18.12 still declares `h2 = "0.3.27"` and uses `http`
   0.2. The fixed h2 version is 0.4.16, outside that dependency constraint.
   An ordinary Cargo update cannot take it. Unblocking requires a patched h2 0.3
   release or an Actix release that adopts a fixed h2 line. Do not silently
@@ -39,13 +39,18 @@ The repository adds no advisory exceptions: the audit continues to fail on
 these two findings and reports no unmaintained or yanked dependency warnings.
 Recheck the constraints and advisory patch ranges when upstream releases land.
 
-## Verification
+## Verification for 0.5.1
 
-- `cargo test --locked --workspace --all-features`: 419 passed, including TLS
-  renewal process tests and the PEM parser compatibility regression.
+- `cargo build --locked --workspace --all-features`: passed.
+- `cargo test --locked --workspace --all-features`: 425 passed, none failed
+  or ignored, including TLS reload, SAML, OIDC/federation, post-quantum signing,
+  and embedded Python integration tests.
 - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`:
   passed.
-- `cargo fmt --all -- --check`, `git diff --check`, and the documentation book
-  build: passed.
-- `cargo audit --deny warnings`: fails only on the two advisories above; no
-  dependency warnings or new advisory exceptions.
+- `cargo +1.88.0 check --locked --workspace --all-targets --all-features`:
+  passed using an isolated target directory; the declared minimum is retained.
+- `cargo fmt --all -- --check`, `git diff --check`, and `mdbook build docs`:
+  passed. The book builder emits an existing mdbook-mermaid version warning
+  (preprocessor built for 0.5.4, installed mdbook 0.5.3).
+- `cargo audit --deny warnings`: still fails on the two advisories above;
+  no advisory exceptions were added.

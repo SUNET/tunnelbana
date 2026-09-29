@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.1 [2026-09-29]
+
+- **Dependencies:** update Grindvakt to 0.8.2, Gamlastan and Gamlastan MDQ
+  to 0.9.1, jose-rs to 0.7.1, and Kryptering to 0.6.0. The resolved XML
+  security stack uses Bergshamra 0.9.2. JOSE now rejects RSA-PSS-specific
+  PKCS#8/SPKI key imports that would lose algorithm restrictions during JWK
+  conversion; ordinary RSA keys remain supported.
+- Update compatible workspace dependencies and migrate to Reqwest 0.13.5,
+  TOML 1.1.6, Base64 0.23.1, rcgen 0.14.10, and nix 0.31.3. Adapt TLS test
+  fixtures to rcgen's renamed signing-key field. Reqwest now uses platform
+  certificate verification and the system trust store for outbound HTTPS;
+  container deployments need their CA certificates installed there.
+- Keep Rust 1.88 support, the existing Tera 1 template language, and the
+  RustCrypto generations required by the signing libraries. See the
+  [dependency security notes](docs/dependency-security.md) for the two
+  remaining upstream advisories.
+
 ## 0.5.0 [2026-09-24]
 
 - **Grindvakt 0.8.1 (ADR 0058):** migrate OIDC and federation frontends/backends

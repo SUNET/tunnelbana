@@ -127,7 +127,7 @@ impl Server {
 fn pair(dir: &Path) -> CertificateDer<'static> {
     let pair = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     std::fs::write(dir.join("cert.pem"), pair.cert.pem()).unwrap();
-    std::fs::write(dir.join("key.pem"), pair.key_pair.serialize_pem()).unwrap();
+    std::fs::write(dir.join("key.pem"), pair.signing_key.serialize_pem()).unwrap();
     pair.cert.der().clone()
 }
 
@@ -228,7 +228,7 @@ async fn certificate_renewal_survives_failures_and_preserves_connections() {
     let bad_key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     for replacement in [
         b"invalid PEM".to_vec(),
-        bad_key.key_pair.serialize_pem().into_bytes(),
+        bad_key.signing_key.serialize_pem().into_bytes(),
     ] {
         std::fs::write(dir.path().join("key.pem"), replacement).unwrap();
         server.signal(Signal::SIGHUP);

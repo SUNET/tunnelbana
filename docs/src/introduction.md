@@ -2,7 +2,7 @@
 
 <img class="intro-logo" src="assets/tunnelbana.png" alt="tunnelbana logo">
 
-This guide covers tunnelbana **0.5.0**, released on **2026-09-23**, including
+This guide covers tunnelbana **0.5.1**, released on **2026-09-29**, including
 [direct TLS with SIGHUP certificate renewal](configuration.md#inbound-tls-and-certificate-renewal),
 [eduID SCIM attributes](scim-attributes.md), and [MFA step-up](stepup.md).
 

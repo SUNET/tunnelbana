@@ -83,8 +83,8 @@ impl ReloadableTls {
     /// Build server-only TLS authentication using the shared identity resolver.
     /// Actix supplies HTTP/1.1 and HTTP/2 ALPN when attaching this configuration.
     pub(crate) fn server_config(&self) -> io::Result<ServerConfig> {
-        // Match the provider already used by our outbound reqwest client,
-        // without installing or relying on a process-global default provider.
+        // Select the inbound provider explicitly, without installing or relying
+        // on a process-global default shared with outbound HTTP clients.
         Ok(
             ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
                 .with_safe_default_protocol_versions()
@@ -196,7 +196,7 @@ mod tests {
     fn write_pair(dir: &Path) -> Vec<u8> {
         let pair = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         std::fs::write(dir.join("cert.pem"), pair.cert.pem()).unwrap();
-        std::fs::write(dir.join("key.pem"), pair.key_pair.serialize_pem()).unwrap();
+        std::fs::write(dir.join("key.pem"), pair.signing_key.serialize_pem()).unwrap();
         pair.cert.der().to_vec()
     }
 
@@ -227,7 +227,7 @@ mod tests {
         let unrelated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         std::fs::write(
             dir.path().join("key.pem"),
-            unrelated.key_pair.serialize_pem(),
+            unrelated.signing_key.serialize_pem(),
         )
         .unwrap();
         assert!(tls.reload().await.is_err());
