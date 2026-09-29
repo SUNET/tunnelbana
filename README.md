@@ -4,7 +4,7 @@
 
 # tunnelbana
 
-Current release: **0.5.0** (2026-09-23). See the [changelog](CHANGELOG.md#050-2026-09-23).
+Current release: **0.5.1** (2026-09-29). See the [changelog](CHANGELOG.md#051-2026-09-29).
 
 A high-performance, SATOSA-like **identity proxy** in Rust. It translates between
 identity protocols (OpenID Connect, OAuth 2.0, OpenID Federation, and

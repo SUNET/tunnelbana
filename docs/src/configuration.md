@@ -48,6 +48,11 @@ index_html           = "index.html"                  # optional, custom landing 
 | `cache_dir` | | - | Directory for cache persistence snapshots (e.g. federation metadata). |
 | `index_html` | | - | Path to a custom HTML file served verbatim at `/`. Without it, a [built-in landing page](#the-index-page) is served. |
 
+Starting with 0.5.1, the shared outbound HTTP client uses Reqwest 0.13 and
+platform certificate verification. Install trusted CA certificates in the system
+trust store (including inside the container for private CAs). Redirects remain
+disabled, and the configured timeouts and response-size limits still apply.
+
 ### Inbound TLS and certificate renewal
 
 Without a `[tls]` table the listener serves plain HTTP. This is also the mode
