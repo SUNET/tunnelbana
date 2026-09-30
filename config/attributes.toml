@@ -5,7 +5,7 @@
 # `oid` and `friendly_name` (used by the SAML frontend's
 # `attribute_name_format = "uri"` mode and matched inbound by the backend).
 
-user_id_from_attrs = ["edupersonprincipalname"]
+user_id_from_attrs = ["subject-id"]
 
 [attributes.mail]
 openid = ["email"]
@@ -29,23 +29,234 @@ saml = { names = ["displayName", "cn"], oid = "urn:oid:2.16.840.1.113730.3.1.241
 [attributes.authenticating_authority]
 openid = ["authenticating_authority"]
 
-[attributes.edupersonprincipalname]
+[attributes.subject-id]
 openid = ["sub"]
+saml = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }
+
+[attributes.pairwise-id]
+saml = { names = ["pairwise-id"], oid = "urn:oasis:names:tc:SAML:attribute:pairwise-id", friendly_name = "pairwise-id" }
+
+[attributes.assurance-certification]
+saml = { names = ["assurance-certification"], oid = "urn:oasis:names:tc:SAML:attribute:assurance-certification", friendly_name = "assurance-certification" }
+
+[attributes.personalidentitynumber]
+saml = { names = ["personalIdentityNumber"], oid = "urn:oid:1.2.752.29.4.13", friendly_name = "personalIdentityNumber" }
+
+[attributes.edupersonprincipalname]
 saml = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
 
-# Assurance values asserted by the initial and linked-account IdPs. The
-# step-up service maps and merges this attribute before the frontend releases
-# it under its normal policy.
 [attributes.edupersonassurance]
 saml = { names = ["eduPersonAssurance"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.11", friendly_name = "eduPersonAssurance" }
 
-# SAML subject-id (released by IdPs under the REFEDS Personalized Access
-# entity category instead of eduPersonPrincipalName). The internal name matches
-# eduID's literal `subject-id` so the `pairwiseid`/`nameid` micro-services see it.
-[attributes.subject-id]
-saml = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }
+[attributes.edupersonpriorprincipalname]
+saml = { names = ["eduPersonPriorPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.12", friendly_name = "eduPersonPriorPrincipalName" }
 
-# Pairwise identifier synthesized by the `pairwiseid` micro-service. Mapped so it
-# can also be released to an SP as a SAML attribute when desired.
-[attributes.pairwise-id]
-saml = { names = ["pairwise-id"], oid = "urn:oasis:names:tc:SAML:attribute:pairwise-id", friendly_name = "pairwise-id" }
+[attributes.edupersonscopedaffiliation]
+saml = { names = ["eduPersonScopedAffiliation"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.9", friendly_name = "eduPersonScopedAffiliation" }
+
+[attributes.edupersonaffiliation]
+saml = { names = ["eduPersonAffiliation"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.1", friendly_name = "eduPersonAffiliation" }
+
+[attributes.edupersonentitlement]
+saml = { names = ["eduPersonEntitlement"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.7", friendly_name = "eduPersonEntitlement" }
+
+[attributes.edupersonprimaryaffiliation]
+saml = { names = ["eduPersonPrimaryAffiliation"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.5", friendly_name = "eduPersonPrimaryAffiliation" }
+
+[attributes.edupersonnickname]
+saml = { names = ["eduPersonNickname"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.2", friendly_name = "eduPersonNickname" }
+
+[attributes.edupersonprimaryorgunitdn]
+saml = { names = ["eduPersonPrimaryOrgUnitDN"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.8", friendly_name = "eduPersonPrimaryOrgUnitDN" }
+
+[attributes.edupersonorgunitdn]
+saml = { names = ["eduPersonOrgUnitDN"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.4", friendly_name = "eduPersonOrgUnitDN" }
+
+[attributes.edupersonorgdn]
+saml = { names = ["eduPersonOrgDN"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.3", friendly_name = "eduPersonOrgDN" }
+
+[attributes.edupersonuniqueid]
+saml = { names = ["eduPersonUniqueId"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.13", friendly_name = "eduPersonUniqueId" }
+
+[attributes.edupersonorcid]
+saml = { names = ["eduPersonOrcid"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.16", friendly_name = "eduPersonOrcid" }
+
+[attributes.member]
+saml = { names = ["member"], oid = "urn:oid:1.3.6.1.4.1.5923.1.5.1.1", friendly_name = "member" }
+
+[attributes.educourseoffering]
+saml = { names = ["eduCourseOffering"], oid = "urn:oid:1.3.6.1.4.1.5923.1.6.1.1", friendly_name = "eduCourseOffering" }
+
+[attributes.educoursemember]
+saml = { names = ["eduCourseMember"], oid = "urn:oid:1.3.6.1.4.1.5923.1.6.1.2", friendly_name = "eduCourseMember" }
+
+[attributes.noredupersonlegalname]
+saml = { names = ["norEduPersonLegalName"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.10", friendly_name = "norEduPersonLegalName" }
+
+[attributes.noredupersonnin]
+saml = { names = ["norEduPersonNIN"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.5", friendly_name = "norEduPersonNIN" }
+
+[attributes.noredupersonlin]
+saml = { names = ["norEduPersonLIN"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.4", friendly_name = "norEduPersonLIN" }
+
+[attributes.noreduorgacronym]
+saml = { names = ["norEduOrgAcronym"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.6", friendly_name = "norEduOrgAcronym" }
+
+[attributes.noredupersonbirthdate]
+saml = { names = ["norEduPersonBirthDate"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.3", friendly_name = "norEduPersonBirthDate" }
+
+[attributes.noredupersonserviceauthnlevel]
+saml = { names = ["norEduPersonServiceAuthnLevel"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.13", friendly_name = "norEduPersonServiceAuthnLevel" }
+
+[attributes.noredupersonauthnmethod]
+saml = { names = ["norEduPersonAuthnMethod"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.14", friendly_name = "norEduPersonAuthnMethod" }
+
+[attributes.noreduorguniqueidentifier]
+saml = { names = ["norEduOrgUniqueIdentifier"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.7", friendly_name = "norEduOrgUniqueIdentifier" }
+
+[attributes.noreduorgunituniqueidentifier]
+saml = { names = ["norEduOrgUnitUniqueIdentifier"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.8", friendly_name = "norEduOrgUnitUniqueIdentifier" }
+
+[attributes.noreduorgnin]
+saml = { names = ["norEduOrgNIN"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.12", friendly_name = "norEduOrgNIN" }
+
+[attributes.noreduorguniquenumber]
+saml = { names = ["norEduOrgUniqueNumber"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.1", friendly_name = "norEduOrgUniqueNumber" }
+
+[attributes.noreduorgunituniquenumber]
+saml = { names = ["norEduOrgUnitUniqueNumber"], oid = "urn:oid:1.3.6.1.4.1.2428.90.1.2", friendly_name = "norEduOrgUnitUniqueNumber" }
+
+[attributes.schacmothertongue]
+saml = { names = ["schacMotherTongue"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.1", friendly_name = "schacMotherTongue" }
+
+[attributes.schacgender]
+saml = { names = ["schacGender"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.2", friendly_name = "schacGender" }
+
+[attributes.schacdateofbirth]
+saml = { names = ["schacDateOfBirth"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.3", friendly_name = "schacDateOfBirth" }
+
+[attributes.schacplaceofbirth]
+saml = { names = ["schacPlaceOfBirth"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.4", friendly_name = "schacPlaceOfBirth" }
+
+[attributes.schaccountryofcitizenship]
+saml = { names = ["schacCountryOfCitizenship"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.5", friendly_name = "schacCountryOfCitizenship" }
+
+[attributes.schacsn1]
+saml = { names = ["schacSn1"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.6", friendly_name = "schacSn1" }
+
+[attributes.schacsn2]
+saml = { names = ["schacSn2"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.7", friendly_name = "schacSn2" }
+
+[attributes.schacpersonaltitle]
+saml = { names = ["schacPersonalTitle"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.8", friendly_name = "schacPersonalTitle" }
+
+[attributes.schachomeorganization]
+saml = { names = ["schacHomeOrganization"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.9", friendly_name = "schacHomeOrganization" }
+
+[attributes.schachomeorganizationtype]
+saml = { names = ["schacHomeOrganizationType"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.10", friendly_name = "schacHomeOrganizationType" }
+
+[attributes.schaccountryofresidence]
+saml = { names = ["schacCountryOfResidence"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.11", friendly_name = "schacCountryOfResidence" }
+
+[attributes.schacuserpresenceid]
+saml = { names = ["schacUserPresenceID"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.12", friendly_name = "schacUserPresenceID" }
+
+[attributes.schacpersonalposition]
+saml = { names = ["schacPersonalPosition"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.13", friendly_name = "schacPersonalPosition" }
+
+[attributes.schacpersonaluniquecode]
+saml = { names = ["schacPersonalUniqueCode"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.14", friendly_name = "schacPersonalUniqueCode" }
+
+[attributes.schacpersonaluniqueid]
+saml = { names = ["schacPersonalUniqueID"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.15", friendly_name = "schacPersonalUniqueID" }
+
+[attributes.schacexpirydate]
+saml = { names = ["schacExpiryDate"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.17", friendly_name = "schacExpiryDate" }
+
+[attributes.schacuserprivateattribute]
+saml = { names = ["schacUserPrivateAttribute"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.18", friendly_name = "schacUserPrivateAttribute" }
+
+[attributes.schacuserstatus]
+saml = { names = ["schacUserStatus"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.19", friendly_name = "schacUserStatus" }
+
+[attributes.schacprojectmembership]
+saml = { names = ["schacProjectMembership"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.20", friendly_name = "schacProjectMembership" }
+
+[attributes.schacprojectspecificrole]
+saml = { names = ["schacProjectSpecificRole"], oid = "urn:oid:1.3.6.1.4.1.25178.1.2.21", friendly_name = "schacProjectSpecificRole" }
+
+[attributes.uid]
+saml = { names = ["uid"], oid = "urn:oid:0.9.2342.19200300.100.1.1", friendly_name = "uid" }
+
+[attributes.telephonenumber]
+saml = { names = ["telephoneNumber"], oid = "urn:oid:2.5.4.20", friendly_name = "telephoneNumber" }
+
+[attributes.title]
+saml = { names = ["title"], oid = "urn:oid:2.5.4.12", friendly_name = "title" }
+
+[attributes.initials]
+saml = { names = ["initials"], oid = "urn:oid:2.5.4.43", friendly_name = "initials" }
+
+[attributes.description]
+saml = { names = ["description"], oid = "urn:oid:2.5.4.13", friendly_name = "description" }
+
+[attributes.carlicense]
+saml = { names = ["carLicense"], oid = "urn:oid:2.16.840.1.113730.3.1.1", friendly_name = "carLicense" }
+
+[attributes.departmentnumber]
+saml = { names = ["departmentNumber"], oid = "urn:oid:2.16.840.1.113730.3.1.2", friendly_name = "departmentNumber" }
+
+[attributes.employeenumber]
+saml = { names = ["employeeNumber"], oid = "urn:oid:2.16.840.1.113730.3.1.3", friendly_name = "employeeNumber" }
+
+[attributes.employeetype]
+saml = { names = ["employeeType"], oid = "urn:oid:2.16.840.1.113730.3.1.4", friendly_name = "employeeType" }
+
+[attributes.maillocaladdress]
+saml = { names = ["mailLocalAddress"], oid = "urn:oid:2.16.840.1.113730.3.1.13", friendly_name = "mailLocalAddress" }
+
+[attributes.preferredlanguage]
+saml = { names = ["preferredLanguage"], oid = "urn:oid:2.16.840.1.113730.3.1.39", friendly_name = "preferredLanguage" }
+
+[attributes.manager]
+saml = { names = ["manager"], oid = "urn:oid:0.9.2342.19200300.100.1.10", friendly_name = "manager" }
+
+[attributes.seealso]
+saml = { names = ["seeAlso"], oid = "urn:oid:2.5.4.34", friendly_name = "seeAlso" }
+
+[attributes.facsimiletelephonenumber]
+saml = { names = ["facsimileTelephoneNumber"], oid = "urn:oid:2.5.4.23", friendly_name = "facsimileTelephoneNumber" }
+
+[attributes.street]
+saml = { names = ["street"], oid = "urn:oid:2.5.4.9", friendly_name = "street" }
+
+[attributes.postofficebox]
+saml = { names = ["postOfficeBox"], oid = "urn:oid:2.5.4.18", friendly_name = "postOfficeBox" }
+
+[attributes.postalcode]
+saml = { names = ["postalCode"], oid = "urn:oid:2.5.4.17", friendly_name = "postalCode" }
+
+[attributes.st]
+saml = { names = ["st"], oid = "urn:oid:2.5.4.8", friendly_name = "st" }
+
+[attributes.l]
+saml = { names = ["l"], oid = "urn:oid:2.5.4.7", friendly_name = "l" }
+
+[attributes.o]
+saml = { names = ["o"], oid = "urn:oid:2.5.4.10", friendly_name = "o" }
+
+[attributes.ou]
+saml = { names = ["ou"], oid = "urn:oid:2.5.4.11", friendly_name = "ou" }
+
+[attributes.businesscategory]
+saml = { names = ["businessCategory"], oid = "urn:oid:2.5.4.15", friendly_name = "businessCategory" }
+
+[attributes.physicaldeliveryofficename]
+saml = { names = ["physicalDeliveryOfficeName"], oid = "urn:oid:2.5.4.19", friendly_name = "physicalDeliveryOfficeName" }
+
+[attributes.friendlycountryname]
+saml = { names = ["friendlyCountryName"], oid = "urn:oid:0.9.2342.19200300.100.1.43", friendly_name = "friendlyCountryName" }
+
+[attributes.countryname]
+saml = { names = ["countryName"], oid = "urn:oid:2.5.4.6", friendly_name = "countryName" }
