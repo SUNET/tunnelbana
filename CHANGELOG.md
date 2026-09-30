@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 [2026-09-30]
+
+- Sync attribute map with Swamids Shibboleth recommendation
+
 ## 0.5.1 [2026-09-29]
 
 - **Dependencies:** update Grindvakt to 0.8.2, Gamlastan and Gamlastan MDQ
