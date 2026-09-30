@@ -48,9 +48,6 @@ saml = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1
 [attributes.edupersonassurance]
 saml = { names = ["eduPersonAssurance"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.11", friendly_name = "eduPersonAssurance" }
 
-[attributes.edupersontargetedid]
-saml = { names = ["eduPersonTargetedID"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.10", friendly_name = "eduPersonTargetedID" }
-
 [attributes.edupersonpriorprincipalname]
 saml = { names = ["eduPersonPriorPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.12", friendly_name = "eduPersonPriorPrincipalName" }
 
