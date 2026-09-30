@@ -466,7 +466,7 @@ names; the map translates at the edges.
 
 ```toml
 # config/attributes.toml
-user_id_from_attrs = ["edupersonprincipalname"]
+user_id_from_attrs = ["subject-id"]
 
 [attributes.mail]
 openid = ["email"]
@@ -482,6 +482,9 @@ openid = ["authenticating_authority"] # trusted upstream issuer claim
 [attributes.edupersonprincipalname]
 openid = ["sub"]
 saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
+
+[attributes.subject-id]
+saml   = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }
 ```
 
 - Each `[attributes.<internal>]` table lists the external names per profile. On
