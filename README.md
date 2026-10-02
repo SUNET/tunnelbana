@@ -40,6 +40,12 @@ purely by config + which plugins are loaded:
 
 …plus OpenID-Federation variants of the OIDC frontend/backend.
 
+## Contact
+
+Please join our Matrix room [#tunnelbana:matrix.org](https://matrix.to/#/#tunnelbana:matrix.org).
+
+For bug reports and patches, please create issues and pull requests at https://github.com/sunet/tunnelbana
+
 ## Workspace
 
 | Crate                | Role |
