@@ -512,6 +512,23 @@ impl Saml2Backend {
         Ok(())
     }
 
+    fn target_idp(&self, ctx: &Context) -> Option<String> {
+        let decorated_target = || {
+            ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        let target = if self.request_subject {
+            decorated_target()
+        } else {
+            ctx.request
+                .param("entityID")
+                .map(str::to_string)
+                .or_else(decorated_target)
+        };
+        target.or_else(|| self.idp_entity_id.clone())
+    }
+
     fn build_concrete(
         bx: &BuildContext,
         request_subject: bool,
@@ -1260,38 +1277,7 @@ impl Saml2Backend {
         // issuer, audience, correlation, time and replay validation. Python
         // receives a detached JSON copy through the existing decorations
         // boundary; it never receives the metadata object itself.
-        ctx.decorate(
-            KEY_PROVIDER_SCOPES,
-            serde_json::Value::Array(
-                provider_scopes
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-        ctx.decorate(
-            KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
-            serde_json::Value::Array(
-                provider_policy_values
-                    .assurance_certifications
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-        ctx.decorate(
-            KEY_PROVIDER_ENTITY_CATEGORIES,
-            serde_json::Value::Array(
-                provider_policy_values
-                    .entity_categories
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
+        publish_provider_metadata(ctx, provider_scopes, provider_policy_values);
 
         ctx.state.clear_namespace(&self.state_namespace);
 
@@ -1315,6 +1301,22 @@ impl Saml2Backend {
 
 const SHIBBOLETH_METADATA_NS: &str = "urn:mace:shibboleth:metadata:1.0";
 const SAML_METADATA_NS: &str = "urn:oasis:names:tc:SAML:2.0:metadata";
+
+fn publish_provider_metadata(
+    ctx: &mut Context,
+    scopes: &[String],
+    policy_values: &MetadataPolicyValues,
+) {
+    ctx.decorate(KEY_PROVIDER_SCOPES, serde_json::json!(scopes));
+    ctx.decorate(
+        KEY_PROVIDER_ASSURANCE_CERTIFICATIONS,
+        serde_json::json!(policy_values.assurance_certifications),
+    );
+    ctx.decorate(
+        KEY_PROVIDER_ENTITY_CATEGORIES,
+        serde_json::json!(policy_values.entity_categories),
+    );
+}
 
 fn trusted_idp_policy_values(entity: &EntityDescriptor) -> MetadataPolicyValues {
     let mut values = MetadataPolicyValues::default();
@@ -1504,24 +1506,11 @@ impl Backend for Saml2Backend {
         match &self.idp_metadata {
             IdpMetadata::Static { .. } => self.build_authn_redirect(ctx, None).await,
             IdpMetadata::Mdq(_) => {
-                let decorated_target = || {
-                    ctx.decoration(tunnelbana_core::context::KEY_TARGET_ENTITYID)
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                };
                 // A step-up target comes solely from the SCIM-derived,
                 // operator-mapped linked account. Never let an `entityID`
                 // query parameter on the initial IdP's ACS request override
                 // it. Ordinary backends retain discovery-parameter priority.
-                let target = if self.request_subject {
-                    decorated_target()
-                } else {
-                    ctx.request
-                        .param("entityID")
-                        .map(str::to_string)
-                        .or_else(decorated_target)
-                };
-                match target.or_else(|| self.idp_entity_id.clone()) {
+                match self.target_idp(ctx) {
                     Some(target) => self.build_authn_redirect(ctx, Some(&target)).await,
                     None => {
                         if request.is_passive {
@@ -1543,6 +1532,42 @@ impl Backend for Saml2Backend {
                 }
             }
         }
+    }
+
+    async fn restore_authn_context(
+        &self,
+        ctx: &mut Context,
+        response: &InternalData,
+    ) -> Result<bool> {
+        if self.request_subject {
+            return Ok(false);
+        }
+        let Some(issuer) = response
+            .auth_info
+            .issuer
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(false);
+        };
+        match &self.idp_metadata {
+            IdpMetadata::Static { policy_values, .. } => {
+                if self.idp_entity_id.as_deref() != Some(issuer) {
+                    return Ok(false);
+                }
+                publish_provider_metadata(ctx, &self.static_idp_scopes, policy_values);
+            }
+            IdpMetadata::Mdq(client) => {
+                if self.target_idp(ctx).is_some_and(|target| target != issuer) {
+                    return Ok(false);
+                }
+                let resolved = client.get(issuer).await.map_err(|error| {
+                    Error::Authn(format!("MDQ lookup for {issuer} failed: {error}"))
+                })?;
+                publish_provider_metadata(ctx, &resolved.scopes, &resolved.policy_values);
+            }
+        }
+        Ok(true)
     }
 
     async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<BackendAction> {

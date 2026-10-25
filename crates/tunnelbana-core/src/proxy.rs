@@ -89,14 +89,7 @@ impl Proxy {
         let result = self.dispatch(&mut ctx).await;
 
         let mut response = match result {
-            Ok(mut r) => {
-                r.headers.extend(
-                    ctx.set_cookies
-                        .drain(..)
-                        .map(|cookie| ("set-cookie".to_string(), cookie)),
-                );
-                r
-            }
+            Ok(r) => r,
             Err(e) => self.render_error(&mut ctx, e).await,
         };
 
@@ -117,6 +110,11 @@ impl Proxy {
                 }
             }
         }
+        response.headers.extend(
+            ctx.set_cookies
+                .into_iter()
+                .map(|cookie| ("set-cookie".to_string(), cookie)),
+        );
         response
     }
 
@@ -225,23 +223,27 @@ impl Proxy {
         // Select backend: explicit pin > micro-service pin > default.
         let backend_name = pinned_backend
             .or_else(|| ctx.target_backend.clone())
-            .or_else(|| self.default_backend.clone());
-        ctx.target_backend = backend_name.clone();
-
-        for ms in &self.microservices {
-            if let Some(mut response) = ms.try_authenticate(ctx, &request).await? {
-                response.requester = ctx.requester();
-                response.requester_name = request.requester_name;
-                return self.finish_response(ctx, response, 0).await;
-            }
-        }
-
-        let backend_name =
-            backend_name.ok_or_else(|| Error::Config("no backend configured".into()))?;
+            .or_else(|| self.default_backend.clone())
+            .ok_or_else(|| Error::Config("no backend configured".into()))?;
+        ctx.target_backend = Some(backend_name.clone());
         let backend = self
             .backends
             .get(&backend_name)
             .ok_or_else(|| Error::UnknownModule(backend_name.clone()))?;
+
+        if !request.force_authn {
+            for ms in &self.microservices {
+                if let Some(mut response) = ms.try_authenticate(ctx, &request).await? {
+                    if !backend.restore_authn_context(ctx, &response).await? {
+                        continue;
+                    }
+                    response.requester = ctx.requester();
+                    response.requester_name = request.requester_name;
+                    return self.finish_response(ctx, response, 0).await;
+                }
+            }
+        }
+
         backend.start_auth(ctx, request).await
     }
 
