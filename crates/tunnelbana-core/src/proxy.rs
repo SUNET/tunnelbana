@@ -827,6 +827,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forced_authentication_skips_session_hooks() {
+        struct SavedLogin;
+
+        #[async_trait::async_trait]
+        impl MicroService for SavedLogin {
+            fn name(&self) -> &str {
+                "saved-login"
+            }
+
+            async fn try_authenticate(
+                &self,
+                _ctx: &mut Context,
+                _request: &InternalData,
+            ) -> Result<Option<InternalData>> {
+                panic!("forced authentication must not reuse a saved login")
+            }
+        }
+
+        let proxy = Proxy::new(
+            vec![],
+            vec![Box::new(RecordingBackend {
+                received: Default::default(),
+            })],
+            vec![Box::new(SavedLogin)],
+            StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
+        );
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        let request = InternalData {
+            force_authn: true,
+            ..Default::default()
+        };
+        let response = proxy
+            .finish_request(&mut ctx, request, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"auth started");
+    }
+
+    #[tokio::test]
     async fn unhandled_error_returns_generic_body() {
         let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
         let proxy = Proxy::new(vec![], vec![], vec![], sealer);
