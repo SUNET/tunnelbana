@@ -4368,7 +4368,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -4394,7 +4394,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "flate2",
@@ -4413,14 +4413,14 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana-oidc"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "grindvakt",
 ]
 
 [[package]]
 name = "tunnelbana-plugins"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbana-python"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "pyo3",
