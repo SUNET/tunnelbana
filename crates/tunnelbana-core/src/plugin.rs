@@ -166,6 +166,14 @@ pub trait MicroService: Send + Sync {
         Ok(data)
     }
 
+    async fn try_authenticate(
+        &self,
+        _ctx: &mut Context,
+        _request: &InternalData,
+    ) -> Result<Option<InternalData>> {
+        Ok(None)
+    }
+
     /// Transform the response-path internal data (backend → frontend).
     async fn process_response(
         &self,
