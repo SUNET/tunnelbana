@@ -1539,7 +1539,7 @@ impl Backend for Saml2Backend {
         ctx: &mut Context,
         response: &InternalData,
     ) -> Result<bool> {
-        if self.request_subject {
+        if self.request_subject || !read_target_accr(ctx, &self.state_namespace).0.is_empty() {
             return Ok(false);
         }
         let Some(issuer) = response

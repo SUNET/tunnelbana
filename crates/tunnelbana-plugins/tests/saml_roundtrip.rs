@@ -1856,6 +1856,10 @@ async fn saml_backend_forwards_authn_constraints_upstream() {
     let xml = inflate_redirect_saml_request(&location_header(&resp));
     assert!(xml.contains(r#"ForceAuthn="true""#), "got {xml}");
     assert!(xml.contains(r#"IsPassive="true""#), "got {xml}");
+    ctx.decorate("target_authn_context_class_ref", serde_json::json!(["mfa"]));
+    let mut saved = InternalData::default();
+    saved.auth_info.issuer = Some(IDP_ENTITY.into());
+    assert!(!sp.restore_authn_context(&mut ctx, &saved).await.unwrap());
 }
 
 #[tokio::test]

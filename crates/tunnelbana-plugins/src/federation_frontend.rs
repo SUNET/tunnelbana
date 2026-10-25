@@ -529,13 +529,17 @@ impl FederationFrontend {
             Err(error) => return Ok(FrontendAction::Respond(error.to_response())),
         };
 
+        let mut request = InternalData::request(req.client_id.clone());
+        if let Err(error) = crate::oidc_common::apply_prompt_constraints(&req, &mut request) {
+            return Ok(FrontendAction::Respond(
+                error.to_redirect(&req.redirect_uri, req.use_fragment()),
+            ));
+        }
         self.store_authz_request(ctx, &req)?;
         crate::oidc_common::bind_authorization_client(ctx, &self.name, &client)?;
-        let mut request = InternalData::request(req.client_id.clone());
         if let Some(name) = client.client_name {
             request.requester_name = vec![name];
         }
-        crate::oidc_common::apply_prompt_constraints(&req, &mut request);
         Ok(FrontendAction::StartAuth {
             request,
             target_backend: self.backend.clone(),

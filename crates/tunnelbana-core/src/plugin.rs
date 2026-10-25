@@ -148,12 +148,13 @@ pub trait Backend: Send + Sync {
     /// Begin authentication with the upstream IdP/OP (returns e.g. a redirect).
     async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response>;
 
+    /// `Ok(true)` permits saved-login reuse; `Ok(false)` declines it.
     async fn restore_authn_context(
         &self,
         _ctx: &mut Context,
         _response: &InternalData,
     ) -> Result<bool> {
-        Ok(true)
+        Ok(false)
     }
 
     /// Handle an inbound hit on one of this backend's endpoints (e.g. ACS).

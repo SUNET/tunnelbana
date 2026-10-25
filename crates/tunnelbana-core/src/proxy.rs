@@ -854,6 +854,10 @@ mod tests {
             StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
         );
         let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        assert!(!proxy.backends["backend"]
+            .restore_authn_context(&mut ctx, &InternalData::default())
+            .await
+            .unwrap());
         let request = InternalData {
             force_authn: true,
             ..Default::default()
