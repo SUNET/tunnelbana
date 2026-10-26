@@ -1867,6 +1867,14 @@ async fn saml_backend_forwards_authn_constraints_upstream() {
     let mut saved = InternalData::default();
     saved.auth_info.issuer = Some(IDP_ENTITY.into());
     assert!(!sp.restore_authn_context(&mut ctx, &saved).await.unwrap());
+    let mut stale_ctx = Context::new(HttpRequestData::default(), State::new());
+    stale_ctx
+        .state
+        .set_value("SP", "target_accr", serde_json::json!(["mfa"]));
+    assert!(sp
+        .restore_authn_context(&mut stale_ctx, &saved)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

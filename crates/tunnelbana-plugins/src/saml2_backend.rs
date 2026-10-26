@@ -34,7 +34,7 @@ use gamlastan_mdq::{MdqClient, MdqError, MetadataFetcher, ReqwestFetcher};
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::{
     Context, KEY_PROVIDER_ASSURANCE_CERTIFICATIONS, KEY_PROVIDER_ENTITY_CATEGORIES,
-    KEY_PROVIDER_SCOPES, KEY_STEPUP_INITIAL_POLICY,
+    KEY_PROVIDER_SCOPES, KEY_STEPUP_INITIAL_POLICY, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
 };
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
@@ -1541,7 +1541,9 @@ impl Backend for Saml2Backend {
         ctx: &mut Context,
         response: &InternalData,
     ) -> Result<bool> {
-        if self.request_subject || !read_target_accr(ctx, &self.state_namespace).0.is_empty() {
+        if self.request_subject
+            || !decoration_string_array(ctx, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF).is_empty()
+        {
             return Ok(false);
         }
         let Some(issuer) = response
