@@ -160,12 +160,14 @@ impl HttpClient for MockFederation {
                 status: 404,
                 body: Vec::new(),
                 content_type: None,
+                ..Default::default()
             });
         };
         Ok(HttpFetchResponse {
             status: 200,
             body: body.into_bytes(),
             content_type: Some("application/entity-statement+jwt".into()),
+            ..Default::default()
         })
     }
 
@@ -179,6 +181,7 @@ impl HttpClient for MockFederation {
             status: 404,
             body: Vec::new(),
             content_type: None,
+            ..Default::default()
         })
     }
 }
@@ -667,6 +670,7 @@ impl HttpClient for FailingResolve {
                 status: 200,
                 body: body.into_bytes(),
                 content_type: Some("application/entity-statement+jwt".into()),
+                ..Default::default()
             });
         }
         if url.starts_with(&format!("{TA_ID}/resolve")) {
@@ -676,6 +680,7 @@ impl HttpClient for FailingResolve {
             status: 404,
             body: Vec::new(),
             content_type: None,
+            ..Default::default()
         })
     }
 
@@ -689,6 +694,7 @@ impl HttpClient for FailingResolve {
             status: 404,
             body: Vec::new(),
             content_type: None,
+            ..Default::default()
         })
     }
 }

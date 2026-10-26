@@ -662,6 +662,8 @@ impl Frontend for FederationFrontend {
             .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
         let mut external = self.mapper.from_internal("openid", &response.attributes);
         let acr = response.auth_info.auth_class_ref.clone();
+        let auth_time =
+            crate::authentication_time::unix_seconds(response.auth_info.timestamp.as_deref())?;
         let extra_claims = crate::oidc_common::authenticating_authority_claims(
             &self.mapper,
             &mut external,
@@ -669,7 +671,7 @@ impl Frontend for FederationFrontend {
         );
         match self
             .provider
-            .authorization_redirect_with_claims_and_subject_resolver(
+            .authorization_redirect_with_claims_subject_resolver_and_auth_time(
                 &req,
                 |client| {
                     crate::oidc_common::resolve_authorization_subject(
@@ -684,6 +686,7 @@ impl Frontend for FederationFrontend {
                 &external,
                 acr,
                 &extra_claims,
+                auth_time,
             )
             .await
         {

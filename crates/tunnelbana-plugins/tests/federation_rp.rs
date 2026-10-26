@@ -158,18 +158,21 @@ impl HttpClient for MockNetwork {
                 status: 200,
                 body: self.op_key.to_public_jwks().to_json().unwrap().into_bytes(),
                 content_type: Some("application/json".into()),
+                ..Default::default()
             });
         } else {
             return Ok(HttpFetchResponse {
                 status: 404,
                 body: Vec::new(),
                 content_type: None,
+                ..Default::default()
             });
         };
         Ok(HttpFetchResponse {
             status: 200,
             body: body.into_bytes(),
             content_type: Some(content_type_for(url).into()),
+            ..Default::default()
         })
     }
 
@@ -184,6 +187,7 @@ impl HttpClient for MockNetwork {
                 status: 404,
                 body: Vec::new(),
                 content_type: None,
+                ..Default::default()
             });
         }
         *self.token_form.lock().unwrap() = form.to_vec();
@@ -230,6 +234,7 @@ impl HttpClient for MockNetwork {
             status: 200,
             body: serde_json::to_vec(&body).unwrap(),
             content_type: Some("application/json".into()),
+            ..Default::default()
         })
     }
 }

@@ -40,7 +40,6 @@ use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
-use tunnelbana_core::util::now_rfc3339;
 
 use crate::saml_common::{
     build_mdq_client_with_fetcher, extract_cert_b64, verifier_from_cert_ders, MdqConfig,
@@ -1284,7 +1283,10 @@ impl Saml2Backend {
         let response = InternalData {
             auth_info: AuthenticationInformation {
                 auth_class_ref: authn_class_ref,
-                timestamp: Some(now_rfc3339()),
+                timestamp: assertion
+                    .authn_statements
+                    .first()
+                    .map(|statement| statement.authn_instant.to_rfc3339()),
                 issuer: Some(idp_entity_id),
             },
             requester: None,
