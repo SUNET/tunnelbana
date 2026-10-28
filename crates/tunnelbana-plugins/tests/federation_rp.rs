@@ -102,8 +102,8 @@ impl HttpClient for MockNetwork {
             let mut claims = jose_rs::jwt::Claims {
                 iss: Some(self.config.resolve_issuer.to_string()),
                 sub: Some(OP_ID.to_string()),
-                iat: Some(tunnelbana_core::util::now_secs()),
-                exp: Some(tunnelbana_core::util::now_secs() + 3600),
+                iat: Some(tunnelbana_core::util::now_secs().into()),
+                exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
                 ..Default::default()
             };
             claims.extra.insert(
@@ -211,8 +211,8 @@ impl HttpClient for MockNetwork {
             iss: Some(OP_ID.to_string()),
             sub: Some("fed-user-1".to_string()),
             aud: Some(jose_rs::jwt::Audience::Single(RP_ENTITY.to_string())),
-            iat: Some(now),
-            exp: Some(now + 600),
+            iat: Some(now.into()),
+            exp: Some((now + 600).into()),
             ..Default::default()
         };
         if let Some(nonce) = self.nonce.lock().unwrap().clone() {
@@ -328,8 +328,8 @@ fn entity_configuration(
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(issuer.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(tunnelbana_core::util::now_secs().into()),
+        exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
         ..Default::default()
     };
     claims
@@ -359,8 +359,8 @@ fn subordinate_statement(
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(issuer.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(tunnelbana_core::util::now_secs().into()),
+        exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
         ..Default::default()
     };
     claims
@@ -378,8 +378,8 @@ fn signed_jwks(key: &SigningKey, subject: &str) -> String {
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(subject.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(tunnelbana_core::util::now_secs().into()),
+        exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
         ..Default::default()
     };
     claims.extra.insert(

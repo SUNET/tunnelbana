@@ -205,7 +205,7 @@ async fn assert_tokens(
             .unwrap();
     assert_eq!(claims.sub.as_deref(), Some(expected));
     assert_eq!(claims.extra["auth_time"], serde_json::json!(1_577_934_245));
-    assert!(claims.iat.unwrap() > 1_577_934_245);
+    assert!(claims.iat.unwrap().as_secs() > 1_577_934_245);
     if let Some(access) = tokens["access_token"].as_str() {
         let mut ctx = Context::new(HttpRequestData::default(), State::new());
         ctx.request

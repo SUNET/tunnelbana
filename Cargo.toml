@@ -12,12 +12,12 @@ members = [
 version = "0.6.0"
 edition = "2021"
 license = "BSD-2-Clause"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.dependencies]
-grindvakt = { git = "https://github.com/kushaldas/grindvakt.git", rev = "5c5f8218d8a501c3acad71522f6227c4ee9cc7a7" }
+grindvakt = "0.10.0"
 # Make ML-DSA and composite ML-DSA available to OIDC signing and verification.
-jose-rs = { version = "0.7.1", default-features = false, features = ["post-quantum"] }
+jose-rs = { version = "0.10.0", default-features = false, features = ["post-quantum"] }
 gamlastan = "0.9.1"
 gamlastan-mdq = "0.9.1"
 
@@ -38,7 +38,7 @@ indexmap = { version = "2", features = ["serde"] }
 tera = "1.20.1"
 
 # Crypto helpers for PEM key loading (PEM -> SoftwareKey -> jose Jwk)
-kryptering = { version = "0.6.0", default-features = false }
+kryptering = { version = "0.7.0", default-features = false }
 rsa = "0.9"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
