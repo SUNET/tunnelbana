@@ -3326,6 +3326,7 @@ checksum = "6ec376e1216e0c929a74964ce2020012a1a39f32d80e78aa688721219ea7fb89"
 dependencies = [
  "pyo3",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
