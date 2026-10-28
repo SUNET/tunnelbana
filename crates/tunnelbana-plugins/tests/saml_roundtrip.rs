@@ -181,11 +181,13 @@ async fn saml_idp_signs_and_sp_verifies() {
     assert!(matches!(action, FrontendAction::StartAuth { .. }));
 
     // 2) Backend "authenticated" the user — IdP frontend renders a signed Response.
+    let authentication_time = (chrono::Utc::now() - chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut authenticated = InternalData {
         subject_id: Some("anna-persistent-id".to_string()),
         auth_info: AuthenticationInformation {
             auth_class_ref: Some("urn:oasis:names:tc:SAML:2.0:ac:classes:Password".into()),
-            timestamp: None,
+            timestamp: Some(authentication_time.clone()),
             issuer: Some("urn:upstream".into()),
         },
         ..Default::default()
@@ -229,6 +231,11 @@ async fn saml_idp_signs_and_sp_verifies() {
     assert_eq!(internal.attr_first("mail"), Some("anna@example.com"));
     assert_eq!(internal.attr_first("givenname"), Some("Anna"));
     assert_eq!(internal.auth_info.issuer.as_deref(), Some(IDP_ENTITY));
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(internal.auth_info.timestamp.as_deref().unwrap())
+            .unwrap(),
+        chrono::DateTime::parse_from_rfc3339(&authentication_time).unwrap()
+    );
     assert_eq!(
         sp_ctx.decorations["provider_scopes"],
         serde_json::json!(["static.example.org"])
@@ -1856,6 +1863,18 @@ async fn saml_backend_forwards_authn_constraints_upstream() {
     let xml = inflate_redirect_saml_request(&location_header(&resp));
     assert!(xml.contains(r#"ForceAuthn="true""#), "got {xml}");
     assert!(xml.contains(r#"IsPassive="true""#), "got {xml}");
+    ctx.decorate("target_authn_context_class_ref", serde_json::json!(["mfa"]));
+    let mut saved = InternalData::default();
+    saved.auth_info.issuer = Some(IDP_ENTITY.into());
+    assert!(!sp.restore_authn_context(&mut ctx, &saved).await.unwrap());
+    let mut stale_ctx = Context::new(HttpRequestData::default(), State::new());
+    stale_ctx
+        .state
+        .set_value("SP", "target_accr", serde_json::json!(["mfa"]));
+    assert!(sp
+        .restore_authn_context(&mut stale_ctx, &saved)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

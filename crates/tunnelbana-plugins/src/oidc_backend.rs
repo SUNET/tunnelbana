@@ -11,7 +11,7 @@ use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::{HttpClient, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
-use tunnelbana_core::util::{now_rfc3339, random_token};
+use tunnelbana_core::util::random_token;
 use tunnelbana_oidc::pkce;
 use tunnelbana_oidc::rp::{self, ClientAuth, ProviderInfo, RpClient};
 
@@ -320,7 +320,7 @@ impl Backend for OidcBackend {
                     .get("acr")
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                timestamp: Some(now_rfc3339()),
+                timestamp: crate::authentication_time::from_oidc(id_claims.extra.get("auth_time"))?,
                 issuer: Some(provider.issuer.clone()),
             },
             requester: None,

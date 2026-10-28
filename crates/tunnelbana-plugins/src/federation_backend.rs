@@ -34,7 +34,7 @@ use tunnelbana_core::http::{HttpClient, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::keys::SigningKey;
 use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
-use tunnelbana_core::util::{now_rfc3339, now_secs, random_token};
+use tunnelbana_core::util::{now_secs, random_token};
 use tunnelbana_oidc::discovery;
 use tunnelbana_oidc::federation::{self, TrustAnchors};
 use tunnelbana_oidc::pkce;
@@ -872,7 +872,7 @@ impl FederationBackend {
                     .get("acr")
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                timestamp: Some(now_rfc3339()),
+                timestamp: crate::authentication_time::from_oidc(id_claims.extra.get("auth_time"))?,
                 issuer: Some(op.provider.issuer.clone()),
             },
             requester: None,

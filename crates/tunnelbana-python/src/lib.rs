@@ -25,10 +25,12 @@ const CONTEXT_KEYS: &[&str] = &[
     "method",
     "query",
     "form",
+    "cookies",
     "requester",
     "target_backend",
     "target_frontend",
     "decorations",
+    "set_cookies",
 ];
 const DATA_KEYS: &[&str] = &[
     "auth_info",
@@ -291,6 +293,7 @@ struct PythonMicroServiceInner {
     class: String,
     instance: Py<PyAny>,
     has_request: bool,
+    has_authenticate: bool,
     has_response: bool,
     /// Configured backend names; the only values (besides `None`) accepted
     /// for a returned `target_backend`.
@@ -315,7 +318,7 @@ impl PythonMicroService {
         }
 
         let internal_attributes = bx.attribute_mapper.profile_mappings();
-        let built = Python::attach(|py| -> PyResult<(Py<PyAny>, bool, bool)> {
+        let built = Python::attach(|py| -> PyResult<(Py<PyAny>, bool, bool, bool)> {
             let module = py.import(config.module.as_str())?;
             let class = module.getattr(config.class.as_str())?;
             let inspect = py.import("inspect")?;
@@ -341,16 +344,22 @@ impl PythonMicroService {
                 class.call1((bx.name.as_str(), bx.base_url.as_str(), settings))?
             };
             let has_request = validate_method(py, &inspect, &instance, "process_request")?;
+            let has_authenticate = validate_method(py, &inspect, &instance, "try_authenticate")?;
             let has_response = validate_method(py, &inspect, &instance, "process_response")?;
-            if !has_request && !has_response {
+            if !has_request && !has_authenticate && !has_response {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
                     "at least one process method is required",
                 ));
             }
-            Ok((instance.unbind(), has_request, has_response))
+            Ok((
+                instance.unbind(),
+                has_request,
+                has_authenticate,
+                has_response,
+            ))
         });
 
-        let (instance, has_request, has_response) = built.map_err(|error| {
+        let (instance, has_request, has_authenticate, has_response) = built.map_err(|error| {
             Python::attach(|py| {
                 log_python_error(
                     py,
@@ -374,6 +383,7 @@ impl PythonMicroService {
                 class: config.class,
                 instance,
                 has_request,
+                has_authenticate,
                 has_response,
                 backends: backends.iter().cloned().collect(),
                 runtime,
@@ -386,14 +396,19 @@ impl PythonMicroService {
         phase: &'static str,
         ctx: &mut Context,
         data: InternalData,
-    ) -> Result<InternalData> {
+    ) -> Result<Option<InternalData>> {
         let method_exists = match phase {
             "request" => self.inner.has_request,
+            "authenticate" => self.inner.has_authenticate,
             "response" => self.inner.has_response,
             _ => false,
         };
         if !method_exists {
-            return Ok(data);
+            return Ok(if phase == "authenticate" {
+                None
+            } else {
+                Some(data)
+            });
         }
 
         let original = ContextSnapshot::from_context(ctx);
@@ -454,6 +469,23 @@ impl PythonMicroService {
             log_boundary_error(&self.inner, phase, "read-only context mutation");
             Error::Internal("python microservice returned invalid output".into())
         })?;
+        if phase == "authenticate" && output.context.target_backend != original.target_backend {
+            log_boundary_error(
+                &self.inner,
+                phase,
+                "authentication hook changed target_backend",
+            );
+            return Err(Error::Internal(
+                "python microservice returned invalid output".into(),
+            ));
+        }
+        output
+            .context
+            .validate_set_cookies(&original)
+            .map_err(|_| {
+                log_boundary_error(&self.inner, phase, "invalid Set-Cookie output");
+                Error::Internal("python microservice returned invalid output".into())
+            })?;
         output
             .context
             .validate_reserved_decorations(&original)
@@ -481,7 +513,8 @@ impl PythonMicroService {
         }
         ctx.target_backend = output.context.target_backend;
         ctx.decorations = output.context.decorations;
-        Ok(output.data.into())
+        ctx.set_cookies = output.context.set_cookies;
+        Ok(output.data.map(Into::into))
     }
 }
 
@@ -515,7 +548,7 @@ fn validate_method(
 
 struct CallOutput {
     context: ContextSnapshot,
-    data: InternalDataBoundary,
+    data: Option<InternalDataBoundary>,
 }
 
 fn run_python_call(
@@ -530,10 +563,10 @@ fn run_python_call(
                 .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid context"))?;
             let py_data = pythonize::pythonize(py, &data)
                 .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid data"))?;
-            let method_name = if phase == "request" {
-                "process_request"
-            } else {
-                "process_response"
+            let method_name = match phase {
+                "request" => "process_request",
+                "authenticate" => "try_authenticate",
+                _ => "process_response",
             };
             let returned = inner
                 .instance
@@ -553,16 +586,23 @@ fn run_python_call(
             // Both mappings are deserialized in full with unknown/missing fields
             // rejected. No partially converted values escape this closure.
             require_exact_keys(&py_context, CONTEXT_KEYS)?;
-            require_exact_keys(&returned, DATA_KEYS)?;
-            let auth_info = returned
-                .cast::<PyDict>()?
-                .get_item("auth_info")?
-                .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("invalid data result"))?;
-            require_exact_keys(&auth_info, AUTH_INFO_KEYS)?;
+            let data = if phase == "authenticate" && returned.is_none() {
+                None
+            } else {
+                require_exact_keys(&returned, DATA_KEYS)?;
+                let auth_info = returned
+                    .cast::<PyDict>()?
+                    .get_item("auth_info")?
+                    .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("invalid data result"))?;
+                require_exact_keys(&auth_info, AUTH_INFO_KEYS)?;
+                Some(
+                    pythonize::depythonize(&returned).map_err(|_| {
+                        pyo3::exceptions::PyTypeError::new_err("invalid data result")
+                    })?,
+                )
+            };
             let context = pythonize::depythonize(&py_context)
                 .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid context result"))?;
-            let data = pythonize::depythonize(&returned)
-                .map_err(|_| pyo3::exceptions::PyTypeError::new_err("invalid data result"))?;
             Ok(CallOutput { context, data })
         })();
 
@@ -673,10 +713,12 @@ struct ContextSnapshot {
     method: String,
     query: BTreeMap<String, String>,
     form: BTreeMap<String, String>,
+    cookies: BTreeMap<String, String>,
     requester: Option<String>,
     target_backend: Option<String>,
     target_frontend: Option<String>,
     decorations: BTreeMap<String, Value>,
+    set_cookies: Vec<String>,
 }
 
 impl ContextSnapshot {
@@ -686,10 +728,12 @@ impl ContextSnapshot {
             method: ctx.request.method.clone(),
             query: ctx.request.query.clone(),
             form: ctx.request.form.clone(),
+            cookies: ctx.request.cookies.clone(),
             requester: ctx.requester(),
             target_backend: ctx.target_backend.clone(),
             target_frontend: ctx.target_frontend.clone(),
             decorations: ctx.decorations.clone(),
+            set_cookies: ctx.set_cookies.clone(),
         }
     }
 
@@ -698,8 +742,26 @@ impl ContextSnapshot {
             || self.method != original.method
             || self.query != original.query
             || self.form != original.form
+            || self.cookies != original.cookies
             || self.requester != original.requester
             || self.target_frontend != original.target_frontend
+        {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    fn validate_set_cookies(&self, original: &Self) -> std::result::Result<(), ()> {
+        if !self.set_cookies.starts_with(&original.set_cookies)
+            || self
+                .set_cookies
+                .iter()
+                .skip(original.set_cookies.len())
+                .any(|cookie| {
+                    cookie.is_empty()
+                        || !cookie.is_ascii()
+                        || cookie.bytes().any(|byte| byte.is_ascii_control())
+                })
         {
             return Err(());
         }
@@ -798,7 +860,20 @@ impl MicroService for PythonMicroService {
     }
 
     async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData> {
-        self.execute("request", ctx, data).await
+        self.execute("request", ctx, data)
+            .await?
+            .ok_or_else(|| Error::Internal("python microservice returned invalid output".into()))
+    }
+
+    async fn try_authenticate(
+        &self,
+        ctx: &mut Context,
+        request: &InternalData,
+    ) -> Result<Option<InternalData>> {
+        if !self.inner.has_authenticate {
+            return Ok(None);
+        }
+        self.execute("authenticate", ctx, request.clone()).await
     }
 
     async fn process_response(
@@ -806,6 +881,8 @@ impl MicroService for PythonMicroService {
         ctx: &mut Context,
         data: InternalData,
     ) -> Result<InternalData> {
-        self.execute("response", ctx, data).await
+        self.execute("response", ctx, data)
+            .await?
+            .ok_or_else(|| Error::Internal("python microservice returned invalid output".into()))
     }
 }

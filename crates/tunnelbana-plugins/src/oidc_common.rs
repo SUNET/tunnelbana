@@ -223,11 +223,33 @@ pub(crate) fn authenticating_authority_claims(
     claims
 }
 
-/// Translate OIDC prompt constraints into the protocol-neutral request sent
+/// Translate OIDC freshness constraints into the protocol-neutral request sent
 /// through Tunnelbana's backend pipeline.
-pub(crate) fn apply_prompt_constraints(req: &AuthorizationRequest, request: &mut InternalData) {
-    request.force_authn = req.has_prompt("login");
+pub(crate) fn apply_prompt_constraints(
+    req: &AuthorizationRequest,
+    request: &mut InternalData,
+) -> std::result::Result<(), OAuthError> {
+    if let Some(max_age) = req.extra.get("max_age") {
+        if max_age.is_empty()
+            || !max_age.bytes().all(|byte| byte.is_ascii_digit())
+            || max_age.parse::<u64>().is_err()
+        {
+            return Err(
+                OAuthError::invalid_request("max_age must be a non-negative integer")
+                    .with_state(req.state.clone()),
+            );
+        }
+        if req.has_prompt("none") {
+            return Err(OAuthError::new(
+                OAuthErrorCode::LoginRequired,
+                "max_age requires fresh authentication",
+            )
+            .with_state(req.state.clone()));
+        }
+    }
+    request.force_authn = req.has_prompt("login") || req.extra.contains_key("max_age");
     request.is_passive = req.has_prompt("none");
+    Ok(())
 }
 
 /// Render a backend failure as an OIDC authorization error.
@@ -375,18 +397,26 @@ mod tests {
             ..Default::default()
         };
         let mut internal = InternalData::default();
-        apply_prompt_constraints(&req, &mut internal);
+        apply_prompt_constraints(&req, &mut internal).unwrap();
         assert!(internal.force_authn);
         assert!(internal.is_passive);
 
-        let req = AuthorizationRequest {
+        let mut req = AuthorizationRequest {
             prompt: Some("Login nonetheless".into()),
             ..Default::default()
         };
         let mut internal = InternalData::default();
-        apply_prompt_constraints(&req, &mut internal);
+        apply_prompt_constraints(&req, &mut internal).unwrap();
         assert!(!internal.force_authn);
         assert!(!internal.is_passive);
+        req.prompt = None;
+        req.extra.insert("max_age".into(), "0".into());
+        apply_prompt_constraints(&req, &mut internal).unwrap();
+        assert!(internal.force_authn);
+        req.prompt = Some("none".into());
+        assert!(apply_prompt_constraints(&req, &mut internal).is_err());
+        req.extra.insert("max_age".into(), "-1".into());
+        assert!(apply_prompt_constraints(&req, &mut internal).is_err());
     }
 
     #[test]

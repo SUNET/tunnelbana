@@ -80,6 +80,7 @@ pub struct Context {
     pub state: State,
     /// Ad-hoc per-request data not persisted to the cookie.
     pub decorations: BTreeMap<String, Value>,
+    pub set_cookies: Vec<String>,
 }
 
 impl Context {
@@ -90,6 +91,7 @@ impl Context {
             target_frontend: None,
             state,
             decorations: BTreeMap::new(),
+            set_cookies: Vec::new(),
         }
     }
 

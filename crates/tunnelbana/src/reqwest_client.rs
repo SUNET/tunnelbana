@@ -94,6 +94,16 @@ async fn into_fetch(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+    let headers = resp
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+        })
+        .collect();
     if resp
         .content_length()
         .is_some_and(|length| length > max_response_bytes as u64)
@@ -118,6 +128,7 @@ async fn into_fetch(
         status,
         body,
         content_type,
+        headers,
     })
 }
 
@@ -164,6 +175,10 @@ mod tests {
         let client = ReqwestClient::new();
         let resp = client.get(&format!("http://{addr}/start")).await.unwrap();
         assert_eq!(resp.status, 307, "redirects must surface, not be followed");
+        assert_eq!(
+            resp.header("location"),
+            Some("http://127.0.0.1:1/elsewhere")
+        );
         server.await.unwrap();
     }
 

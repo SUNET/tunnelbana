@@ -102,8 +102,8 @@ impl HttpClient for MockNetwork {
             let mut claims = jose_rs::jwt::Claims {
                 iss: Some(self.config.resolve_issuer.to_string()),
                 sub: Some(OP_ID.to_string()),
-                iat: Some(tunnelbana_core::util::now_secs()),
-                exp: Some(tunnelbana_core::util::now_secs() + 3600),
+                iat: Some(tunnelbana_core::util::now_secs().into()),
+                exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
                 ..Default::default()
             };
             claims.extra.insert(
@@ -158,18 +158,21 @@ impl HttpClient for MockNetwork {
                 status: 200,
                 body: self.op_key.to_public_jwks().to_json().unwrap().into_bytes(),
                 content_type: Some("application/json".into()),
+                ..Default::default()
             });
         } else {
             return Ok(HttpFetchResponse {
                 status: 404,
                 body: Vec::new(),
                 content_type: None,
+                ..Default::default()
             });
         };
         Ok(HttpFetchResponse {
             status: 200,
             body: body.into_bytes(),
             content_type: Some(content_type_for(url).into()),
+            ..Default::default()
         })
     }
 
@@ -184,6 +187,7 @@ impl HttpClient for MockNetwork {
                 status: 404,
                 body: Vec::new(),
                 content_type: None,
+                ..Default::default()
             });
         }
         *self.token_form.lock().unwrap() = form.to_vec();
@@ -207,8 +211,8 @@ impl HttpClient for MockNetwork {
             iss: Some(OP_ID.to_string()),
             sub: Some("fed-user-1".to_string()),
             aud: Some(jose_rs::jwt::Audience::Single(RP_ENTITY.to_string())),
-            iat: Some(now),
-            exp: Some(now + 600),
+            iat: Some(now.into()),
+            exp: Some((now + 600).into()),
             ..Default::default()
         };
         if let Some(nonce) = self.nonce.lock().unwrap().clone() {
@@ -230,6 +234,7 @@ impl HttpClient for MockNetwork {
             status: 200,
             body: serde_json::to_vec(&body).unwrap(),
             content_type: Some("application/json".into()),
+            ..Default::default()
         })
     }
 }
@@ -323,8 +328,8 @@ fn entity_configuration(
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(issuer.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(tunnelbana_core::util::now_secs().into()),
+        exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
         ..Default::default()
     };
     claims
@@ -354,8 +359,8 @@ fn subordinate_statement(
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(issuer.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(tunnelbana_core::util::now_secs().into()),
+        exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
         ..Default::default()
     };
     claims
@@ -373,8 +378,8 @@ fn signed_jwks(key: &SigningKey, subject: &str) -> String {
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(subject.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(tunnelbana_core::util::now_secs()),
-        exp: Some(tunnelbana_core::util::now_secs() + 3600),
+        iat: Some(tunnelbana_core::util::now_secs().into()),
+        exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
         ..Default::default()
     };
     claims.extra.insert(

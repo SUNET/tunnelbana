@@ -47,8 +47,8 @@ fn subordinate_statement(
     let mut claims = jose_rs::jwt::Claims {
         iss: Some(issuer.to_string()),
         sub: Some(subject.to_string()),
-        iat: Some(now),
-        exp: Some(now + 3600),
+        iat: Some(now.into()),
+        exp: Some((now + 3600).into()),
         ..Default::default()
     };
     claims
@@ -104,8 +104,8 @@ impl HttpClient for MockFederation {
             let mut claims = jose_rs::jwt::Claims {
                 iss: Some(TA_ID.to_string()),
                 sub: Some(RP_ID.to_string()),
-                iat: Some(tunnelbana_core::util::now_secs()),
-                exp: Some(tunnelbana_core::util::now_secs() + 3600),
+                iat: Some(tunnelbana_core::util::now_secs().into()),
+                exp: Some((tunnelbana_core::util::now_secs() + 3600).into()),
                 ..Default::default()
             };
             claims.extra.insert("metadata".into(), rp_metadata.clone());
@@ -160,12 +160,14 @@ impl HttpClient for MockFederation {
                 status: 404,
                 body: Vec::new(),
                 content_type: None,
+                ..Default::default()
             });
         };
         Ok(HttpFetchResponse {
             status: 200,
             body: body.into_bytes(),
             content_type: Some("application/entity-statement+jwt".into()),
+            ..Default::default()
         })
     }
 
@@ -179,6 +181,7 @@ impl HttpClient for MockFederation {
             status: 404,
             body: Vec::new(),
             content_type: None,
+            ..Default::default()
         })
     }
 }
@@ -462,8 +465,8 @@ async fn request_objects_bind_client_and_require_expiry() {
             aud: Some(jose_rs::jwt::Audience::Single(
                 "https://proxy.example.com/OIDFed".into(),
             )),
-            iat: Some(now),
-            exp,
+            iat: Some(now.into()),
+            exp: exp.map(Into::into),
             ..Default::default()
         };
         claims
@@ -667,6 +670,7 @@ impl HttpClient for FailingResolve {
                 status: 200,
                 body: body.into_bytes(),
                 content_type: Some("application/entity-statement+jwt".into()),
+                ..Default::default()
             });
         }
         if url.starts_with(&format!("{TA_ID}/resolve")) {
@@ -676,6 +680,7 @@ impl HttpClient for FailingResolve {
             status: 404,
             body: Vec::new(),
             content_type: None,
+            ..Default::default()
         })
     }
 
@@ -689,6 +694,7 @@ impl HttpClient for FailingResolve {
             status: 404,
             body: Vec::new(),
             content_type: None,
+            ..Default::default()
         })
     }
 }

@@ -148,6 +148,15 @@ pub trait Backend: Send + Sync {
     /// Begin authentication with the upstream IdP/OP (returns e.g. a redirect).
     async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response>;
 
+    /// `Ok(true)` permits saved-login reuse; `Ok(false)` declines it.
+    async fn restore_authn_context(
+        &self,
+        _ctx: &mut Context,
+        _response: &InternalData,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Handle an inbound hit on one of this backend's endpoints (e.g. ACS).
     async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<BackendAction>;
 }
@@ -164,6 +173,14 @@ pub trait MicroService: Send + Sync {
         data: InternalData,
     ) -> Result<InternalData> {
         Ok(data)
+    }
+
+    async fn try_authenticate(
+        &self,
+        _ctx: &mut Context,
+        _request: &InternalData,
+    ) -> Result<Option<InternalData>> {
+        Ok(None)
     }
 
     /// Transform the response-path internal data (backend → frontend).
