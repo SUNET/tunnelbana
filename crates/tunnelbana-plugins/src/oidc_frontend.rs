@@ -13,7 +13,7 @@ use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, Route};
 use tunnelbana_oidc::client::InMemoryClientStore;
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
-use tunnelbana_oidc::provider::{InMemoryTokenUseStore, Provider, TokenLifetimes};
+use tunnelbana_oidc::provider::{InMemoryTokenUseStore, Provider, TokenLifetimes, TokenUseStore};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::tokens::TokenCodec;
 
@@ -81,6 +81,16 @@ pub struct OidcFrontend {
 
 impl OidcFrontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
+        Self::build_with_token_use_store(bx, Arc::new(InMemoryTokenUseStore::new()))
+    }
+
+    /// Build the OP frontend with an explicitly selected token-use store.
+    /// Multi-replica deployments must inject one shared atomic implementation;
+    /// the default [`build`](Self::build) remains process-local.
+    pub fn build_with_token_use_store(
+        bx: &BuildContext,
+        token_use_store: Arc<dyn TokenUseStore>,
+    ) -> Result<Box<dyn Frontend>> {
         let cfg: OidcFrontendConfig = bx.parse_config()?;
         crate::oidc_common::validate_authenticating_authority_mapping(
             &bx.attribute_mapper,
@@ -136,7 +146,7 @@ impl OidcFrontend {
             clients,
             codec,
             lifetimes,
-            Arc::new(InMemoryTokenUseStore::new()),
+            token_use_store,
         )?
         // Tunnelbana's configured response pipeline supplies the final subject.
         // Keep existing identifiers and enable Grindvakt's bound resolver API.
