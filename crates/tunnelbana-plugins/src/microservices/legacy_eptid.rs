@@ -136,10 +136,10 @@ impl LegacyEptid {
         digest.update(sp_entity_id.as_bytes());
         digest.update(self.secret.as_bytes());
         format!(
-            "{}!{}!{:x}",
+            "{}!{}!{}",
             self.idp_entity_id,
             sp_entity_id,
-            digest.finalize()
+            hex::encode(digest.finalize())
         )
     }
 }

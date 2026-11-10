@@ -604,8 +604,18 @@ impl Saml2Frontend {
                     force_authn: authn_request.force_authn.unwrap_or(false),
                     is_passive: authn_request.is_passive.unwrap_or(false),
                     requested_name_id_format,
+                    requested_sp_name_qualifier: authn_request
+                        .name_id_policy
+                        .as_ref()
+                        .and_then(|policy| policy.sp_name_qualifier.clone()),
+                    has_name_id_policy: authn_request.name_id_policy.is_some(),
                     allow_create,
                     requested_authn_context_class_refs,
+                    requested_authn_context_decl_refs: authn_request
+                        .requested_authn_context
+                        .as_ref()
+                        .map(|context| context.authn_context_decl_refs.clone())
+                        .unwrap_or_default(),
                     authn_context_comparison,
                     attribute_consuming_service_index: authn_request
                         .attribute_consuming_service_index,
@@ -982,6 +992,7 @@ impl Frontend for Saml2Frontend {
                 .or_else(|| self.default_acr.clone())
                 .or_else(|| Some(constants::AUTHN_CONTEXT_PASSWORD.to_string())),
             client_address: None,
+            authenticating_authorities: response.auth_info.issuer.clone().into_iter().collect(),
             attributes,
         };
 

@@ -18,7 +18,7 @@ tunnelbana-python = { path = "../tunnelbana-python" }
 actix-web = { workspace = true, features = ["rustls-0_23"] }
 # actix-tls selects newer actix-rt releases with opt-in signal support;
 # actix-server's built-in shutdown handling requires that feature.
-actix-rt = { version = "2.14", default-features = false, features = ["signal"] }
+actix-rt = { version = "2.15", default-features = false, features = ["signal"] }
 rustls.workspace = true
 tokio.workspace = true
 reqwest.workspace = true

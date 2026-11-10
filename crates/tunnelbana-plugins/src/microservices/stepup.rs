@@ -695,6 +695,7 @@ mod tests {
             session_not_on_or_after: None,
             authn_context_class_ref: Some(REFEDS_MFA.into()),
             client_address: None,
+            authenticating_authorities: Vec::new(),
             attributes: vec![
                 Attribute {
                     name: "eduPersonPrincipalName".into(),
