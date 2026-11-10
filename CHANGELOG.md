@@ -1,8 +1,59 @@
 # Changelog
 
-## 0.6.0 [2026-09-30]
+## 0.6.0 [2026-10-10]
 
-- Sync attribute map with Swamids Shibboleth recommendation
+- **Default attribute map:** sync the bundled map with SWAMID's Shibboleth
+  attribute names, adding subject/pairwise identifiers, assurance certification,
+  eduPerson, norEdu, SCHAC and directory attributes. Use `subject-id` instead of
+  `eduPersonPrincipalName` for `user_id_from_attrs` and the OpenID `sub` mapping;
+  remove `eduPersonTargetedID` from the bundled map. Replacing an existing map
+  can change composed identifiers and attribute release. Review account-linking
+  and release policy before adopting it; custom maps are not rewritten.
+- **Optional saved-login reuse:** add `MicroService::try_authenticate`, the
+  Python `try_authenticate(context, data)` hook, read-only request cookies and
+  append-only response cookies. No session plugin is enabled or supplied by
+  default. Plugins own session verification, storage, expiry and logout.
+  Accepted records re-enter the complete response pipeline under the current
+  requester. Cookie output is validated and sent on error responses too.
+- **Session policy:** add fail-closed `Backend::restore_authn_context` acceptance.
+  The SAML backend binds reuse to the selected issuer and restores trusted
+  provider metadata; linked-account step-up and nonempty target authentication
+  context requirements decline reuse. OIDC/federation backends retain the
+  default refusal. Discovery issuer allowlists are also enforced on the
+  response path. Forced authentication skips
+  session hooks, and stale constraints from abandoned SAML flows do not decide
+  reuse for a new request.
+- **Authentication freshness:** preserve upstream SAML `AuthnInstant` and
+  validated OIDC `auth_time` through the internal model and downstream issuance.
+  Reject invalid upstream OIDC timestamps. Both OIDC frontends validate
+  `max_age` and conservatively force fresh authentication whenever it is present;
+  combining it with `prompt=none` returns `login_required`. SAML responses now
+  identify the upstream authenticating authority.
+- **Shared OIDC replay storage for embedders:** add
+  `OidcFrontend::build_with_token_use_store` for injecting an atomic shared
+  `TokenUseStore` for authorization codes, rotated refresh tokens and
+  `private_key_jwt` assertions. The standard binary and existing `build` API
+  retain process-local storage. This does not change federation, DPoP or SAML
+  replay stores and adds no TOML storage setting.
+- **Python boundary:** preserve JSON numbers with Pythonize's arbitrary-precision
+  support. Upgrade PyO3, its FFI and build configuration to 0.30.1; vendor the
+  released Pythonize 0.29 source with only its PyO3 dependency requirements
+  adjusted. Retain its conversion source, tests and MIT license.
+- **Dependencies and build:** update Grindvakt/jose-rs to 0.11.0, Gamlastan/MDQ
+  to 0.11.0, Bergshamra to 0.12.0, Uppsala to 0.12.1, Kryptering to 0.7.1,
+  Actix Web to 4.19.0, rustls to 0.23.46 and TOML to 1.2.1. Move workspace
+  hashes/KDFs to SHA-2/MD5 0.11 and HKDF 0.13, retaining existing hexadecimal
+  identifier output. Outbound HTTP adapters now retain response headers for
+  the updated protocol library. Rust 1.89 is the minimum supported version;
+  Tera 1 templates and CPython 3.13 embedding remain supported.
+- **Dependency security:** remove the affected RSA and crypto-bigint releases
+  (RUSTSEC-2023-0071 and RUSTSEC-2026-0387). The h2 0.3 advisory
+  RUSTSEC-2026-0258 remains blocked by Actix's constraint; no advisory exception
+  or HTTP/2 removal is added. Record compatibility decisions and verification
+  in the [dependency ecosystem notes](docs/ecosystem.md).
+- Add Matrix contact information and documentation for upgrading, session reuse,
+  shared replay storage and the Pythonize compatibility patch. See
+  [Upgrading from 0.5.1](docs/src/upgrading.md) before deploying these changes.
 
 ## 0.5.1 [2026-09-29]
 

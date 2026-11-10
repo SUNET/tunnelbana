@@ -480,10 +480,10 @@ saml   = ["givenName"]              # plain-list form, still valid
 openid = ["authenticating_authority"] # trusted upstream issuer claim
 
 [attributes.edupersonprincipalname]
-openid = ["sub"]
 saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
 
 [attributes.subject-id]
+openid = ["sub"]
 saml   = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }
 ```
 
@@ -545,8 +545,8 @@ PKCS#8). Everything is normalised to a `jose_rs::Jwk` internally.
 
 ### PQC signing keys for OIDC
 
-Standard builds enable jose-rs 0.7.0's `post-quantum` support for OIDC and OpenID
-Federation signing and verification. Supported JOSE algorithm names are:
+Standard builds enable the workspace's jose-rs `post-quantum` support for OIDC
+and OpenID Federation signing and verification. Supported JOSE algorithm names are:
 
 - `ML-DSA-44`, `ML-DSA-65`, `ML-DSA-87`
 - `ML-DSA-44-ES256`, `ML-DSA-65-ES256`, `ML-DSA-87-ES384`
@@ -574,7 +574,7 @@ outbound client assertions; the federation key has its own `signing_algorithm`
 under `[backend.config.federation]` or `[frontend.config.federation]`. Federation
 request objects and entity configurations can also use these keys. Each peer
 must support the selected algorithm and jose-rs's AKP representation. Composite
-ML-DSA uses the draft JOSE representation implemented by jose-rs 0.7.0.
+ML-DSA uses the draft JOSE representation implemented by the workspace's jose-rs.
 
 Use authorization code flow (`response_type=code`) for PQC ID tokens. Grindvakt
 0.8.1 rejects hybrid and implicit combinations that require `c_hash` or

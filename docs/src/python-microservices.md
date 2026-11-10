@@ -12,6 +12,13 @@ can import other installed modules. Review it like application code, deploy it
 read-only, restrict the service account, and do not log secrets or identity
 data.
 
+The current build uses PyO3 0.30.1 with system CPython 3.13. It includes a
+vendored Pythonize compatibility patch because published Pythonize 0.29 targets
+PyO3 0.29. Python plugin method signatures are unchanged; source distributions
+must include `vendor/pythonize`. JSON integers retain arbitrary precision
+across conversion, subject to the declared types of individual fields. See
+[build and packaging changes](upgrading.md#building-and-packaging).
+
 ## Quick start
 
 The configured module path is an import root. A minimal deployment can look
@@ -348,10 +355,39 @@ complete, verified upstream `InternalData` record to skip upstream login and
 run the normal response pipeline with the current requester. Save the record
 before response transformations, since those run again on reuse.
 
-The selected backend can decline reuse. SAML checks the saved issuer against
-the selected provider and restores trusted provider metadata. Python cannot
-change `target_backend` in this hook. Session verification, storage, expiry
-and logout are the plugin's responsibility.
+The selected backend can decline reuse:
+
+| Backend | Saved-login acceptance |
+| --- | --- |
+| `saml2`, static metadata | Requires a nonempty saved issuer matching the configured IdP; restores trusted provider scopes and policy metadata. |
+| `saml2`, MDQ | Requires any selected/default IdP to match the saved issuer; resolves its trusted metadata again. |
+| Linked-account SAML step-up, or a nonempty target authentication-context requirement | Declines reuse and follows the upstream flow. |
+| `oidc` / `oidc_federation` | Declines reuse through the default backend implementation. |
+
+The hook cannot change `target_backend`. The proxy replaces a saved requester
+with the current one; normal response services still enforce access, assurance,
+issuer allowlists and attribute-release policy. A saved record does not grant
+access to every service under the same domain.
+
+Session verification, storage, expiry and logout are the plugin's
+responsibility. Authenticate the browser token before trusting its identity;
+the read-only `cookies` dictionary contains untrusted input. Choose cookie
+domain/path, Secure, HttpOnly and SameSite attributes deliberately. A shared
+parent-domain cookie extends trust to that cookie's domain scope; the proxy
+does not configure one automatically. `set_cookies` accepts full header values
+and is sent on errors too, so an expired login can be cleared.
+
+Preserve the original `auth_info.timestamp`; do not stamp every reuse with the
+current time. `force_authn`, including OIDC `prompt=login` or any `max_age`,
+skips all saved-login hooks. With `max_age` and `prompt=none`, the frontend
+returns `login_required` instead. Missing upstream authentication times are
+not evidence of freshness. See [authentication time](upgrading.md#authentication-time-and-freshness).
+
+No saved-session storage adapter is bundled. `try_authenticate` remains
+optional, so an existing transform-only plugin continues through the normal
+upstream login. If a plugin reconstructs the context dictionary, it must
+preserve the new `cookies` and `set_cookies` keys as well as the other required
+fields; returning the original context and appending cookies is simpler.
 
 ## Configuration reference
 
