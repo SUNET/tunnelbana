@@ -79,7 +79,9 @@ micro-services:
 ```mermaid
 flowchart LR
     A[Frontend produces request InternalData] --> B[process_request methods in configured order]
-    B --> C[Selected backend]
+    B --> G{Saved login accepted?}
+    G -->|No| C[Selected backend]
+    G -->|Yes| E
     C --> D[Backend produces response InternalData]
     D --> E[process_response methods in configured order]
     E --> F[Originating frontend]
@@ -87,9 +89,8 @@ flowchart LR
 
 `process_request` runs after a frontend has interpreted the downstream
 authentication request and before Tunnelbana selects and calls the upstream
-backend. `process_response` runs after the backend has interpreted the upstream
-authentication response and before the originating frontend creates its
-downstream response.
+backend. `process_response` runs after upstream authentication or saved-login
+reuse and before the originating frontend creates its downstream response.
 
 Every configured service is considered at both points. If its class does not
 define the method for one direction, that direction is an identity operation.
@@ -109,6 +110,9 @@ class Example:
 
     def process_request(self, context: dict, data: dict) -> dict:
         return data
+
+    def try_authenticate(self, context: dict, data: dict) -> dict | None:
+        return None
 
     def process_response(self, context: dict, data: dict) -> dict:
         return data
@@ -147,8 +151,8 @@ Mutable instance state is shared across calls. CPython's GIL normally
 serializes Python bytecode, but native modules and blocking operations can
 release the GIL, so shared state must still be concurrency-safe.
 
-At least one of `process_request` and `process_response` must exist. Every
-method that exists must be callable and must be an ordinary synchronous
+At least one of `process_request`, `try_authenticate`, and `process_response`
+must exist. Every method that exists must be callable and an ordinary synchronous
 function. `async def` methods are rejected at startup, and an awaitable
 returned by a synchronous function is rejected at runtime. Do not call
 `asyncio.run()` to work around this contract.
@@ -195,10 +199,12 @@ class ContextSnapshot(TypedDict):
     method: str
     query: dict[str, str]
     form: dict[str, str]
+    cookies: dict[str, str]
     requester: str | None
     target_backend: str | None
     target_frontend: str | None
     decorations: dict[str, JsonValue]
+    set_cookies: list[str]
 ```
 
 These declarations are documentation; a service does not need to copy or
@@ -215,17 +221,23 @@ these keys:
 | `method` | `str` | Uppercase HTTP method, such as `GET` or `POST`. | No |
 | `query` | `dict[str, str]` | Parsed query parameters. | No |
 | `form` | `dict[str, str]` | Parsed `application/x-www-form-urlencoded` body fields; otherwise empty. | No |
+| `cookies` | `dict[str, str]` | Browser request cookies. | No |
 | `requester` | `str \| None` | Downstream SP entity ID or OIDC client ID recovered from the flow state. | No |
 | `target_backend` | `str \| None` | Name of the selected or proposed backend. | **Yes** |
 | `target_frontend` | `str \| None` | Name of the frontend that originated the flow. | No |
 | `decorations` | `dict[str, JsonValue]` | Non-persistent, flow-local values exchanged by pipeline components. | **Yes** |
+| `set_cookies` | `list[str]` | Response `Set-Cookie` header values. | Append only |
 
-Python may change only `target_backend` and `decorations`. It may add, replace,
-or remove keys below `decorations`, provided every value remains JSON-compatible
-and the reserved keys below are respected. It may not add or remove top-level
-context keys. Changing `path`, `method`, `query`, `form`, `requester`, or
-`target_frontend` makes the whole call fail, even if the changed value would
-otherwise have a valid type.
+Python may change `target_backend` and `decorations`, and append to `set_cookies`.
+It may add, replace, or remove keys below `decorations`, provided every value
+remains JSON-compatible and the reserved keys below are respected. It may not add
+or remove top-level context keys. Changing `path`, `method`, `query`, `form`,
+`cookies`, `requester`, or `target_frontend` makes the whole call fail, even if
+the changed value would otherwise have a valid type.
+
+Cookie output must be non-empty ASCII without control characters. Existing
+queue entries cannot be changed or removed. Queued cookies are sent on error
+responses too, so a plugin can clear an expired session even when login fails.
 
 Setting `target_backend` during `process_request` affects backend selection.
 On both paths a returned `target_backend` must be `None` or the name of a
@@ -257,14 +269,14 @@ not just by your own services. Treat them as security-sensitive:
   value; that would let a client pick the upstream identity provider.
   `mfa_stepup_accounts` is SCIM-derived output, so later Python services may
   read but not replace it.
-- `provider_scopes`, `provider_assurance_certifications`, and
-  `requester_entity_categories` - trusted SAML metadata input. These are fully
-  read-only to Python: a Python service cannot create, replace, or remove them.
-  The native SAML frontend/backend publishes the authoritative arrays only
-  after the relevant protocol validation.
+- `provider_scopes`, `provider_assurance_certifications`,
+  `provider_entity_categories`, and `requester_entity_categories` - trusted SAML
+  metadata input. Python cannot create, replace, or remove them.
+  Native SAML components supply these values from validated protocol inputs
+  or trusted provider metadata.
 
 The restricted snapshot deliberately excludes the complete URI, headers,
-cookies, request body, encrypted or persistent state, secrets, HTTP client
+request body, encrypted or persistent state, secrets, HTTP client
 handles, and Rust object handles.
 
 ### The `data` input
@@ -303,29 +315,43 @@ A process method has two output channels:
 1. Return one complete `InternalData` dictionary. Returning the input `data`
    after modifying it in place is the simplest approach, but returning a new
    complete dictionary is also valid.
-2. Mutate `context["target_backend"]` or `context["decorations"]` in place when
-   the service needs those effects. The context dictionary itself is not the
+2. Mutate `context["target_backend"]` or `context["decorations"]`, or append to
+   `context["set_cookies"]` in place. The context dictionary itself is not the
    method's return value.
 
 The returned `InternalData` must be a plain dictionary with exactly the eight
 documented top-level keys. Its `auth_info` must be a dictionary with exactly
 the three documented keys. Missing keys, extra keys, scalar attribute values,
 non-string attribute values, invalid subject types, or other wrong Python types
-reject the result. Returning `None`, a coroutine, or an arbitrary object also
-rejects it.
+reject the result. Transform methods cannot return `None`; coroutines and
+arbitrary objects are also rejected.
 
 The context copy is checked just as strictly after the method returns. All
 read-only values must equal their original values and all decorations must
 convert to JSON. Tunnelbana validates the complete context and returned data
 before applying anything to the real Rust context. If validation or Python
-execution fails, `target_backend`, `decorations`, and `InternalData` are left
-unchanged. This rollback does not include mutable state inside the reused
+execution fails, `target_backend`, `decorations`, `set_cookies`, and `InternalData`
+are left unchanged. This rollback does not include mutable state inside the reused
 Python class instance or external side effects performed by Python.
 
 On the request path, the returned data goes to the next micro-service and then
 the selected backend. On the response path, it goes to the next micro-service
 and then the originating frontend. A missing process method passes the data
 through unchanged.
+
+### Reusing a saved login
+
+After all `process_request` calls and backend selection, Tunnelbana calls
+`try_authenticate(context, data)` in configured order unless `force_authn` is
+true. Return `None` to try the next hook or fall back to the backend. Return a
+complete, verified upstream `InternalData` record to skip upstream login and
+run the normal response pipeline with the current requester. Save the record
+before response transformations, since those run again on reuse.
+
+The selected backend can decline reuse. SAML checks the saved issuer against
+the selected provider and restores trusted provider metadata. Python cannot
+change `target_backend` in this hook. Session verification, storage, expiry
+and logout are the plugin's responsibility.
 
 ## Configuration reference
 
@@ -835,8 +861,8 @@ bodies. Python code remains responsible for the safety of its own logging.
 
 ## Common mistakes
 
-- Returning only the field that changed. Always return the complete eight-key
-  `InternalData` dictionary; normally mutate and return the supplied `data`.
+- Returning only the field that changed. Transformations must return the complete
+  eight-key `InternalData` dictionary; normally mutate and return the supplied `data`.
 - Returning a scalar attribute such as `{"mail": "user@example.org"}`.
   Attribute values must always be lists, such as
   `{"mail": ["user@example.org"]}`.

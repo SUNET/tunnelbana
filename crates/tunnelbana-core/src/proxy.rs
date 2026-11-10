@@ -110,6 +110,11 @@ impl Proxy {
                 }
             }
         }
+        response.headers.extend(
+            ctx.set_cookies
+                .into_iter()
+                .map(|cookie| ("set-cookie".to_string(), cookie)),
+        );
         response
     }
 
@@ -221,11 +226,24 @@ impl Proxy {
             .or_else(|| self.default_backend.clone())
             .ok_or_else(|| Error::Config("no backend configured".into()))?;
         ctx.target_backend = Some(backend_name.clone());
-
         let backend = self
             .backends
             .get(&backend_name)
             .ok_or_else(|| Error::UnknownModule(backend_name.clone()))?;
+
+        if !request.force_authn {
+            for ms in &self.microservices {
+                if let Some(mut response) = ms.try_authenticate(ctx, &request).await? {
+                    if !backend.restore_authn_context(ctx, &response).await? {
+                        continue;
+                    }
+                    response.requester = ctx.requester();
+                    response.requester_name = request.requester_name;
+                    return self.finish_response(ctx, response, 0).await;
+                }
+            }
+        }
+
         backend.start_auth(ctx, request).await
     }
 
@@ -806,6 +824,49 @@ mod tests {
             .headers
             .iter()
             .any(|(name, value)| name == "set-cookie" && value.contains("Max-Age=0")));
+    }
+
+    #[tokio::test]
+    async fn forced_authentication_skips_session_hooks() {
+        struct SavedLogin;
+
+        #[async_trait::async_trait]
+        impl MicroService for SavedLogin {
+            fn name(&self) -> &str {
+                "saved-login"
+            }
+
+            async fn try_authenticate(
+                &self,
+                _ctx: &mut Context,
+                _request: &InternalData,
+            ) -> Result<Option<InternalData>> {
+                panic!("forced authentication must not reuse a saved login")
+            }
+        }
+
+        let proxy = Proxy::new(
+            vec![],
+            vec![Box::new(RecordingBackend {
+                received: Default::default(),
+            })],
+            vec![Box::new(SavedLogin)],
+            StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
+        );
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        assert!(!proxy.backends["backend"]
+            .restore_authn_context(&mut ctx, &InternalData::default())
+            .await
+            .unwrap());
+        let request = InternalData {
+            force_authn: true,
+            ..Default::default()
+        };
+        let response = proxy
+            .finish_request(&mut ctx, request, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"auth started");
     }
 
     #[tokio::test]

@@ -109,6 +109,7 @@ impl HttpClient for LocalOp {
             status: response.status,
             body: response.body,
             content_type: Some("application/json".into()),
+            headers: response.headers,
         })
     }
 
@@ -146,6 +147,7 @@ impl HttpClient for LocalOp {
             status: response.status,
             body: response.body,
             content_type: Some("application/json".into()),
+            headers: response.headers,
         })
     }
 }

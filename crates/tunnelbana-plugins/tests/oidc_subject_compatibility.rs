@@ -124,6 +124,7 @@ async fn start(frontend: &dyn Frontend, response_type: &str) -> Context {
 /// Preserve the existing final subject and the attribute-composition fallback.
 fn identity(explicit: bool) -> InternalData {
     let mut response = InternalData::default();
+    response.auth_info.timestamp = Some("2020-01-02T03:04:05Z".into());
     if explicit {
         response.subject_id = Some("existing-final-subject".into());
     }
@@ -203,6 +204,8 @@ async fn assert_tokens(
         jose_rs::jwt::decode_with_jwkset(&keys, tokens["id_token"].as_str().unwrap(), &validation)
             .unwrap();
     assert_eq!(claims.sub.as_deref(), Some(expected));
+    assert_eq!(claims.extra["auth_time"], serde_json::json!(1_577_934_245));
+    assert!(claims.iat.unwrap().as_secs() > 1_577_934_245);
     if let Some(access) = tokens["access_token"].as_str() {
         let mut ctx = Context::new(HttpRequestData::default(), State::new());
         ctx.request

@@ -99,6 +99,19 @@ impl DiscoToTargetIssuer {
         format!("{NAMESPACE_PREFIX}{}", self.name)
     }
 
+    fn validate_issuer(&self, requester: Option<&str>, issuer: Option<&str>) -> Result<()> {
+        if let Some(allowed) = &self.allowed_issuers {
+            let issuers = requester.and_then(|requester| level(allowed, requester));
+            if !issuers.is_some_and(|list| list.iter().any(|value| Some(value.as_str()) == issuer))
+            {
+                return Err(Error::Authn(
+                    "response issuer is not in allowed_issuers for this requester".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn build(bx: &BuildContext) -> Result<Box<dyn MicroService>> {
         let cfg: DiscoToTargetIssuerConfig = bx.parse_config()?;
         if cfg.disco_endpoints.is_empty() {
@@ -200,6 +213,15 @@ impl MicroService for DiscoToTargetIssuer {
         Ok(data)
     }
 
+    async fn process_response(
+        &self,
+        _ctx: &mut Context,
+        data: InternalData,
+    ) -> Result<InternalData> {
+        self.validate_issuer(data.requester.as_deref(), data.auth_info.issuer.as_deref())?;
+        Ok(data)
+    }
+
     fn register_endpoints(&self) -> Vec<Route> {
         self.disco_endpoints
             .iter()
@@ -249,22 +271,7 @@ impl MicroService for DiscoToTargetIssuer {
             }
         };
 
-        if let Some(allowed) = &self.allowed_issuers {
-            // The allowlist authorizes `(issuer, requester)` pairs: the
-            // resumed flow's requester selects its issuer set. A global
-            // check would let a requester without an issuer rule keep the
-            // target-issuer decoration through `custom_routing`'s
-            // requester/default fallback and authenticate at any globally
-            // listed issuer via the fallback backend's metadata resolution.
-            // Checked before consuming the snapshot, so the user can go back
-            // to the discovery page and pick a permitted issuer.
-            let issuers = request.requester.as_deref().and_then(|r| level(allowed, r));
-            if !issuers.is_some_and(|list| list.iter().any(|a| a == &issuer)) {
-                return Err(Error::Authn(
-                    "discovery response issuer is not in allowed_issuers for this requester".into(),
-                ));
-            }
-        }
+        self.validate_issuer(request.requester.as_deref(), Some(&issuer))?;
 
         // Consume-once: the resealed cookie on this response no longer
         // carries the snapshot, so a replayed discovery return fails at the
@@ -603,6 +610,12 @@ mod tests {
             ret.state = c.state;
             ret.request.query.insert("entityID".into(), issuer.into());
             let result = svc.handle_endpoint(&mut ret, "Saml2/disco").await;
+            let mut response = InternalData::request(requester);
+            response.auth_info.issuer = Some(issuer.into());
+            assert_eq!(
+                svc.process_response(&mut ctx(), response).await.is_ok(),
+                accepted
+            );
             assert_eq!(
                 result.is_ok(),
                 accepted,

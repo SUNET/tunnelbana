@@ -964,6 +964,9 @@ impl Frontend for Saml2Frontend {
         };
 
         let now = Utc::now();
+        let authn_instant =
+            crate::authentication_time::parse(response.auth_info.timestamp.as_deref())?
+                .unwrap_or(now);
         let options = ResponseOptions {
             idp_entity_id: self.idp_entity_id.clone(),
             in_response_to: Some(request_id),
@@ -982,8 +985,14 @@ impl Frontend for Saml2Frontend {
             attributes,
         };
 
-        let saml_response =
-            idp_profile::create_response(&options, &name_id, ResponseTimes::at(now));
+        let saml_response = idp_profile::create_response(
+            &options,
+            &name_id,
+            ResponseTimes {
+                issue_instant: now,
+                authn_instant,
+            },
+        );
         let xml = saml_response
             .to_xml_string()
             .map_err(|e| Error::Internal(format!("serializing Response: {e}")))?;

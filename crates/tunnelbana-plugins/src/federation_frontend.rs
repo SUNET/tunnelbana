@@ -529,13 +529,17 @@ impl FederationFrontend {
             Err(error) => return Ok(FrontendAction::Respond(error.to_response())),
         };
 
+        let mut request = InternalData::request(req.client_id.clone());
+        if let Err(error) = crate::oidc_common::apply_prompt_constraints(&req, &mut request) {
+            return Ok(FrontendAction::Respond(
+                error.to_redirect(&req.redirect_uri, req.use_fragment()),
+            ));
+        }
         self.store_authz_request(ctx, &req)?;
         crate::oidc_common::bind_authorization_client(ctx, &self.name, &client)?;
-        let mut request = InternalData::request(req.client_id.clone());
         if let Some(name) = client.client_name {
             request.requester_name = vec![name];
         }
-        crate::oidc_common::apply_prompt_constraints(&req, &mut request);
         Ok(FrontendAction::StartAuth {
             request,
             target_backend: self.backend.clone(),
@@ -658,6 +662,8 @@ impl Frontend for FederationFrontend {
             .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
         let mut external = self.mapper.from_internal("openid", &response.attributes);
         let acr = response.auth_info.auth_class_ref.clone();
+        let auth_time =
+            crate::authentication_time::unix_seconds(response.auth_info.timestamp.as_deref())?;
         let extra_claims = crate::oidc_common::authenticating_authority_claims(
             &self.mapper,
             &mut external,
@@ -665,7 +671,7 @@ impl Frontend for FederationFrontend {
         );
         match self
             .provider
-            .authorization_redirect_with_claims_and_subject_resolver(
+            .authorization_redirect_with_claims_subject_resolver_and_auth_time(
                 &req,
                 |client| {
                     crate::oidc_common::resolve_authorization_subject(
@@ -680,6 +686,7 @@ impl Frontend for FederationFrontend {
                 &external,
                 acr,
                 &extra_claims,
+                auth_time,
             )
             .await
         {
