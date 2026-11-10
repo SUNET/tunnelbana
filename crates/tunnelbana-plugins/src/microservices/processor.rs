@@ -85,19 +85,19 @@ impl HashAlgo {
                 let mut h = Md5::new();
                 h.update(value.as_bytes());
                 h.update(salt.as_bytes());
-                format!("{:x}", h.finalize())
+                hex::encode(h.finalize())
             }
             HashAlgo::Sha256 => {
                 let mut h = Sha256::new();
                 h.update(value.as_bytes());
                 h.update(salt.as_bytes());
-                format!("{:x}", h.finalize())
+                hex::encode(h.finalize())
             }
             HashAlgo::Sha512 => {
                 let mut h = Sha512::new();
                 h.update(value.as_bytes());
                 h.update(salt.as_bytes());
-                format!("{:x}", h.finalize())
+                hex::encode(h.finalize())
             }
         }
     }
@@ -405,7 +405,7 @@ mod tests {
         h.update(b"annapepper");
         assert_eq!(
             data.attr_first("uid"),
-            Some(format!("{:x}", h.finalize()).as_str())
+            Some(hex::encode(h.finalize()).as_str())
         );
     }
 
@@ -458,7 +458,7 @@ mod tests {
         h.update(b"annapepper");
         assert_eq!(
             data.attr_first("uid"),
-            Some(format!("{:x}", h.finalize()).as_str())
+            Some(hex::encode(h.finalize()).as_str())
         );
     }
 

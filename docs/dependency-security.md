@@ -1,5 +1,22 @@
 # Dependency security updates
 
+## Workspace refresh on 2026-11-10
+
+Updated the OIDC/SAML/XML stack to Grindvakt and jose-rs 0.11.0,
+Gamlastan and gamlastan-mdq 0.11.0, Bergshamra 0.12.0, Uppsala 0.12.1,
+and Kryptering 0.7.1. The graph now uses RSA 0.10.0 and crypto-bigint
+0.7.11, removing the releases affected by RUSTSEC-2023-0071 and
+RUSTSEC-2026-0387. Compatible dependencies were refreshed with `sfw cargo update`.
+
+`cargo audit --no-fetch --deny warnings` reports one remaining advisory:
+RUSTSEC-2026-0258 in h2 0.3.27, reached through Actix Web 4.19.0 and
+Actix HTTP 3.21.0. Actix HTTP still requires the affected 0.3 line;
+the fixed 0.4 line does not satisfy its constraint. No advisory exceptions
+or HTTP/2 feature removals were added. See [ecosystem.md](ecosystem.md) for
+the dependency compatibility decisions and current verification results.
+
+## Historical release checks
+
 Reviewed again for 0.5.1 on 2026-09-29 using `cargo audit --deny warnings`
 and the resolved dependency graph.
 The table below records the earlier 0.5.0 advisory remediations.
@@ -20,7 +37,7 @@ support, exactly-one-key validation, certificate/key matching, sanitized errors,
 and complete scanning for malformed trailing sections. Existing TLS config,
 certificate files, SIGHUP renewal and HTTP/2 negotiation remain supported.
 
-## Remaining advisories
+## Advisories remaining at 0.5.1
 
 - **[RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258.html):**
   `tunnelbana -> actix-web 4.15.0 -> actix-http 3.18.12 -> h2 0.3.27`.

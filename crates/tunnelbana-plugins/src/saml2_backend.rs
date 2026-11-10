@@ -2135,6 +2135,7 @@ mod tests {
             session_not_on_or_after: None,
             authn_context_class_ref: Some("urn:loa:mfa".into()),
             client_address: None,
+            authenticating_authorities: Vec::new(),
             attributes: vec![Attribute {
                 name: "primary-only".into(),
                 name_format: None,

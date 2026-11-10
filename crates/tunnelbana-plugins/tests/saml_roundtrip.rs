@@ -206,6 +206,13 @@ async fn saml_idp_signs_and_sp_verifies() {
     let html = String::from_utf8(resp.body).unwrap();
     assert!(html.contains("SAMLResponse"));
     let saml_response_b64 = extract_saml_response(&html);
+    let xml = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(&saml_response_b64)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(xml.contains("AuthenticatingAuthority>urn:upstream</"));
 
     // 3) The SP backend receives that Response at its ACS, verifies + validates.
     let mut sp_ctx = Context::new(
@@ -1199,6 +1206,7 @@ fn build_response(
             "urn:oasis:names:tc:SAML:2.0:ac:classes:Password".to_string(),
         ),
         client_address: None,
+        authenticating_authorities: Vec::new(),
         attributes,
     };
     let name_id = NameId {

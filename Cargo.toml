@@ -7,6 +7,7 @@ members = [
     "crates/tunnelbana-python",
     "crates/tunnelbana",
 ]
+exclude = ["vendor/pythonize"]
 
 [workspace.package]
 version = "0.6.0"
@@ -15,22 +16,22 @@ license = "BSD-2-Clause"
 rust-version = "1.89"
 
 [workspace.dependencies]
-grindvakt = "0.10.0"
+grindvakt = "0.11.0"
 # Make ML-DSA and composite ML-DSA available to OIDC signing and verification.
-jose-rs = { version = "0.10.0", default-features = false, features = ["post-quantum"] }
-gamlastan = "0.9.1"
-gamlastan-mdq = "0.9.1"
+jose-rs = { version = "0.11.0", default-features = false, features = ["post-quantum"] }
+gamlastan = "0.11.0"
+gamlastan-mdq = "0.11.0"
 
 # Async / web
-actix-web = "4.15.0"
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+actix-web = "4.19.0"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "form", "query", "http2"] }
 
 # Serialization / config
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-toml = { version = "1.1.6", features = ["preserve_order"] }
+toml = { version = "1.2.1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 
 # Templating
@@ -38,19 +39,20 @@ indexmap = { version = "2", features = ["serde"] }
 tera = "1.20.1"
 
 # Crypto helpers for PEM key loading (PEM -> SoftwareKey -> jose Jwk)
-kryptering = { version = "0.7.0", default-features = false }
-rsa = "0.9"
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-ed25519-dalek = { version = "2.1", features = ["pkcs8"] }
-pkcs8 = "0.10"
-pem = "3"
-sec1 = "0.7"
+kryptering = { version = "0.7.1", default-features = false }
+rsa = "0.10"
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "3.0", features = ["pkcs8"] }
+pkcs8 = "0.11"
+pem = "4"
+sec1 = "0.8"
 base64 = "0.23.1"
-sha2 = "0.10"
-md-5 = "0.10"
-hkdf = "0.12"
-rand = "0.8"
+hex = "0.4.3"
+sha2 = "0.11"
+md-5 = "0.11"
+hkdf = "0.13"
+rand = "0.10"
 
 # Observability
 tracing = "0.1"
@@ -68,5 +70,9 @@ bytes = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # Embedded CPython support. Keep these exact and isolated to tunnelbana-python.
-pyo3 = { version = "=0.29.2", default-features = false }
+pyo3 = { version = "=0.30.1", default-features = false }
 pythonize = { version = "=0.29.0", features = ["arbitrary_precision"] }
+
+# Remove this compatibility patch when Pythonize supports PyO3 0.30.
+[patch.crates-io]
+pythonize = { path = "vendor/pythonize" }

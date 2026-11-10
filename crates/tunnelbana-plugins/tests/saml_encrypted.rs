@@ -154,6 +154,7 @@ fn make_response(name_id: Option<NameIdOrEncryptedId>) -> SamlResponse {
             "urn:oasis:names:tc:SAML:2.0:ac:classes:Password".to_string(),
         ),
         client_address: None,
+        authenticating_authorities: Vec::new(),
         attributes: vec![Attribute {
             name: "mail".to_string(),
             name_format: None,

@@ -5,8 +5,9 @@
 # Multi-stage: the release binary is compiled on Debian 13 (trixie) so its
 # glibc matches the trixie-slim runtime, then copied into a minimal,
 # non-root runtime image with no Rust toolchain. All dependencies
-# (grindvakt, jose-rs, gamlastan, …) resolve from crates.io — there are no
-# path overrides — so the build is fully self-contained.
+# (grindvakt, jose-rs, gamlastan, …) resolve from crates.io, except for the
+# included Pythonize compatibility patch for PyO3 0.30. The build is
+# fully self-contained.
 #
 # Build:  docker build -t tunnelbana:latest .
 # Run:    docker run --rm -p 8080:8080 \

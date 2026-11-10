@@ -63,19 +63,19 @@ fn hash_data(alg: HashAlg, salt: &str, value: &str) -> String {
             let mut h = Md5::new();
             h.update(value.as_bytes());
             h.update(salt.as_bytes());
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         }
         HashAlg::Sha256 => {
             let mut h = Sha256::new();
             h.update(value.as_bytes());
             h.update(salt.as_bytes());
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         }
         HashAlg::Sha512 => {
             let mut h = Sha512::new();
             h.update(value.as_bytes());
             h.update(salt.as_bytes());
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         }
     }
 }
@@ -200,19 +200,19 @@ mod tests {
     fn sha512_hex(input: &str) -> String {
         let mut h = Sha512::new();
         h.update(input.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     fn sha256_hex(input: &str) -> String {
         let mut h = Sha256::new();
         h.update(input.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     fn md5_hex(input: &str) -> String {
         let mut h = Md5::new();
         h.update(input.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     #[tokio::test]
