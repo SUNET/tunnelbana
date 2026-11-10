@@ -211,8 +211,28 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let n = socket.read(&mut buf).await.unwrap();
+            // A single read may return only part of the request. Accumulate
+            // until the headers are complete and `Content-Length` body bytes
+            // have arrived, so the test does not depend on packet timing.
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(n, 0, "client closed before sending full request");
+                received.extend_from_slice(&chunk[..n]);
+                let Some(header_end) = received.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&received[..header_end]).to_lowercase();
+                let content_length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map(|value| value.trim().parse().unwrap())
+                    .expect("request has Content-Length");
+                if received.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -220,7 +240,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            String::from_utf8_lossy(&buf[..n]).to_lowercase()
+            String::from_utf8_lossy(&received).to_lowercase()
         });
 
         let client = ReqwestClient::new();
