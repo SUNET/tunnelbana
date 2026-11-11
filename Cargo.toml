@@ -16,7 +16,7 @@ license = "BSD-2-Clause"
 rust-version = "1.89"
 
 [workspace.dependencies]
-grindvakt = "0.11.0"
+grindvakt = "0.12.0"
 # Make ML-DSA and composite ML-DSA available to OIDC signing and verification.
 jose-rs = { version = "0.11.0", default-features = false, features = ["post-quantum"] }
 gamlastan = "0.11.0"

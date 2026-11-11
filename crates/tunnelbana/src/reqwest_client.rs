@@ -76,6 +76,27 @@ impl HttpClient for ReqwestClient {
             .await
             .map_err(|error| request_error("POST", url, error))
     }
+
+    async fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        headers: &[(String, String)],
+    ) -> Result<HttpFetchResponse> {
+        // `.json()` sets `Content-Type: application/json`. Redirects are
+        // disabled client-wide, so a 307/308 cannot resend the body.
+        let mut req = self.inner.post(url).json(body);
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| Error::Internal(format!("POST {url}: {e}")))?;
+        into_fetch(resp, self.max_response_bytes)
+            .await
+            .map_err(|error| request_error("POST", url, error))
+    }
 }
 
 /// Retain the originating operation when body streaming or size enforcement
@@ -180,6 +201,65 @@ mod tests {
             Some("http://127.0.0.1:1/elsewhere")
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_json_sends_json_body_and_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // A single read may return only part of the request. Accumulate
+            // until the headers are complete and `Content-Length` body bytes
+            // have arrived, so the test does not depend on packet timing.
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(n, 0, "client closed before sending full request");
+                received.extend_from_slice(&chunk[..n]);
+                let Some(header_end) = received.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&received[..header_end]).to_lowercase();
+                let content_length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map(|value| value.trim().parse().unwrap())
+                    .expect("request has Content-Length");
+                if received.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                      Content-Length: 13\r\nConnection: close\r\n\r\n{\"ok\": true}\n",
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&received).to_lowercase()
+        });
+
+        let client = ReqwestClient::new();
+        let resp = client
+            .post_json(
+                &format!("http://{addr}/evaluation"),
+                &serde_json::json!({"subject": "x"}),
+                &[("X-Test".to_string(), "1".to_string())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"{\"ok\": true}\n");
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("post /evaluation "));
+        assert!(request.contains("content-type: application/json"));
+        assert!(request.contains("x-test: 1"));
+        assert!(request.ends_with("{\"subject\":\"x\"}"));
     }
 
     #[test]
