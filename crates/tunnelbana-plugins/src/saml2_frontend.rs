@@ -561,7 +561,7 @@ impl Saml2Frontend {
         // nor an authoritative ACS list, so this branch cannot prove the
         // requester's identity or destination; keeping it separate makes that
         // trust-boundary exception visible during review.
-        let processed = match entry.as_ref() {
+        let mut processed = match entry.as_ref() {
             Some(entry) => idp_profile::process_authn_request(
                 &authn_request,
                 &entry.sp_sso,
@@ -627,18 +627,33 @@ impl Saml2Frontend {
         // Every response (and error response) is delivered by POSTing to
         // `acs_url`. gamlastan resolves the ACS like pysaml2, so the binding
         // can be Artifact or Redirect; refuse those rather than POST to an
-        // endpoint that expects something else. Applies to the metadata path
-        // and to `allow_unknown_sps` (which takes ProtocolBinding verbatim).
+        // endpoint that expects something else. With no ProtocolBinding,
+        // gamlastan takes the first registration of the URL in metadata
+        // order, so a location also registered under HTTP-POST is still a
+        // valid POST target and is accepted. The check has teeth on the
+        // metadata path only: under `allow_unknown_sps` the requester picks
+        // `ProtocolBinding` itself.
         if processed.acs_binding != constants::BINDING_HTTP_POST {
-            tracing::warn!(
-                "saml2 frontend {}: SP {:?} resolved a non-POST ACS binding {:?}",
-                self.name,
-                processed.sp_entity_id,
-                processed.acs_binding
-            );
-            return Err(Error::BadRequest(
-                "unsupported AssertionConsumerService binding: only HTTP-POST is supported".into(),
-            ));
+            let post_registered_at_location = entry.as_ref().is_some_and(|entry| {
+                entry.sp_sso.assertion_consumer_services.iter().any(|acs| {
+                    acs.endpoint.location == processed.acs_url
+                        && acs.endpoint.binding == constants::BINDING_HTTP_POST
+                })
+            });
+            if post_registered_at_location {
+                processed.acs_binding = constants::BINDING_HTTP_POST.to_string();
+            } else {
+                tracing::warn!(
+                    "saml2 frontend {}: SP {:?} resolved a non-POST ACS binding {:?}",
+                    self.name,
+                    processed.sp_entity_id,
+                    processed.acs_binding
+                );
+                return Err(Error::BadRequest(
+                    "unsupported AssertionConsumerService binding: only HTTP-POST is supported"
+                        .into(),
+                ));
+            }
         }
 
         // Honor the NameIDPolicy: no (or unspecified) requested format gets

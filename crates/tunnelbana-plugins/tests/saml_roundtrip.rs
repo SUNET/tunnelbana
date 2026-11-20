@@ -9,6 +9,7 @@ use std::sync::Arc;
 use base64::Engine;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
+use tunnelbana_core::error::Error;
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{
@@ -516,10 +517,14 @@ async fn saml_frontend_rejects_non_post_acs_binding_from_metadata() {
     );
     let mut ctx = post_sso_ctx(authn_b64);
 
-    let result = idp.handle_endpoint(&mut ctx, "sso").await;
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("an ACS registered only under HTTP-Artifact must be refused");
     assert!(
-        result.is_err(),
-        "an ACS registered only under HTTP-Artifact must be refused"
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
     );
 }
 
@@ -542,8 +547,39 @@ async fn saml_frontend_rejects_non_post_protocol_binding_when_sps_unknown() {
     );
     let mut ctx = post_sso_ctx(authn_b64);
 
-    let result = idp.handle_endpoint(&mut ctx, "sso").await;
-    assert!(result.is_err(), "non-POST ProtocolBinding must be refused");
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("non-POST ProtocolBinding must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_accepts_acs_location_also_registered_under_post() {
+    // Same location registered under Artifact first, then POST. With no
+    // ProtocolBinding gamlastan resolves the first registration (Artifact);
+    // the location is still a valid POST target, so the request must proceed.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-multi-binding-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_from_unbound(
+        "https://multi.example.com/SP",
+        "https://multi.example.com/SP/acs",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let action = idp.handle_endpoint(&mut ctx, "sso").await.unwrap();
+    assert!(
+        matches!(action, FrontendAction::StartAuth { .. }),
+        "an ACS location registered under HTTP-POST must be accepted"
+    );
 }
 
 #[tokio::test]
