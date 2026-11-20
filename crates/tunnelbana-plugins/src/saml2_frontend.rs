@@ -624,6 +624,23 @@ impl Saml2Frontend {
             }
         };
 
+        // Every response (and error response) is delivered by POSTing to
+        // `acs_url`. gamlastan resolves the ACS like pysaml2, so the binding
+        // can be Artifact or Redirect; refuse those rather than POST to an
+        // endpoint that expects something else. Applies to the metadata path
+        // and to `allow_unknown_sps` (which takes ProtocolBinding verbatim).
+        if processed.acs_binding != constants::BINDING_HTTP_POST {
+            tracing::warn!(
+                "saml2 frontend {}: SP {:?} resolved a non-POST ACS binding {:?}",
+                self.name,
+                processed.sp_entity_id,
+                processed.acs_binding
+            );
+            return Err(Error::BadRequest(
+                "unsupported AssertionConsumerService binding: only HTTP-POST is supported".into(),
+            ));
+        }
+
         // Honor the NameIDPolicy: no (or unspecified) requested format gets
         // the first configured one; a format outside the configured list is
         // answered with an InvalidNameIDPolicy SAML error at the (validated)

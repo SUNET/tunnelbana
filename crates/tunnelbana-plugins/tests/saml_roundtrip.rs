@@ -412,6 +412,45 @@ fn authn_request_from(issuer: &str, acs_url: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
 }
 
+/// Like `authn_request_from` but with a caller-chosen ProtocolBinding.
+fn authn_request_with_binding(issuer: &str, acs_url: &str, binding: &str) -> String {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: issuer.to_string(),
+        acs_url: Some(acs_url.to_string()),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: Some(binding.to_string()),
+        allow_create: true,
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let xml = req.to_xml_string().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+}
+
+/// An AuthnRequest with an ACS URL but no ProtocolBinding, so the binding is
+/// resolved from the SP's metadata.
+fn authn_request_from_unbound(issuer: &str, acs_url: &str) -> String {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: issuer.to_string(),
+        acs_url: Some(acs_url.to_string()),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: None,
+        allow_create: true,
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let xml = req.to_xml_string().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+}
+
 fn post_sso_ctx(authn_b64: String) -> Context {
     Context::new(
         HttpRequestData {
@@ -460,6 +499,51 @@ async fn saml_frontend_rejects_acs_not_in_metadata() {
 
     let result = idp.handle_endpoint(&mut ctx, "sso").await;
     assert!(result.is_err(), "ACS not in SP metadata must be rejected");
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_non_post_acs_binding_from_metadata() {
+    // The SP's only registered ACS is HTTP-Artifact; tunnelbana can only POST.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-artifact-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_from_unbound(
+        "https://artifact.example.com/SP",
+        "https://artifact.example.com/SP/acs",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let result = idp.handle_endpoint(&mut ctx, "sso").await;
+    assert!(
+        result.is_err(),
+        "an ACS registered only under HTTP-Artifact must be refused"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_non_post_protocol_binding_when_sps_unknown() {
+    let extra = serde_json::Map::new();
+    let mut config = serde_json::json!({
+        "idp_key_path": testdata("idp-key.pem"),
+        "idp_cert_path": testdata("idp-cert.pem"),
+        "name_id_format": "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+        "allow_unknown_sps": true
+    });
+    config.as_object_mut().unwrap().extend(extra);
+    let idp = tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", config))
+        .unwrap();
+    let authn_b64 = authn_request_with_binding(
+        "https://any.example.com/SP",
+        "https://any.example.com/SP/acs",
+        "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Artifact",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let result = idp.handle_endpoint(&mut ctx, "sso").await;
+    assert!(result.is_err(), "non-POST ProtocolBinding must be refused");
 }
 
 #[tokio::test]
