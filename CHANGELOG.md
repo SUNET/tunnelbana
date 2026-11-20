@@ -9,11 +9,13 @@
   registration of the URL in metadata order). Such requests are now refused
   with a bad-request error instead of POSTing an assertion to an endpoint that
   expects an artifact or redirect. A location that is also registered under
-  HTTP-POST is still accepted. The default-ACS and `AssertionConsumerServiceIndex`
-  paths already returned the registered binding under gamlastan 0.8, so the
-  hole exists in released versions up to 0.5.1, not only after the 0.11 bump.
-  Under `allow_unknown_sps` the requester chooses `ProtocolBinding`, so the
-  check does not constrain that mode.
+  HTTP-POST is still accepted when the request names no `ProtocolBinding`; an
+  explicitly requested non-POST `ProtocolBinding` is always refused. Under
+  `allow_unknown_sps` the ACS URL is unauthenticated, so only the requester's
+  own `ProtocolBinding` is checked there. The default-ACS and
+  `AssertionConsumerServiceIndex` paths already returned the registered
+  binding under gamlastan 0.8, so the hole exists in released versions up to
+  0.5.1, not only after the 0.11 bump.
 
 ## 0.6.0 [2026-09-30]
 

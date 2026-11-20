@@ -530,14 +530,12 @@ async fn saml_frontend_rejects_non_post_acs_binding_from_metadata() {
 
 #[tokio::test]
 async fn saml_frontend_rejects_non_post_protocol_binding_when_sps_unknown() {
-    let extra = serde_json::Map::new();
-    let mut config = serde_json::json!({
+    let config = serde_json::json!({
         "idp_key_path": testdata("idp-key.pem"),
         "idp_cert_path": testdata("idp-cert.pem"),
         "name_id_format": "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
         "allow_unknown_sps": true
     });
-    config.as_object_mut().unwrap().extend(extra);
     let idp = tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", config))
         .unwrap();
     let authn_b64 = authn_request_with_binding(
@@ -552,6 +550,34 @@ async fn saml_frontend_rejects_non_post_protocol_binding_when_sps_unknown() {
         .await
         .err()
         .expect("non-POST ProtocolBinding must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_explicit_non_post_binding_even_if_location_has_post() {
+    // Same multi-binding SP, but the request explicitly asks for HTTP-Artifact.
+    // The POST fallback is only for requests with no ProtocolBinding.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-multi-binding-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_with_binding(
+        "https://multi.example.com/SP",
+        "https://multi.example.com/SP/acs",
+        "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Artifact",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("an explicit non-POST ProtocolBinding must be refused");
     assert!(
         matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
         "refused for the wrong reason: {err:?}"
