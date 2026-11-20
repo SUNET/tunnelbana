@@ -452,6 +452,27 @@ fn authn_request_from_unbound(issuer: &str, acs_url: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
 }
 
+/// An AuthnRequest selecting the ACS by index only: no ACS URL, no
+/// ProtocolBinding.
+fn authn_request_with_index(issuer: &str, index: u16) -> String {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: issuer.to_string(),
+        acs_url: None,
+        acs_index: Some(index),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: None,
+        allow_create: true,
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let xml = req.to_xml_string().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+}
+
 fn post_sso_ctx(authn_b64: String) -> Context {
     Context::new(
         HttpRequestData {
@@ -578,6 +599,31 @@ async fn saml_frontend_rejects_explicit_non_post_binding_even_if_location_has_po
         .await
         .err()
         .expect("an explicit non-POST ProtocolBinding must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_non_post_acs_index_even_if_location_has_post() {
+    // Multi-binding SP: index 0 is Artifact, index 1 is POST at the same
+    // location. An index-only request selects index 0 (Artifact); the POST
+    // fallback must not silently swap it for index 1.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-multi-binding-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_with_index("https://multi.example.com/SP", 0);
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("an index selecting a non-POST endpoint must be refused");
     assert!(
         matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
         "refused for the wrong reason: {err:?}"

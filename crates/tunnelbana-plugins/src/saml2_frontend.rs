@@ -631,11 +631,13 @@ impl Saml2Frontend {
         // gamlastan takes the first registration of the URL in metadata
         // order, so a location also registered under HTTP-POST is still a
         // valid POST target and is accepted. An explicitly requested non-POST
-        // ProtocolBinding is always refused: the SP asked for that binding.
+        // ProtocolBinding, or an AssertionConsumerServiceIndex that selects a
+        // non-POST endpoint, is always refused: the SP chose that binding.
         // Under `allow_unknown_sps` the ACS URL is unauthenticated and only
         // the requester's own `ProtocolBinding` is checked.
         if processed.acs_binding != constants::BINDING_HTTP_POST {
             let post_registered_at_location = authn_request.protocol_binding.is_none()
+                && authn_request.assertion_consumer_service_index.is_none()
                 && entry.as_ref().is_some_and(|entry| {
                     entry.sp_sso.assertion_consumer_services.iter().any(|acs| {
                         acs.endpoint.location == processed.acs_url
