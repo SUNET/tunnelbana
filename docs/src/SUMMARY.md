@@ -2,6 +2,7 @@
 
 [Introduction](introduction.md)
 
+- [Upgrading from 0.5.1](upgrading.md)
 - [Architecture](architecture.md)
 - [Configuration](configuration.md)
   - [Built-in plugin reference](built-in-plugins.md)

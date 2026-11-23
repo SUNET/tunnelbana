@@ -189,10 +189,30 @@ Serves `…/OIDC/.well-known/openid-configuration`, `…/OIDC/jwks`,
 flow with PKCE, the `client_credentials` grant for confidential clients, the
 `refresh_token` grant (RFC 6749 §6) for clients that register it, and the
 `client_secret_basic`, `client_secret_post`, `none` and `private_key_jwt`
-token-endpoint auth methods. Refresh tokens are stateless (a sealed,
-self-contained token) and are rotated on each use; like all tokens here they
-carry their own expiry and cannot be revoked server-side before that expiry
-elapses.
+token-endpoint auth methods. Refresh tokens are self-contained sealed tokens
+with their own expiry and are rotated on each use. Redemption atomically
+records code/refresh-token consumption; `private_key_jwt` assertions use the
+same token-use store. The standard binary uses process-local memory, so a
+restart loses those replay records and separate replicas do not share them.
+Rust embedders can inject an atomic shared store through
+[`OidcFrontend::build_with_token_use_store`](writing-a-plugin.md#injecting-an-oidc-token-use-store).
+There is no TOML store selector or built-in API to revoke all tokens for a
+browser login. DPoP, SAML and federation replay storage remain separate.
+
+#### Freshness and authentication time
+
+Both `oidc` and `oidc_federation` frontends validate `max_age` as a non-negative
+integer. Any supplied `max_age` conservatively forces upstream authentication
+and bypasses saved-login hooks, rather than comparing it with a cached login's
+age. `prompt=none` plus `max_age` returns `login_required`; `prompt=login` also
+forces authentication. Backends may reject constraints they cannot satisfy.
+
+Known upstream `auth_time` / SAML `AuthnInstant` values are preserved in
+downstream OIDC `auth_time`; `iat` remains issuance time. A missing upstream
+timestamp remains unknown internally, although the token serializer retains
+its current-time fallback. Saved-login plugins must preserve known times and
+must not infer freshness from a missing timestamp. See
+[authentication-time upgrade notes](upgrading.md#authentication-time-and-freshness).
 
 When `frontend.config.dpop.enabled = true`, the
 frontend advertises `dpop_signing_alg_values_supported = ["ES256"]`, accepts
@@ -423,7 +443,7 @@ algorithm, independently of `signing_algorithm` used for outbound client
 assertions. It defaults to `RS256`; set it explicitly (for example, `ES256`) when
 the upstream registration uses another algorithm. HMAC (`HS*`) is rejected at
 startup because validation uses public JWKS. Algorithms without a crypto
-implementation, including `ES256K` in jose-rs 0.7.0, also fail at startup.
+implementation, including `ES256K` in the workspace's jose-rs, also fail at startup.
 ML-DSA and composite ML-DSA algorithms are available in standard builds; pin the
 exact algorithm used by the upstream registration (see
 [PQC signing keys](configuration.md#pqc-signing-keys-for-oidc)).

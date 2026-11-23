@@ -36,6 +36,9 @@ pub trait Backend: Send + Sync {
     fn register_endpoints(&self) -> Vec<Route>;
     /// Begin authentication upstream (e.g. return a redirect to the IdP/OP).
     async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response>;
+    /// Optional saved-login acceptance; default declines.
+    async fn restore_authn_context(&self, ctx: &mut Context, response: &InternalData)
+        -> Result<bool> { Ok(false) }
     /// An inbound hit on a backend endpoint (e.g. the ACS / callback).
     async fn handle_endpoint(&self, ctx: &mut Context, route_id: &str) -> Result<BackendAction>;
 }
@@ -44,6 +47,9 @@ pub trait Backend: Send + Sync {
 pub trait MicroService: Send + Sync {
     fn name(&self) -> &str;
     async fn process_request(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData>;
+    /// Optional verified upstream identity; default: normal login.
+    async fn try_authenticate(&self, ctx: &mut Context, request: &InternalData)
+        -> Result<Option<InternalData>> { Ok(None) }
     async fn process_response(&self, ctx: &mut Context, data: InternalData) -> Result<InternalData>;
     async fn process_response_action(&self, ctx: &mut Context, data: InternalData)
         -> Result<MicroServiceResponseAction>;
@@ -107,6 +113,7 @@ pub struct BuildContext {
     pub attribute_mapper: Arc<AttributeMapper>,
     pub http_client: Arc<dyn HttpClient>,   // outbound HTTP (reqwest-backed)
     pub secret: String,                     // global state secret, for derived keys
+    pub previous_secrets: Vec<String>,       // decryption-only rotation secrets
 }
 
 impl BuildContext {
@@ -149,6 +156,7 @@ ctx.request.query.get("client_id");      // query params
 ctx.request.form.get("SAMLResponse");    // POST form fields
 ctx.request.authorization();             // the Authorization header
 ctx.request.bearer_token();              // its bearer token, if any
+ctx.request.cookies.get("__Host-LOGIN"); // an untrusted browser cookie
 
 ctx.state.set_value(&self.name, "authz_request", json_value);
 ctx.state.get_value(&self.name, "authz_request");
@@ -158,6 +166,19 @@ ctx.state.clear_namespace(&self.name);   // wipe this plugin's state
 
 Always namespace state with your instance `name` so two instances of the same
 plugin don't collide.
+
+Plugins append response cookie header values to `ctx.set_cookies`. Native
+plugins must emit valid HTTP headers; the Python adapter also rejects empty,
+non-ASCII or control-containing cookie strings and enforces append-only output.
+Queued cookies are attached even when the flow returns an error.
+
+`try_authenticate` runs after request transforms and backend selection, unless
+`force_authn` is true. Return an authenticated, unexpired upstream identity,
+before frontend-specific transformations. The selected backend must accept it
+through `restore_authn_context`; then the proxy restores the current requester
+and runs all response services. Custom backends should retain the default
+refusal until they can validate issuer, assurance and metadata requirements.
+See the [saved-login contract](python-microservices.md#reusing-a-saved-login).
 
 ## Worked example: the OpenID Federation frontend
 
@@ -292,17 +313,40 @@ async fn handle_authn_response(&self, ctx: &mut Context, response: InternalData)
 {
     let req = self.load_authz_request(ctx)
         .ok_or_else(|| Error::State("no in-flight authorization request".into()))?;
-    // Map internal attributes → OIDC claims, compose the subject, then redirect.
-    let external = self.mapper.from_internal("openid", &response.attributes);
-    let sub = response.subject_id.clone()
-        .or_else(|| self.mapper.compose_subject_id(&response.attributes))
-        .ok_or_else(|| Error::Authn("no subject identifier".into()))?;
-    match self.provider.authorization_redirect(&req, &sub, &external, response.auth_info.auth_class_ref) {
-        Ok(r)  => Ok(r),
-        Err(e) => Ok(e.to_redirect(&req.redirect_uri)),
+    let mut external = self.mapper.from_internal("openid", &response.attributes);
+    let auth_time = crate::authentication_time::unix_seconds(
+        response.auth_info.timestamp.as_deref(),
+    )?;
+    let extra = crate::oidc_common::authenticating_authority_claims(
+        &self.mapper, &mut external, response.auth_info.issuer.as_deref(),
+    );
+    match self.provider
+        .authorization_redirect_with_claims_subject_resolver_and_auth_time(
+            &req,
+            |client| {
+                crate::oidc_common::resolve_authorization_subject(
+                    ctx, &self.name, client, &response, &self.mapper,
+                ).map_err(|error| error.with_state(req.state.clone()))
+            },
+            &external,
+            response.auth_info.auth_class_ref.clone(),
+            &extra,
+            auth_time,
+        ).await
+    {
+        Ok(r) => Ok(r),
+        Err(error) => Ok(crate::oidc_common::authorization_error_response(
+            &self.provider, &req, error,
+        ).await),
     }
 }
 ```
+
+This excerpt uses private helpers from the built-in plugin crate. The bound
+subject resolver checks the client registration saved before login, while
+`auth_time` preserves the upstream authentication instant. A custom frontend
+must implement equivalent registration binding and timestamp handling rather
+than replacing authentication time with the current time.
 
 ### 6. `handle_backend_error` - render failures
 
@@ -322,7 +366,9 @@ async fn handle_backend_error(&self, ctx: &mut Context, error: &Error) -> Result
         };
         let oerr = OAuthError::new(code, description)
             .with_state(req.state.clone());
-        return Ok(oerr.to_redirect(&req.redirect_uri));
+        return Ok(crate::oidc_common::authorization_error_response(
+            &self.provider, &req, oerr,
+        ).await);
     }
     Ok(Response::text(500, "authentication could not be completed"))
 }
@@ -368,6 +414,57 @@ To add **`my_frontend`**:
      [frontend.config]
      # → deserialized by your MyFrontendConfig
    ```
+
+## Injecting an OIDC token-use store
+
+Rust embedders can supply a shared `TokenUseStore` to the ordinary OIDC
+frontend when assembling their proxy:
+
+```rust
+use std::sync::Arc;
+use tunnelbana_core::error::Result;
+use tunnelbana_core::plugin::{BuildContext, Frontend};
+use tunnelbana_oidc::provider::TokenUseStore;
+use tunnelbana_plugins::oidc_frontend::OidcFrontend;
+
+fn build_for_replica(
+    config: &BuildContext,
+    shared_store: Arc<dyn TokenUseStore>,
+) -> Result<Box<dyn Frontend>> {
+    OidcFrontend::build_with_token_use_store(config, shared_store)
+}
+```
+
+The standard binary's registry still registers `OidcFrontend::build`, which
+creates an in-memory store. There is no TOML database selector. Frontend
+registry constructors are function pointers; a closure capturing a connection
+pool cannot be passed directly to `register_frontend`.
+
+Implement the asynchronous atomic store operation:
+
+```rust
+async fn consume(&self, token_hash: &str, ttl_secs: u64)
+    -> std::result::Result<bool, String>;
+```
+
+Return `Ok(true)` for first consumption, `Ok(false)` for an already-live record,
+and `Err(...)` if consumption cannot be determined or persisted. The provider
+rejects replay and fails closed on errors, returning a generic protocol error
+rather than the storage diagnostic. A check followed by a separate insert is
+insufficient: concurrent replicas must agree on exactly one winner. Retain
+records for their supplied TTL; do not evict live records and permit reuse.
+
+The provider uses this store for authorization codes, rotated refresh tokens
+and `private_key_jwt` client assertions. Keys contain a token-kind prefix and
+digest, rather than raw credentials. Assertion keys bind client ID and `jti`
+but do not include the issuer: give independent issuers separate namespaces.
+All replicas accepting the same tokens must use the same effective store and
+namespace, with compatible client and key configuration.
+
+This constructor affects the ordinary OIDC frontend only. Federation OP,
+DPoP proof and SAML assertion replay stores remain separate. Sharing token-use
+records does not provide browser session storage or make those other features
+safe across replicas. See [replica deployment](upgrading.md#replica-deployment-and-replay-protection).
 
 ## Conventions to follow
 

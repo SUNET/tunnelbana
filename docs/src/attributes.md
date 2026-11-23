@@ -25,13 +25,13 @@ thing the middle of the proxy ever deals with.
 ```text
   upstream IdP/OP                tunnelbana                 downstream RP/SP
   ───────────────   ┌──────────────────────────────────┐   ────────────────
-  eduPersonPrincipalName ─► to_internal ─► edupersonprincipalname
+  subject-id         ─► to_internal ─► subject-id
   mail               ─►  (backend)    ─►  mail   ─┐
                                                   │  micro-services
                                                   │  (transform internal
                                                   │   names in place)
                                                   ▼
-                                          edupersonprincipalname ─► from_internal ─► sub
+                                          subject-id ─► from_internal ─► sub
                                           mail                   ─► (frontend)   ─► email
 ```
 
@@ -66,10 +66,10 @@ openid = ["given_name"]
 saml   = ["givenName"]                 # plain-list form, still valid
 
 [attributes.edupersonprincipalname]
-openid = ["sub"]
 saml   = { names = ["eduPersonPrincipalName"], oid = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", friendly_name = "eduPersonPrincipalName" }
 
 [attributes.subject-id]
+openid = ["sub"]
 saml   = { names = ["subject-id"], oid = "urn:oasis:names:tc:SAML:attribute:subject-id", friendly_name = "subject-id" }
 ```
 
@@ -117,13 +117,20 @@ The same internal set, emitted to an OIDC RP and to a SAML SP:
 ```text
 internal                          OIDC (profile = "openid")     SAML (profile = "saml")
   mail = [...]                ─►  email                     ─►  mail
-  edupersonprincipalname = .. ─►  sub                       ─►  eduPersonPrincipalName
+  subject-id = [...]         ─►  sub                       ─►  subject-id
+  edupersonprincipalname = .. ─►  (not mapped)              ─►  eduPersonPrincipalName
   givenname = [...]           ─►  given_name                ─►  givenName
 ```
 
 For SAML with `attribute_name_format = "uri"`, the attribute is named by its
 `oid` and tagged with the `friendly_name`; in `basic` mode the first plain name
 is used.
+
+The bundled map changed after 0.5.1: it now composes identifiers from
+`subject-id`, maps that name to OpenID `sub`, expands the SWAMID attribute
+vocabulary and omits a default `eduPersonTargetedID` mapping. Replacing an old
+map can affect account identifiers and released data; custom maps are not
+automatically changed. See [the upgrade guidance](upgrading.md#default-attributes-and-account-identifiers).
 
 ## Trusted upstream authentication authority
 
@@ -170,6 +177,11 @@ exchanges. The configured OpenID name is also listed in discovery's
 This mapping is deliberately different from an ordinary attribute mapping: it
 controls the claim's release and external name, but never its value. Both OIDC
 frontend types enforce the same validation, discovery, and issuance rules.
+
+The SAML frontend also uses the trusted `auth_info.issuer` as an
+`AuthenticatingAuthority` inside the assertion's authentication context when
+available. This is protocol metadata, not an ordinary mapped attribute, and
+does not depend on the OpenID release-control mapping above.
 
 ## Composing the subject id (the OIDC `sub`)
 

@@ -20,6 +20,10 @@ pub trait MicroService: Send + Sync {
     async fn process_request(&self, ctx: &mut Context, data: InternalData)
         -> Result<InternalData> { Ok(data) }
 
+    /// Optional verified upstream identity; default: no saved login.
+    async fn try_authenticate(&self, ctx: &mut Context, request: &InternalData)
+        -> Result<Option<InternalData>> { Ok(None) }
+
     /// Transform the response-path data (backend → frontend). Default: identity.
     async fn process_response(&self, ctx: &mut Context, data: InternalData)
         -> Result<InternalData> { Ok(data) }
@@ -79,7 +83,7 @@ Key facts that follow from this:
 
 - **They only run on the auth flow.** `process_request` fires when a frontend
   returns `StartAuth`; `process_response` fires when a backend returns
-  `AuthResponse`. Endpoints that merely `Respond` (discovery, JWKS, token,
+  `AuthResponse` or a saved identity is accepted. Endpoints that merely `Respond` (discovery, JWKS, token,
   SP metadata) never touch the micro-service chain.
 - **Order is the config order**, and it is the *same* order on both paths
   (request path forward, response path forward) - there is no automatic
@@ -89,6 +93,12 @@ Key facts that follow from this:
   pinned in `StartAuth` → a backend a micro-service pinned in `ctx.target_backend`
   → the default (the first configured backend). `custom_routing` uses exactly
   this hook.
+- **Saved-login hooks run after backend selection.** The proxy tries
+  `try_authenticate` in configuration order unless `force_authn` is true. A
+  candidate must pass the selected backend's `restore_authn_context` check;
+  accepted identities use the current requester and run the whole response
+  chain. The backend defaults to refusal. See
+  [saved-login reuse](python-microservices.md#reusing-a-saved-login).
 - **The data is the contract.** A micro-service receives and returns
   `InternalData` - `attributes`, `requester`, `subject_id`, `auth_info`. Mutate
   that; don't reach into protocol-specific structures.

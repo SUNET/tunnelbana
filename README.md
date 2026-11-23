@@ -5,6 +5,8 @@
 # tunnelbana
 
 Current release: **0.5.1** (2026-09-29). See the [changelog](CHANGELOG.md#051-2026-09-29).
+Main contains unreleased 0.6.0 changes; see
+[Upgrading from 0.5.1](docs/src/upgrading.md) for identifier, session and deployment changes.
 
 A high-performance, SATOSA-like **identity proxy** in Rust. It translates between
 identity protocols (OpenID Connect, OAuth 2.0, OpenID Federation, and
@@ -63,7 +65,8 @@ For bug reports and patches, please create issues and pull requests at https://g
   session store.
 - **Stateless OIDC tokens** — authorization codes and access tokens are
   confidential JWE tokens carrying their own state + expiry; id_tokens are signed
-  JWTs. The token and userinfo endpoints do no server lookups.
+  JWTs. Token redemption still checks atomic replay records, in memory by
+  default. Rust embedders can inject a shared OIDC token-use store.
 - **Explicit plugin registry** — `Box<dyn Frontend/Backend/MicroService>`
   selected by a `type` string in config. Rust implementations are registered
   at compile time; configured Python micro-service modules are imported only
@@ -72,9 +75,12 @@ For bug reports and patches, please create issues and pull requests at https://g
 - **Keys** may be PEM/DER files **or** inline/file JWK(s); everything is
   normalized to a `jose_rs::Jwk` internally.
 
-The main login state is shared-nothing, but the built-in DPoP frontend and SAML
-backend replay caches are process-local. Deploy those replay-sensitive modes as
-a single process unless a shared replay-store implementation is added.
+The main login-flow state is carried in the browser cookie. Standard OIDC and
+federation token-use stores, DPoP proof caches and SAML assertion caches are
+process-local. Deploy replay-sensitive modes as a single process unless their
+stores are shared; the new OIDC embedding constructor covers only that
+frontend's token-use records. See the
+[replica deployment guidance](docs/src/upgrading.md#replica-deployment-and-replay-protection).
 
 ## What works today (not fully tested)
 
