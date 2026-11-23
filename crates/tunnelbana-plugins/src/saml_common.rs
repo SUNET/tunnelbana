@@ -1,6 +1,6 @@
 //! Shared SAML plumbing used by both the SAML2 backend (SP role) and frontend
-//! (IdP role): MDQ client construction, PEM cert extraction and verifier
-//! assembly from DER certs.
+//! (IdP role): MDQ client construction, PEM cert extraction, verifier
+//! assembly from DER certs, and the raw-query `HttpRequest` adapter.
 
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use gamlastan::crypto::{KeysManager, SamlVerifier};
 use gamlastan_mdq::{MdqClient, MdqTransform, MetadataFetcher, RequiredRole, ReqwestFetcher};
 
 use tunnelbana_core::error::{Error, Result};
+use tunnelbana_core::http::HttpRequestData;
 
 /// `[*.config.mdq]` — SAML Metadata Query Protocol source for entity metadata.
 #[derive(Debug, Deserialize)]
@@ -131,4 +132,55 @@ pub fn extract_cert_b64(pem: &[u8]) -> String {
         }
     }
     b64
+}
+
+/// `gamlastan::bindings::traits::HttpRequest` adapter exposing the **raw**
+/// (still percent-encoded) query values from `HttpRequestData.uri`.
+/// `HttpRequestData.query` is already decoded, which would corrupt the
+/// Redirect-binding signature input, which must be preserved byte-for-byte.
+pub(crate) struct RawQueryRequest<'a> {
+    request: &'a HttpRequestData,
+    raw_query: Option<&'a str>,
+}
+
+impl<'a> RawQueryRequest<'a> {
+    pub(crate) fn new(request: &'a HttpRequestData) -> Self {
+        let raw_query = request.uri.split_once('?').map(|(_, q)| q);
+        Self { request, raw_query }
+    }
+}
+
+impl gamlastan::bindings::traits::HttpRequest for RawQueryRequest<'_> {
+    fn method(&self) -> &str {
+        &self.request.method
+    }
+
+    fn url(&self) -> &str {
+        &self.request.uri
+    }
+
+    fn query_param(&self, name: &str) -> Option<&str> {
+        let qs = self.raw_query?;
+        qs.split('&')
+            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+    }
+
+    fn form_param(&self, name: &str) -> Option<&str> {
+        self.request.form.get(name).map(|s| s.as_str())
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.request
+            .headers
+            .get(&name.to_lowercase())
+            .map(|s| s.as_str())
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.request.body
+    }
+
+    fn remote_addr(&self) -> Option<&str> {
+        None
+    }
 }

@@ -30,11 +30,13 @@ use gamlastan_mdq::{MdqClient, MdqError};
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
 use tunnelbana_core::error::{Error, Result};
-use tunnelbana_core::http::{HttpRequestData, Response};
+use tunnelbana_core::http::Response;
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, Route};
 
-use crate::saml_common::{build_mdq_client, extract_cert_b64, verifier_from_cert_ders, MdqConfig};
+use crate::saml_common::{
+    build_mdq_client, extract_cert_b64, verifier_from_cert_ders, MdqConfig, RawQueryRequest,
+};
 
 #[derive(Debug, Deserialize)]
 struct Saml2FrontendConfig {
@@ -259,51 +261,6 @@ fn load_local_metadata(paths: &[String]) -> Result<BTreeMap<String, SpEntry>> {
         }
     }
     Ok(store)
-}
-
-/// `gamlastan::bindings::traits::HttpRequest` adapter exposing the **raw**
-/// (still percent-encoded) query values from `HttpRequestData.uri`.
-/// `HttpRequestData.query` is already decoded, which would corrupt the
-/// redirect-binding signature input.
-struct RawQueryRequest<'a> {
-    request: &'a HttpRequestData,
-    raw_query: Option<&'a str>,
-}
-
-impl<'a> RawQueryRequest<'a> {
-    fn new(request: &'a HttpRequestData) -> Self {
-        let raw_query = request.uri.split_once('?').map(|(_, q)| q);
-        Self { request, raw_query }
-    }
-}
-
-impl gamlastan::bindings::traits::HttpRequest for RawQueryRequest<'_> {
-    fn method(&self) -> &str {
-        &self.request.method
-    }
-    fn url(&self) -> &str {
-        &self.request.uri
-    }
-    fn query_param(&self, name: &str) -> Option<&str> {
-        let qs = self.raw_query?;
-        qs.split('&')
-            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
-    }
-    fn form_param(&self, name: &str) -> Option<&str> {
-        self.request.form.get(name).map(|s| s.as_str())
-    }
-    fn header(&self, name: &str) -> Option<&str> {
-        self.request
-            .headers
-            .get(&name.to_lowercase())
-            .map(|s| s.as_str())
-    }
-    fn body(&self) -> &[u8] {
-        &self.request.body
-    }
-    fn remote_addr(&self) -> Option<&str> {
-        None
-    }
 }
 
 pub struct Saml2Frontend {
@@ -1069,34 +1026,27 @@ impl Frontend for Saml2Frontend {
 }
 
 impl Saml2Frontend {
-    /// Sign the Response XML (assertion first, then response) by inserting a
-    /// ds:Signature template and calling the enveloped signer.
+    /// Sign the Response XML (assertion first, then response) with gamlastan's
+    /// `sign_response_xml_with`: the `ds:Signature` template goes after the
+    /// element's `saml:Issuer` (the position SAML Core requires), located by
+    /// namespace and ID, with the signature method taken from the signer.
     fn sign_response_xml(
         &self,
         response_xml: &str,
         response_id: &str,
         assertion_id: Option<&str>,
     ) -> Result<String> {
-        let mut xml = response_xml.to_string();
-        if self.sign_assertions {
-            if let Some(aid) = assertion_id {
-                let sig = signature_template(aid, &self.cert_b64);
-                xml = insert_signature_after_element(&xml, "saml:Assertion", &sig)?;
-                xml = self
-                    .signer
-                    .sign_enveloped(&xml)
-                    .map_err(|e| Error::Crypto(format!("assertion signing: {e}")))?;
-            }
-        }
-        if self.sign_responses {
-            let sig = signature_template(response_id, &self.cert_b64);
-            xml = insert_signature_after_element(&xml, "samlp:Response", &sig)?;
-            xml = self
-                .signer
-                .sign_enveloped(&xml)
-                .map_err(|e| Error::Crypto(format!("response signing: {e}")))?;
-        }
-        Ok(xml)
+        idp_profile::sign_response_xml_with(
+            response_xml,
+            &self.signer,
+            &self.cert_b64,
+            response_id,
+            assertion_id,
+            self.sign_assertions,
+            self.sign_responses,
+            &gamlastan::crypto::SigningAlgorithms::default(),
+        )
+        .map_err(|e| Error::Crypto(format!("response signing: {e}")))
     }
 
     fn build_metadata(&self) -> Result<String> {
@@ -1169,31 +1119,6 @@ fn decode_authn_request(encoded: &str, deflated: bool) -> Result<String> {
     } else {
         String::from_utf8(bytes).map_err(|e| Error::BadRequest(format!("SAMLRequest UTF-8: {e}")))
     }
-}
-
-/// ds:Signature template with empty digest/signature placeholders for enveloped
-/// signing (filled by `signer.sign_enveloped`).
-fn signature_template(reference_id: &str, cert_b64: &str) -> String {
-    format!(
-        r##"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="#{id}"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue/></ds:Reference></ds:SignedInfo><ds:SignatureValue/><ds:KeyInfo><ds:X509Data><ds:X509Certificate>{cert}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>"##,
-        id = reference_id,
-        cert = cert_b64,
-    )
-}
-
-/// Insert a signature template right after the opening tag of `element_name`.
-fn insert_signature_after_element(xml: &str, element_name: &str, sig: &str) -> Result<String> {
-    let with_space = format!("<{element_name} ");
-    let with_close = format!("<{element_name}>");
-    let tag_start = xml
-        .find(&with_space)
-        .or_else(|| xml.find(&with_close))
-        .ok_or_else(|| Error::Internal(format!("cannot find <{element_name}> in XML")))?;
-    let rel = xml[tag_start..]
-        .find('>')
-        .ok_or_else(|| Error::Internal(format!("malformed <{element_name}> tag")))?;
-    let pos = tag_start + rel;
-    Ok(format!("{}{}{}", &xml[..=pos], sig, &xml[pos + 1..]))
 }
 
 #[cfg(test)]
