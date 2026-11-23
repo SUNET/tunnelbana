@@ -1,6 +1,5 @@
 # Changelog
 
-
 ## 0.6.0 Unreleased
 
 - **SAML frontend: refuse non-POST ACS bindings.** Responses (and error

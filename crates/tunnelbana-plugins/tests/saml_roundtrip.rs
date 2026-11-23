@@ -250,6 +250,61 @@ async fn saml_idp_signs_and_sp_verifies() {
     );
 }
 
+/// Drive the IdP frontend through one login and return the signed Response XML.
+async fn issued_response_xml(idp: &dyn Frontend) -> String {
+    let (_req_id, authn_b64) = downstream_authn_request();
+    let mut idp_ctx = Context::new(
+        HttpRequestData {
+            path: "IdP/sso".into(),
+            method: "POST".into(),
+            form: BTreeMap::from([("SAMLRequest".to_string(), authn_b64)]),
+            ..Default::default()
+        },
+        State::new(),
+    );
+    let action = idp.handle_endpoint(&mut idp_ctx, "sso").await.unwrap();
+    assert!(matches!(action, FrontendAction::StartAuth { .. }));
+    let authenticated = InternalData {
+        subject_id: Some("anna-persistent-id".to_string()),
+        ..Default::default()
+    };
+    let resp: Response = idp
+        .handle_authn_response(&mut idp_ctx, authenticated)
+        .await
+        .unwrap();
+    let html = String::from_utf8(resp.body).unwrap();
+    String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(extract_saml_response(&html))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn saml_idp_places_signatures_after_issuer() {
+    // SAML Core orders `ds:Signature` after `saml:Issuer` in both the Response
+    // and the Assertion (before Subject / Status). Sign both and check each.
+    let extra = serde_json::json!({ "sign_responses": true, "sign_assertions": true });
+    let idp = frontend_with(extra.as_object().unwrap().clone());
+    let xml = issued_response_xml(&*idp).await;
+
+    assert_eq!(
+        xml.matches("</saml:Issuer><ds:Signature").count(),
+        2,
+        "both signatures must follow their Issuer: {xml}"
+    );
+    assert!(
+        !xml.contains("<samlp:Response ")
+            || !xml
+                .split("<samlp:Response ")
+                .nth(1)
+                .and_then(|rest| rest.split_once('>'))
+                .is_some_and(|(_, after)| after.starts_with("<ds:Signature")),
+        "the Response signature must not precede the Issuer"
+    );
+}
+
 #[tokio::test]
 async fn saml_backend_rejects_tampered_response() {
     let idp = frontend();

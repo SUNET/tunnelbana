@@ -43,6 +43,7 @@ use tunnelbana_core::plugin::{Backend, BackendAction, BuildContext, Route};
 
 use crate::saml_common::{
     build_mdq_client_with_fetcher, extract_cert_b64, verifier_from_cert_ders, MdqConfig,
+    RawQueryRequest,
 };
 use crate::stepup_policy::{
     resolve_policy, InitialPolicyHandoff, MetadataPolicyValues, PolicySubject,
@@ -333,56 +334,6 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// `gamlastan::bindings::traits::HttpRequest` adapter exposing the raw
-/// percent-encoded query values from `HttpRequestData.uri`, which Redirect
-/// binding signature verification must preserve byte-for-byte.
-struct RawQueryRequest<'a> {
-    request: &'a HttpRequestData,
-    raw_query: Option<&'a str>,
-}
-
-impl<'a> RawQueryRequest<'a> {
-    fn new(request: &'a HttpRequestData) -> Self {
-        let raw_query = request.uri.split_once('?').map(|(_, q)| q);
-        Self { request, raw_query }
-    }
-}
-
-impl gamlastan::bindings::traits::HttpRequest for RawQueryRequest<'_> {
-    fn method(&self) -> &str {
-        &self.request.method
-    }
-
-    fn url(&self) -> &str {
-        &self.request.uri
-    }
-
-    fn query_param(&self, name: &str) -> Option<&str> {
-        let qs = self.raw_query?;
-        qs.split('&')
-            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
-    }
-
-    fn form_param(&self, name: &str) -> Option<&str> {
-        self.request.form.get(name).map(|s| s.as_str())
-    }
-
-    fn header(&self, name: &str) -> Option<&str> {
-        self.request
-            .headers
-            .get(&name.to_lowercase())
-            .map(|s| s.as_str())
-    }
-
-    fn body(&self) -> &[u8] {
-        &self.request.body
-    }
-
-    fn remote_addr(&self) -> Option<&str> {
-        None
-    }
 }
 
 struct DecodedAcsResponse {
