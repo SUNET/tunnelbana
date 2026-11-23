@@ -9,6 +9,7 @@ use std::sync::Arc;
 use base64::Engine;
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
+use tunnelbana_core::error::Error;
 use tunnelbana_core::http::{HttpRequestData, Response};
 use tunnelbana_core::internal::{AuthenticationInformation, InternalData, SubjectType};
 use tunnelbana_core::plugin::{
@@ -412,6 +413,66 @@ fn authn_request_from(issuer: &str, acs_url: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
 }
 
+/// Like `authn_request_from` but with a caller-chosen ProtocolBinding.
+fn authn_request_with_binding(issuer: &str, acs_url: &str, binding: &str) -> String {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: issuer.to_string(),
+        acs_url: Some(acs_url.to_string()),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: Some(binding.to_string()),
+        allow_create: true,
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let xml = req.to_xml_string().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+}
+
+/// An AuthnRequest with an ACS URL but no ProtocolBinding, so the binding is
+/// resolved from the SP's metadata.
+fn authn_request_from_unbound(issuer: &str, acs_url: &str) -> String {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: issuer.to_string(),
+        acs_url: Some(acs_url.to_string()),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: None,
+        allow_create: true,
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let xml = req.to_xml_string().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+}
+
+/// An AuthnRequest selecting the ACS by index only: no ACS URL, no
+/// ProtocolBinding.
+fn authn_request_with_index(issuer: &str, index: u16) -> String {
+    use gamlastan::profiles::sso::sp;
+    use gamlastan::profiles::sso::web_browser::AuthnRequestOptions;
+    use gamlastan::xml::serialize::SamlSerialize;
+
+    let opts = AuthnRequestOptions {
+        sp_entity_id: issuer.to_string(),
+        acs_url: None,
+        acs_index: Some(index),
+        destination: Some("https://proxy.example.com/IdP/sso".to_string()),
+        protocol_binding: None,
+        allow_create: true,
+        ..Default::default()
+    };
+    let req = sp::create_authn_request(&opts).unwrap();
+    let xml = req.to_xml_string().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+}
+
 fn post_sso_ctx(authn_b64: String) -> Context {
     Context::new(
         HttpRequestData {
@@ -460,6 +521,137 @@ async fn saml_frontend_rejects_acs_not_in_metadata() {
 
     let result = idp.handle_endpoint(&mut ctx, "sso").await;
     assert!(result.is_err(), "ACS not in SP metadata must be rejected");
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_non_post_acs_binding_from_metadata() {
+    // The SP's only registered ACS is HTTP-Artifact; tunnelbana can only POST.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-artifact-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_from_unbound(
+        "https://artifact.example.com/SP",
+        "https://artifact.example.com/SP/acs",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("an ACS registered only under HTTP-Artifact must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_non_post_protocol_binding_when_sps_unknown() {
+    let config = serde_json::json!({
+        "idp_key_path": testdata("idp-key.pem"),
+        "idp_cert_path": testdata("idp-cert.pem"),
+        "name_id_format": "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+        "allow_unknown_sps": true
+    });
+    let idp = tunnelbana_plugins::saml2_frontend::Saml2Frontend::build(&build_ctx("IdP", config))
+        .unwrap();
+    let authn_b64 = authn_request_with_binding(
+        "https://any.example.com/SP",
+        "https://any.example.com/SP/acs",
+        "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Artifact",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("non-POST ProtocolBinding must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_explicit_non_post_binding_even_if_location_has_post() {
+    // Same multi-binding SP, but the request explicitly asks for HTTP-Artifact.
+    // The POST fallback is only for requests with no ProtocolBinding.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-multi-binding-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_with_binding(
+        "https://multi.example.com/SP",
+        "https://multi.example.com/SP/acs",
+        "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Artifact",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("an explicit non-POST ProtocolBinding must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_rejects_non_post_acs_index_even_if_location_has_post() {
+    // Multi-binding SP: index 0 is Artifact, index 1 is POST at the same
+    // location. An index-only request selects index 0 (Artifact); the POST
+    // fallback must not silently swap it for index 1.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-multi-binding-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_with_index("https://multi.example.com/SP", 0);
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let err = idp
+        .handle_endpoint(&mut ctx, "sso")
+        .await
+        .err()
+        .expect("an index selecting a non-POST endpoint must be refused");
+    assert!(
+        matches!(&err, Error::BadRequest(m) if m.contains("AssertionConsumerService binding")),
+        "refused for the wrong reason: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn saml_frontend_accepts_acs_location_also_registered_under_post() {
+    // Same location registered under Artifact first, then POST. With no
+    // ProtocolBinding gamlastan resolves the first registration (Artifact);
+    // the location is still a valid POST target, so the request must proceed.
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "metadata".into(),
+        serde_json::json!({ "local": [testdata("sp-multi-binding-metadata.xml")] }),
+    );
+    let idp = frontend_with(extra);
+    let authn_b64 = authn_request_from_unbound(
+        "https://multi.example.com/SP",
+        "https://multi.example.com/SP/acs",
+    );
+    let mut ctx = post_sso_ctx(authn_b64);
+
+    let action = idp.handle_endpoint(&mut ctx, "sso").await.unwrap();
+    assert!(
+        matches!(action, FrontendAction::StartAuth { .. }),
+        "an ACS location registered under HTTP-POST must be accepted"
+    );
 }
 
 #[tokio::test]
