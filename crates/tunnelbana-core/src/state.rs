@@ -65,7 +65,7 @@ const HKDF_INFO: &[u8] = b"tunnelbana state seal: dir+A256GCM";
 const HOST_PREFIX: &str = "__Host-";
 
 /// The mutable per-request state map.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     data: Map<String, Value>,
     /// Original issue time of an unsealed envelope. This is deliberately kept

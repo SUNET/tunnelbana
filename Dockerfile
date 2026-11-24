@@ -4,12 +4,10 @@
 #
 # Multi-stage: the release binary is compiled on Debian 13 (trixie) so its
 # glibc matches the trixie-slim runtime, then copied into a minimal,
-# non-root runtime image with no Rust toolchain. All dependencies
-# (grindvakt, jose-rs, gamlastan, …) resolve from crates.io, except for the
-# included Pythonize compatibility patch for PyO3 0.30. The build is
-# fully self-contained.
+# non-root runtime image with no Rust toolchain. Cargo resolves Grindvakt
+# and jose-rs from crates.io using the workspace lockfile.
 #
-# Build:  docker build -t tunnelbana:latest .
+# Build:  just build
 # Run:    docker run --rm -p 8080:8080 \
 #           -e TUNNELBANA_STATE_KEY="$(openssl rand -base64 48)" \
 #           -v "$PWD/config:/app/config:ro" -v "$PWD/keys:/app/keys:ro" \
@@ -20,7 +18,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 FROM rust:1-trixie AS build
 
-WORKDIR /src
+WORKDIR /build/tunnelbana
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3.13-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -31,9 +29,9 @@ COPY . .
 # builds; the binary is copied out of the (ephemeral) cache-mounted target dir
 # within the same layer. `--locked` builds exactly what Cargo.lock pins.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/build/tunnelbana/target \
     cargo build --release --locked -p tunnelbana \
- && cp /src/target/release/tunnelbana /usr/local/bin/tunnelbana
+ && cp /build/tunnelbana/target/release/tunnelbana /usr/local/bin/tunnelbana
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime

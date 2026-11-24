@@ -23,4 +23,9 @@ push:
     docker push {{image}}
 
 # Build then push.
-release: build push
+release: test-sverigeid-local build push
+
+# Exercise both federation roles with the pinned independent Sweden Connect stack.
+test-sverigeid-local:
+    cargo build --locked -p tunnelbana
+    uv run --script tests/sverigeid/run.py

@@ -334,7 +334,14 @@ fn build_request_data(req: &HttpRequest, body: &web::Bytes) -> HttpRequestData {
     };
     let form = form_pairs.iter().cloned().collect();
 
-    let cookies = parse_cookies(headers.get("cookie").map(|s| s.as_str()).unwrap_or(""));
+    // HTTP/2 may split Cookie into separate fields (RFC 9113 section 8.2.3).
+    // Chrome does this when the reference OP and RP share a test host.
+    let cookies = req
+        .headers()
+        .get_all(actix_web::http::header::COOKIE)
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(parse_cookies)
+        .collect();
 
     let uri = format!(
         "{}://{}{}",

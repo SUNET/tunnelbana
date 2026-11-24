@@ -2,6 +2,15 @@
 
 ## 0.6.0 Unreleased
 
+- Use the crates.io releases of Grindvakt 0.13.0 and jose-rs 0.13.0 for OIDC
+  and federation. Cargo, Docker, and CI build from the same lockfile.
+
+- Add an opt-in Sweden Connect profile to the federation RP and OP. OIDC and
+  SAML services can receive the assurance level and authentication time verified
+  by the upstream provider. The profile supports Swedish identity claims,
+  signature approval, signed and encrypted responses, and shared Redis state
+  across replicas. See the [configuration and local release gate](docs/src/sverigeid.md).
+
 - **SAML frontend: refuse non-POST ACS bindings.** Responses (and error
   responses) are always delivered by HTTP-POST to the ACS URL, but gamlastan
   0.11 resolves the ACS binding the way pysaml2 does, so it can be

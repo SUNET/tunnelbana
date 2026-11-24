@@ -125,6 +125,18 @@ struct DiscoveryConfig {
 
 #[derive(Debug, Deserialize)]
 struct FederationBackendConfig {
+    id_token_encryption: Option<ResponseEncryption>,
+    userinfo_encryption: Option<ResponseEncryption>,
+    #[serde(default)]
+    rotation: crate::sweden_connect::RotationConfig,
+    profile: Option<crate::sweden_connect::Profile>,
+    redis_url: Option<String>,
+    environment: Option<String>,
+    #[serde(default)]
+    required_trust_marks: Vec<String>,
+    #[serde(default)]
+    presentation: serde_json::Map<String, Value>,
+
     /// Registered algorithm accepted for upstream ID tokens (RS256 by default).
     #[serde(default = "crate::oidc_common::default_id_token_algorithm")]
     id_token_signed_response_alg: JwsAlgorithm,
@@ -160,12 +172,32 @@ struct FederationBackendConfig {
     federation: FederationConfig,
 }
 
+/// Registered nested response algorithms. Both members must be present.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseEncryption {
+    alg: String,
+    enc: String,
+}
+impl ResponseEncryption {
+    fn open(&self, keys: &crate::sweden_connect::ProtocolKeys, token: &str) -> Result<String> {
+        let header = jose_rs::jwe::compact::decode_header(token)?;
+        if header.alg != self.alg || header.enc.as_deref() != Some(&self.enc) {
+            return Err(Error::Authn(
+                "response encryption differs from registration".into(),
+            ));
+        }
+        keys.open(token)
+    }
+}
+
 /// The OP metadata recovered from a trust-anchor resolve response.
 #[derive(Clone)]
 struct ResolvedOp {
     entity_id: String,
     provider: ProviderInfo,
     metadata: Value,
+    marks: Vec<Value>,
     federation_jwks: JwkSet,
 }
 
@@ -194,6 +226,13 @@ impl Discovery {
 }
 
 pub struct FederationBackend {
+    id_token_encryption: Option<ResponseEncryption>,
+    userinfo_encryption: Option<ResponseEncryption>,
+    protocol_keys: crate::sweden_connect::ProtocolKeys,
+    transactions: Option<crate::sweden_connect::Transactions>,
+    required_trust_marks: Vec<String>,
+    presentation: serde_json::Map<String, Value>,
+
     name: String,
     entity_id: String,
     /// Fixed upstream OP; `None` when discovery is enabled.
@@ -201,7 +240,6 @@ pub struct FederationBackend {
     discovery: Option<Discovery>,
     client: RpClient,
     id_token_signed_response_alg: JwsAlgorithm,
-    client_jwks: JwkSet,
     http: Arc<dyn HttpClient>,
     mapper: Arc<AttributeMapper>,
     // Federation state.
@@ -219,12 +257,41 @@ pub struct FederationBackend {
 
 impl FederationBackend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
-        let cfg: FederationBackendConfig = bx.parse_config()?;
+        let mut cfg: FederationBackendConfig = bx.parse_config()?;
         crate::oidc_common::validate_id_token_algorithm(cfg.id_token_signed_response_alg)?;
         let module_base = bx.module_base();
         let entity_id = cfg.entity_id.clone().unwrap_or_else(|| module_base.clone());
         let redirect_uri = format!("{module_base}/callback");
 
+        let profile = cfg.profile.is_some();
+        let transactions = if profile {
+            let issuer = match cfg.environment.as_deref() {
+                Some("sandbox") => "https://op.sandbox.sverigeid.se",
+                Some("qa") => "https://op.qa.sverigeid.se",
+                Some("production") => "https://op.sverigeid.se",
+                Some("local") => cfg
+                    .op_entity_id
+                    .as_deref()
+                    .unwrap_or("https://local.fed.swedenconnect.se:11010"),
+                _ => {
+                    return Err(Error::Config(
+                        "Sweden Connect requires an explicit environment".into(),
+                    ))
+                }
+            };
+            if cfg.op_entity_id.as_ref().is_some_and(|id| id != issuer) {
+                return Err(Error::Config(
+                    "issuer differs from selected environment".into(),
+                ));
+            }
+            cfg.op_entity_id = Some(issuer.to_owned());
+            Some(crate::sweden_connect::Transactions::new(
+                cfg.redis_url.as_deref(),
+                &entity_id,
+            )?)
+        } else {
+            None
+        };
         let fed = &cfg.federation;
         if fed.trust_anchor.is_empty() {
             return Err(Error::Config(format!(
@@ -302,8 +369,26 @@ impl FederationBackend {
         } else {
             fed_key.clone()
         };
-        let client_jwks = client_key.to_public_jwks();
+        if profile {
+            crate::sweden_connect::check_keys(&fed_key, &client_key)?;
+        }
+        let protocol_keys =
+            crate::sweden_connect::ProtocolKeys::load(cfg.rotation, &client_key, &fed_key)?;
 
+        for encryption in [&cfg.id_token_encryption, &cfg.userinfo_encryption]
+            .into_iter()
+            .flatten()
+        {
+            if !profile
+                || !protocol_keys.supports(&encryption.alg)
+                || !matches!(
+                    encryption.enc.as_str(),
+                    "A128GCM" | "A256GCM" | "A128CBC-HS256" | "A256CBC-HS512"
+                )
+            {
+                return Err(Error::Config("registered response encryption requires a matching active decryption key and content algorithm".into()));
+            }
+        }
         let mut trust_anchors: TrustAnchors = HashMap::new();
         for ta in &fed.trust_anchor {
             let jwks = JwkSet {
@@ -321,20 +406,28 @@ impl FederationBackend {
             client_id: entity_id.clone(),
             redirect_uri,
             auth: ClientAuth::PrivateKeyJwt(client_key),
-            scope: cfg
-                .scope
-                .clone()
-                .unwrap_or_else(|| "openid profile email".to_string()),
+            scope: cfg.scope.clone().unwrap_or_else(|| {
+                if profile {
+                    "openid".into()
+                } else {
+                    "openid profile email".into()
+                }
+            }),
         };
 
         Ok(Box::new(FederationBackend {
+            transactions,
+            id_token_encryption: cfg.id_token_encryption,
+            userinfo_encryption: cfg.userinfo_encryption,
+            required_trust_marks: cfg.required_trust_marks,
+            presentation: crate::sweden_connect::presentation(cfg.presentation)?,
             name: bx.name.clone(),
             entity_id,
             op_entity_id: cfg.op_entity_id.clone(),
             discovery,
             client,
             id_token_signed_response_alg: cfg.id_token_signed_response_alg,
-            client_jwks,
+            protocol_keys,
             http: bx.http_client.clone(),
             mapper: bx.attribute_mapper.clone(),
             fed_key,
@@ -351,7 +444,37 @@ impl FederationBackend {
 
     /// Build and sign this RP's federation entity configuration.
     fn entity_configuration(&self) -> Result<String> {
-        let mut relying_party = serde_json::Map::new();
+        let mut relying_party = self.presentation.clone();
+        if self.transactions.is_some() {
+            let alg = self.protocol_keys.published.keys[0].alg.as_ref();
+            relying_party.extend(
+                serde_json::json!({
+                    "require_auth_time":true, "subject_type":"public",
+                    "request_object_signing_alg":alg, "token_endpoint_auth_signing_alg":alg,
+                    "userinfo_signed_response_alg": self.id_token_signed_response_alg,
+                    "userinfo_signing_alg_values_supported":[self.id_token_signed_response_alg],
+                    "id_token_signing_alg_values_supported":[self.id_token_signed_response_alg]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
+        for (prefix, policy) in [
+            ("id_token", &self.id_token_encryption),
+            ("userinfo", &self.userinfo_encryption),
+        ] {
+            if let Some(policy) = policy {
+                relying_party.insert(
+                    format!("{prefix}_encrypted_response_alg"),
+                    policy.alg.clone().into(),
+                );
+                relying_party.insert(
+                    format!("{prefix}_encrypted_response_enc"),
+                    policy.enc.clone().into(),
+                );
+            }
+        }
         relying_party.insert(
             "redirect_uris".into(),
             serde_json::json!([self.client.redirect_uri]),
@@ -373,7 +496,10 @@ impl FederationBackend {
             "token_endpoint_auth_method".into(),
             Value::String("private_key_jwt".into()),
         );
-        relying_party.insert("jwks".into(), serde_json::to_value(&self.client_jwks)?);
+        relying_party.insert(
+            "jwks".into(),
+            serde_json::to_value(&self.protocol_keys.published)?,
+        );
         relying_party.insert("scope".into(), Value::String(self.client.scope.clone()));
         if let Some(d) = &self.discovery {
             // The discovery service resolves this RP through the federation
@@ -385,7 +511,9 @@ impl FederationBackend {
             );
         }
         if let Some(n) = &self.organization_name {
-            relying_party.insert("client_name".into(), Value::String(n.clone()));
+            relying_party
+                .entry("client_name")
+                .or_insert_with(|| Value::String(n.clone()));
         }
 
         let mut federation_entity = serde_json::Map::new();
@@ -422,7 +550,11 @@ impl FederationBackend {
             .get(op_entity_id)
             .cloned()
         {
-            if expires > now_secs() {
+            if expires > now_secs()
+                && self.required_trust_marks.iter().all(|mark| {
+                    crate::sweden_connect::has_mark(&op.marks, mark, op_entity_id, now_secs())
+                })
+            {
                 return Ok(op);
             }
         }
@@ -481,7 +613,15 @@ impl FederationBackend {
                     .map_err(|e| Error::Authn(e.to_string()))?;
             }
         }
+        if !self.required_trust_marks.iter().all(|mark| {
+            crate::sweden_connect::has_mark(&resolved.trust_marks, mark, op_entity_id, now)
+        }) {
+            return Err(Error::Authn(
+                "required provider trust mark is absent".into(),
+            ));
+        }
         let op = ResolvedOp {
+            marks: resolved.trust_marks,
             entity_id: resolved.subject,
             provider: ProviderInfo {
                 issuer,
@@ -531,23 +671,58 @@ impl FederationBackend {
                 "federation RP always uses private_key_jwt".into(),
             ));
         };
-        let request_object = rp::signed_request_object(
+        let mut client = self.client.clone();
+        let mut params = rp::RequestObjectParameters::default();
+        if self.transactions.is_some() {
+            (client.scope, params) = crate::sweden_connect::parameters(ctx, &self.client.scope)?;
+            if let Some(prompt) = ctx.state.get_str(&self.name, "forced_prompt") {
+                params.prompt = Some(prompt);
+            }
+            if params.sign_request.is_some()
+                && !op.metadata["scopes_supported"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().any(|s| s == crate::sweden_connect::APPROVAL))
+            {
+                return Err(Error::Authn("upstream does not support approval".into()));
+            }
+        }
+        let request_object = rp::signed_request_object_with(
             &op.provider,
-            &self.client,
+            &client,
             client_key,
             &state,
             &nonce,
             Some(&challenge),
+            &params,
         )?;
 
         let url = rp::authorization_url(
             &op.provider,
-            &self.client,
+            &client,
             &state,
             &nonce,
             Some(&challenge),
             &[("request", &request_object)],
         )?;
+        if let Some(store) = &self.transactions {
+            if params.sign_request.is_some() {
+                ctx.state
+                    .set_value(&self.name, "approval_started", now_secs().into());
+            }
+            let handle = random_token(32);
+            store
+                .insert(
+                    &handle,
+                    crate::sweden_connect::Transaction {
+                        state: ctx.state.clone(),
+                        params,
+                    },
+                )
+                .await?;
+            ctx.state = Default::default();
+            ctx.state.set_str(&self.name, "handle", handle);
+            ctx.state.set_str(&self.name, "oidc_state", state);
+        }
         Ok(Response::redirect(url))
     }
 
@@ -601,6 +776,9 @@ impl FederationBackend {
 
 #[async_trait]
 impl Backend for FederationBackend {
+    fn binds_frontend_request(&self) -> bool {
+        self.transactions.is_some()
+    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -623,7 +801,18 @@ impl Backend for FederationBackend {
     }
 
     async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response> {
-        if request.force_authn || request.is_passive {
+        if self.transactions.is_some() {
+            if request.is_passive {
+                ctx.state.set_str(&self.name, "forced_prompt", "none");
+            } else if request.force_authn
+                && !ctx
+                    .target_frontend
+                    .as_deref()
+                    .is_some_and(|f| ctx.state.get_value(f, "authz_request").is_some())
+            {
+                ctx.state.set_str(&self.name, "forced_prompt", "login");
+            }
+        } else if request.force_authn || request.is_passive {
             // The signed request object and discovery round-trip have no
             // channel for ForceAuthn/IsPassive; fail rather than silently
             // drop the requester's constraint.
@@ -797,7 +986,24 @@ impl FederationBackend {
             return Err(Error::Authn("state mismatch".into()));
         }
 
+        let params = if let Some(store) = &self.transactions {
+            let handle = ctx
+                .state
+                .get_str(&self.name, "handle")
+                .ok_or_else(|| Error::State("missing transaction handle".into()))?;
+            let transaction = store.take(&handle).await?;
+            ctx.state = transaction.state;
+            if ctx.state.get_str(&self.name, "oidc_state").as_deref() != Some(got_state) {
+                return Err(Error::State("transaction binding mismatch".into()));
+            }
+            Some(transaction.params)
+        } else {
+            None
+        };
         if let Some(err) = ctx.request.param("error") {
+            if params.is_some() && err == "unmet_authentication_requirements" {
+                return Err(Error::UnmetAuthenticationRequirements);
+            }
             return Err(Error::Authn(format!("upstream error: {err}")));
         }
         let code = ctx
@@ -820,6 +1026,16 @@ impl FederationBackend {
             .state
             .get_str(&self.name, "op_entity_id")
             .ok_or_else(|| Error::State("no OP selected in state".into()))?;
+        if params.is_some()
+            && ctx
+                .request
+                .param("iss")
+                .is_some_and(|iss| iss != op_entity_id)
+        {
+            return Err(Error::Authn(
+                "authorization response issuer mismatch".into(),
+            ));
+        }
         let op = self.resolve_op(&op_entity_id).await?;
         let tokens = rp::exchange_code(
             &self.http,
@@ -830,9 +1046,35 @@ impl FederationBackend {
         )
         .await?;
 
-        let id_token = &tokens.id_token;
+        if params.as_ref().is_some_and(|p| p.sign_request.is_some())
+            && tokens.raw.get("scope").is_some_and(|scopes| {
+                !scopes.as_str().is_some_and(|s| {
+                    s.split_whitespace()
+                        .any(|v| v == crate::sweden_connect::APPROVAL)
+                })
+            })
+        {
+            return Err(Error::Authn("approval scope was not granted".into()));
+        }
+        let nested;
+        let id_token = if let Some(policy) = &self.id_token_encryption {
+            nested = policy.open(&self.protocol_keys, &tokens.id_token)?;
+            &nested
+        } else {
+            &tokens.id_token
+        };
         let jwks = self.op_jwks(&op).await?;
-        let id_claims = rp::verify_id_token(
+        let mut verification = if params.is_some() {
+            rp::IdTokenOptions::new()
+                .with_access_token(&tokens.access_token)
+                .with_authorization_code(&code)
+        } else {
+            rp::IdTokenOptions::new().allow_unchecked_hashes()
+        };
+        if let Some(request) = &params {
+            verification = verification.with_max_age(request.max_age.unwrap_or(u64::MAX));
+        }
+        let id_claims = rp::verify_id_token_with(
             &jwks,
             id_token,
             &op.provider.issuer,
@@ -840,6 +1082,7 @@ impl FederationBackend {
             Some(&nonce),
             &[self.id_token_signed_response_alg],
             &[],
+            &verification,
         )?;
 
         let sub = id_claims
@@ -849,7 +1092,65 @@ impl FederationBackend {
 
         // Merge id_token claims and userinfo.
         let mut merged = serde_json::to_value(&id_claims.extra).unwrap_or_default();
-        if let Some(userinfo_ep) = &op.provider.userinfo_endpoint {
+        if let Some(params) = &params {
+            let ep = op.provider.require_userinfo_endpoint()?;
+            let mut raw = rp::fetch_userinfo_response(
+                &self.http,
+                ep,
+                &tokens.access_token,
+                &op.provider.issuer,
+                rp::UserinfoMethod::Post,
+            )
+            .await?;
+            if let Some(policy) = &self.userinfo_encryption {
+                let nested = std::str::from_utf8(&raw.body)
+                    .map_err(|_| Error::Authn("invalid encrypted UserInfo".into()))?;
+                raw.body = policy.open(&self.protocol_keys, nested)?.into_bytes();
+            }
+            let ui = rp::userinfo_signed_claims(
+                &jwks,
+                &raw,
+                &op.provider.issuer,
+                &self.client.client_id,
+                &sub,
+                &[self.id_token_signed_response_alg],
+                &rp::UserinfoJwtOptions::untyped_shared_key_compat().without_max_age(),
+            )?;
+            crate::sweden_connect::check_result(params, &merged, &ui)?;
+            if params.sign_request.is_some() {
+                let started = ctx
+                    .state
+                    .get_value(&self.name, "approval_started")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| Error::State("approval start time missing".into()))?;
+                if !merged["auth_time"]
+                    .as_u64()
+                    .is_some_and(|time| time.saturating_add(60) >= started)
+                {
+                    return Err(Error::Authn("approval predates this transaction".into()));
+                }
+            }
+            if let Some(loa) = merged["acr"]
+                .as_str()
+                .and_then(|acr| acr.strip_prefix("http://id.elegnamnden.se/loa/1.0/"))
+            {
+                if !crate::sweden_connect::has_mark(
+                    &op.marks,
+                    &format!("https://id.swedenconnect.se/loa/{loa}"),
+                    &op.entity_id,
+                    now_secs(),
+                ) {
+                    return Err(Error::UnmetAuthenticationRequirements);
+                }
+            }
+            ctx.verified_oidc = Some(tunnelbana_core::context::VerifiedOidc {
+                id_token: merged.clone(),
+                userinfo: ui.clone(),
+                subject: sub.clone(),
+                approval: params.sign_request.is_some(),
+            });
+            merge_json(&mut merged, &ui);
+        } else if let Some(userinfo_ep) = &op.provider.userinfo_endpoint {
             let userinfo = rp::fetch_userinfo(
                 &self.http,
                 userinfo_ep,

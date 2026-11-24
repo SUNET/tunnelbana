@@ -30,6 +30,7 @@ flate2 = "1"
 libc = "0.2"
 serde_ignored = "0.1.14"
 tokio.workspace = true
+redis = { version = "1.8.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 form_urlencoded.workspace = true

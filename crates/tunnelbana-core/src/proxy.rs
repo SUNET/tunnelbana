@@ -90,7 +90,18 @@ impl Proxy {
 
         let mut response = match result {
             Ok(r) => r,
-            Err(e) => self.render_error(&mut ctx, e).await,
+            Err(e) => {
+                let result = self.render_error(&mut ctx, e).await;
+                if ctx
+                    .target_backend
+                    .as_ref()
+                    .and_then(|name| self.backends.get(name))
+                    .is_some_and(|backend| backend.binds_frontend_request())
+                {
+                    ctx.state.delete = true;
+                }
+                result
+            }
         };
 
         // Attach the (possibly cleared) state cookie. A response whose state
@@ -216,6 +227,18 @@ impl Proxy {
         start_index: usize,
         pinned_backend: Option<String>,
     ) -> Result<Response> {
+        let original = self
+            .backends
+            .values()
+            .any(|b| b.binds_frontend_request())
+            .then(|| {
+                (
+                    ctx.target_frontend.clone(),
+                    ctx.state.clone(),
+                    ctx.decorations.clone(),
+                    request.clone(),
+                )
+            });
         for ms in self.microservices.iter().skip(start_index) {
             request = ms.process_request(ctx, request).await?;
         }
@@ -231,6 +254,13 @@ impl Proxy {
             .get(&backend_name)
             .ok_or_else(|| Error::UnknownModule(backend_name.clone()))?;
 
+        if backend.binds_frontend_request() {
+            // A verified callback answers the request the frontend accepted. A
+            // saved login, rewritten prompt or mutable session field cannot supply it.
+            (ctx.target_frontend, ctx.state, ctx.decorations, request) =
+                original.expect("binding backend snapshot");
+            return backend.start_auth(ctx, request).await;
+        }
         if !request.force_authn {
             for ms in &self.microservices {
                 if let Some(mut response) = ms.try_authenticate(ctx, &request).await? {
@@ -290,13 +320,34 @@ impl Proxy {
         mut response: InternalData,
         start_index: usize,
     ) -> Result<Response> {
+        let protected = ctx.verified_oidc.take().map(|claims| {
+            (
+                claims,
+                response.auth_info.clone(),
+                ctx.target_frontend.clone(),
+                ctx.state.clone(),
+            )
+        });
         for ms in self.microservices.iter().skip(start_index) {
             match ms.process_response_action(ctx, response).await? {
                 MicroServiceResponseAction::Continue(next) => response = next,
+                MicroServiceResponseAction::Respond(_) if protected.is_some() => {
+                    return Err(Error::Authn(
+                        "verified OIDC response cannot be suspended".into(),
+                    ));
+                }
                 MicroServiceResponseAction::Respond(http) => return Ok(http),
             }
         }
 
+        if let Some((claims, assurance, frontend, state)) = protected {
+            ctx.verified_oidc = Some(claims);
+            response.auth_info = assurance;
+            ctx.target_frontend = frontend;
+            ctx.state = state;
+        } else {
+            ctx.verified_oidc = None;
+        }
         let frontend_name = ctx
             .target_frontend
             .clone()
@@ -751,9 +802,12 @@ mod tests {
 
         async fn handle_authn_response(
             &self,
-            _ctx: &mut Context,
+            ctx: &mut Context,
             response: crate::internal::InternalData,
         ) -> crate::error::Result<Response> {
+            if ctx.verified_oidc.is_some() {
+                return Response::json(&response.auth_info);
+            }
             Ok(Response::text(
                 200,
                 response.requester.unwrap_or_else(|| "missing".into()),
@@ -767,6 +821,67 @@ mod tests {
         ) -> crate::error::Result<Response> {
             Ok(Response::text(500, "frontend error"))
         }
+    }
+
+    #[tokio::test]
+    async fn response_services_cannot_replace_or_create_verified_assurance() {
+        use crate::context::VerifiedOidc;
+        struct Rewrite;
+        #[async_trait::async_trait]
+        impl MicroService for Rewrite {
+            fn name(&self) -> &str {
+                "rewrite"
+            }
+            async fn process_response(
+                &self,
+                ctx: &mut Context,
+                mut response: InternalData,
+            ) -> Result<InternalData> {
+                ctx.verified_oidc = Some(VerifiedOidc {
+                    id_token: serde_json::json!({}),
+                    userinfo: serde_json::json!({}),
+                    subject: "rewritten".into(),
+                    approval: true,
+                });
+                response.auth_info.auth_class_ref = Some("different".into());
+                response.auth_info.timestamp = None;
+                Ok(response)
+            }
+        }
+        let proxy = Proxy::new(
+            vec![Box::new(RecordingFrontend)],
+            vec![],
+            vec![Box::new(Rewrite)],
+            StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
+        );
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        ctx.target_frontend = Some("frontend".into());
+        let original = InternalData {
+            auth_info: crate::internal::AuthenticationInformation {
+                auth_class_ref: Some("loa3".into()),
+                timestamp: Some("2026-01-01T01:02:03Z".into()),
+                issuer: Some("upstream".into()),
+            },
+            ..Default::default()
+        };
+        proxy
+            .finish_response(&mut ctx, original.clone(), 0)
+            .await
+            .unwrap();
+        assert!(ctx.verified_oidc.is_none());
+        ctx.verified_oidc = Some(VerifiedOidc {
+            id_token: serde_json::json!({}),
+            userinfo: serde_json::json!({}),
+            subject: "original".into(),
+            approval: false,
+        });
+        let wire = proxy
+            .finish_response(&mut ctx, original.clone(), 0)
+            .await
+            .unwrap();
+        let values: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(values, serde_json::to_value(original.auth_info).unwrap());
+        assert_eq!(ctx.verified_oidc.unwrap().subject, "original");
     }
 
     #[tokio::test]

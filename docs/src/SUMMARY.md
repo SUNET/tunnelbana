@@ -19,3 +19,4 @@
 
 - [SAML and OIDC over a SWAMID SP backend](tutorial-saml-mdq.md)
 - [SAML IdP over an OpenID Federation RP backend](tutorial-oidc-federation.md)
+- [Connecting a service to SverigeID](sverigeid.md)

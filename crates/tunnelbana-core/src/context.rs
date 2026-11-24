@@ -70,6 +70,10 @@ pub const KEY_STEPUP_INITIAL_POLICY: &str = "stepup_initial_policy";
 /// ad-hoc decorations between the frontend, micro-services and backend.
 /// Mirrors SATOSA's `satosa.context.Context`.
 pub struct Context {
+    /// Verified protocol data kept outside the mutable microservice attribute
+    /// and decoration maps. Only the upstream callback establishes this value.
+    pub verified_oidc: Option<VerifiedOidc>,
+
     /// The parsed inbound HTTP request.
     pub request: HttpRequestData,
     /// The name of the backend selected to handle this flow.
@@ -86,6 +90,7 @@ pub struct Context {
 impl Context {
     pub fn new(request: HttpRequestData, state: State) -> Self {
         Self {
+            verified_oidc: None,
             request,
             target_backend: None,
             target_frontend: None,
@@ -131,4 +136,13 @@ impl Context {
     pub fn requester(&self) -> Option<String> {
         self.state.get_str(STATE_KEY_BASE, KEY_REQUESTER)
     }
+}
+
+/// Upstream results retained until downstream issuance in the same callback.
+#[derive(Clone)]
+pub struct VerifiedOidc {
+    pub id_token: Value,
+    pub userinfo: Value,
+    pub subject: String,
+    pub approval: bool,
 }
