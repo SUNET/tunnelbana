@@ -238,8 +238,7 @@ impl Frontend for OidcFrontend {
             if req.scopes().contains(&crate::sweden_connect::APPROVAL) != verified.approval {
                 return Err(Error::Authn("approval transaction mismatch".into()));
             }
-            let allowed: Vec<String> = external.keys().cloned().collect();
-            let claims = crate::sweden_connect::release(&req, verified, &allowed);
+            let claims = crate::sweden_connect::release(&req, verified, &external, None);
             self.provider
                 .authorization_redirect_with_authorized_claims(
                     &req, resolve, claims, acr, auth_time,

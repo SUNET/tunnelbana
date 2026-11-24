@@ -10,12 +10,13 @@
   },
   "sources": {
     "tunnelbana": {
-      "commit": "c3236c2ff5e6c1c53f290b15e5fdc30088a6b749",
-      "local_inputs_sha256": "bfa3708962c4df616daabd6c7970a007d6a262d40a605ccff40e7ca7e2dfab76"
+      "commit": "67d5e44b2c061541e20c8d50b2eafba069a47d92",
+      "local_inputs_sha256": "f3d169b587bc050a595f7ea762e3bf3b34d294721468618c5e34bdefa10a4d78"
     },
     "grindvakt": {
-      "commit": "7a2339bd034e4920988473c29397fc209a4bb807",
-      "local_inputs_sha256": "bd6c33a547c9238a2a1e3ecdee97794051641da69687c150b7ab8be7571f7676"
+      "version": "0.13.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "6e13e31d549f0ea2a4afd3ea7ea665ca1b9da45ab06beb5ad0c37e640b686fa1"
     },
     "jose-rs": {
       "version": "0.13.0",
@@ -25,6 +26,7 @@
   },
   "checks": {
     "reference-stack": "PASS",
+    "replica-startup": "PASS",
     "signed-registrations-and-discovery": "PASS",
     "registered-test-peer-metadata": "PASS",
     "service-oidc-loa4-concurrent-redemption": "PASS",
@@ -36,9 +38,9 @@
     "rp2-stable-pairwise": "PASS",
     "rp3-ec-encrypted-signing-key-1": "PASS",
     "rp3-ec-encrypted-signing-key-2": "PASS",
-    "test-my-eid-approve": "PASS",
-    "test-my-eid-cancel": "PASS",
-    "test-my-eid-unknown-signer": "PASS",
+    "test-my-eid-approve": "FAIL (AssertionError, browser.py line 364)",
+    "test-my-eid-cancel": "FAIL (AssertionError, browser.py line 364)",
+    "test-my-eid-unknown-signer": "FAIL (AssertionError, browser.py line 364)",
     "service-saml-signed-assurance": "PASS",
     "registered-sectors-and-original-auth-time": "PASS",
     "retired-recipient-key-in-flight-restart": "PASS",
@@ -54,5 +56,5 @@
     "federation-expired-op": "PASS",
     "redis-replica-code-and-signing-rollover": "PASS"
   },
-  "passed": true
+  "passed": false
 }

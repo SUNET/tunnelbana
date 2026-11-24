@@ -1005,12 +1005,12 @@ impl Frontend for FederationFrontend {
             {
                 return Err(Error::UnmetAuthenticationRequirements);
             }
-            let allowed: Vec<String> = if self.profile {
-                self.release_claims.clone()
-            } else {
-                external.keys().cloned().collect()
-            };
-            let claims = crate::sweden_connect::release(&req, verified, &allowed);
+            let claims = crate::sweden_connect::release(
+                &req,
+                verified,
+                &external,
+                self.profile.then_some(self.release_claims.as_slice()),
+            );
             self.provider
                 .authorization_redirect_with_authorized_claims(
                     &req, resolve, claims, acr, auth_time,

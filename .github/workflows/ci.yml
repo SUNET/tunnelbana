@@ -77,7 +77,10 @@ jobs:
       - name: Install local gate tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap xmlsec1
+          sudo apt-get install -y xmlsec1
+          # This disposable runner resolves the fixture directly. The proxy
+          # process loads the fixture CA without privileged namespace mounts.
+          echo '127.0.0.1 local.fed.swedenconnect.se' | sudo tee -a /etc/hosts
           pipx install uv==0.13.6
           cargo install just --locked --version 1.53.0
           uv python install 3.13
@@ -85,6 +88,8 @@ jobs:
           echo "PYO3_PYTHON=$interpreter" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$(dirname "$(dirname "$interpreter")")/lib" >> "$GITHUB_ENV"
       - name: Run Sweden Connect acceptance tests
+        env:
+          SVERIGEID_RUNNER_HOSTS: "1"
         working-directory: tunnelbana
         run: just test-sverigeid-local
       - name: Preserve the redacted evidence

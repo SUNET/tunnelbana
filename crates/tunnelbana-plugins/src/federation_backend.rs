@@ -719,7 +719,7 @@ impl FederationBackend {
                     },
                 )
                 .await?;
-            ctx.state = Default::default();
+            ctx.state.clear_payload();
             ctx.state.set_str(&self.name, "handle", handle);
             ctx.state.set_str(&self.name, "oidc_state", state);
         }

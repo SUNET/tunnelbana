@@ -36,6 +36,7 @@ from federation import (
     BASELINE,
     HERE,
     HOST,
+    ReplicaStartupError,
     fetch,
     prepare,
     proxy_command,
@@ -118,7 +119,7 @@ def run():
         "passed": False,
     }
 
-    def check(name, func):
+    def check(name, func, *, required_for_next=True):
         try:
             value = func()
         except Exception as exc:
@@ -128,7 +129,11 @@ def run():
                 f"FAIL ({type(exc).__name__}, {Path(frame.filename).name} line {frame.lineno})"
             )
             print(name, report["checks"][name], flush=True)
-            raise
+            if isinstance(exc, ReplicaStartupError):
+                print(str(exc), flush=True)
+            if required_for_next:
+                raise
+            return None
         report["checks"][name] = "PASS"
         print(name, "PASS", flush=True)
         return value
@@ -179,11 +184,15 @@ def run():
                                 "TUNNELBANA_TEST_BIN", ROOT / "target/debug/tunnelbana"
                             )
                         ).resolve(),
+                        config,
                     )
-                    cmd[-1] = str(config)
                     proc = subprocess.Popen(
                         cmd,
-                        env=dict(os.environ, TUNNELBANA_BIND=f"127.0.0.1:{port}"),
+                        env=dict(
+                            os.environ,
+                            TUNNELBANA_BIND=f"127.0.0.1:{port}",
+                            SSL_CERT_FILE=str(directory / "config/common/tls.crt"),
+                        ),
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True,
@@ -194,20 +203,29 @@ def run():
                     while proc.poll() is None:
                         try:
                             status = json.loads(
-                                fetch(directory, f"https://{HOST}:{port}/health")
+                                fetch(
+                                    directory,
+                                    f"https://{HOST}:{port}/health",
+                                    quiet=True,
+                                )
                             )
                             if status == {"status": "ok"}:
                                 break
                         except subprocess.CalledProcessError:
                             pass
                         if time.monotonic() >= deadline:
-                            raise TimeoutError(
-                                "replica health endpoint did not become ready"
+                            raise ReplicaStartupError(
+                                f"replica health endpoint on {port} did not become ready"
                             )
                         time.sleep(0.1)
-                    assert proc.poll() is None, "replica exited"
+                    if proc.poll() is not None:
+                        # Exit status and port are safe to publish. Process output
+                        # can include protocol data from the local fixtures.
+                        raise ReplicaStartupError(
+                            f"replica on {port} exited with status {proc.returncode}"
+                        )
 
-            restart()
+            check("replica-startup", restart)
             counts = stack.enter_context(balance(directory, fixtures))
 
             def wait_ready():
@@ -264,9 +282,12 @@ def run():
                         lambda key=key: rp(3, "2", "openid", key, "post"),
                     )
                 for mode in ["approve", "cancel", "unknown-signer"]:
+                    # Each eID flow uses a fresh browser page. Record failures
+                    # and continue testing the independent SAML and replica flows.
                     check(
                         "test-my-eid-" + mode,
                         lambda mode=mode: eid(browser, directory, mode),
+                        required_for_next=False,
                     )
                 check("service-saml-signed-assurance", lambda: saml(browser, directory))
                 restart("probe-op")
@@ -370,7 +391,7 @@ def run():
                     assert counts[port, path] > 0
 
             check("redis-replica-code-and-signing-rollover", routing)
-        report["passed"] = True
+        report["passed"] = all(v == "PASS" for v in report["checks"].values())
     except Exception as exc:  # noqa: BLE001 -- keep protocol data out of reports
         report["error"] = type(exc).__name__
     finally:

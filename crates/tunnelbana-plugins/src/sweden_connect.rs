@@ -3,7 +3,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tunnelbana_core::cache::TtlCache;
-use tunnelbana_core::context::{Context, VerifiedOidc};
+use tunnelbana_core::context::{
+    Context, VerifiedOidc, KEY_PERMITTED_ACR, KEY_REQUESTED_ACCR, KEY_REQUESTED_ACCR_COMPARISON,
+    KEY_TARGET_ACCR_COMPARISON, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+};
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::state::State;
 use tunnelbana_oidc::client::Client;
@@ -172,9 +175,9 @@ pub fn parameters(ctx: &Context, allowed_scope: &str) -> Result<(String, Request
             .collect::<Vec<_>>()
             .join(" ")
     } else {
-        if let Some(values) = ctx.decoration(tunnelbana_core::context::KEY_REQUESTED_ACCR) {
+        if let Some(values) = ctx.decoration(KEY_REQUESTED_ACCR) {
             if ctx
-                .decoration(tunnelbana_core::context::KEY_REQUESTED_ACCR_COMPARISON)
+                .decoration(KEY_REQUESTED_ACCR_COMPARISON)
                 .and_then(Value::as_str)
                 .is_some_and(|c| c != "exact")
             {
@@ -188,6 +191,34 @@ pub fn parameters(ctx: &Context, allowed_scope: &str) -> Result<(String, Request
             .collect::<Vec<_>>()
             .join(" ")
     };
+    for target in [KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_PERMITTED_ACR]
+        .into_iter()
+        .filter_map(|key| ctx.decoration(key))
+    {
+        // Bind the operator's allowed levels into the signed request and the
+        // transaction checked by check_result. Preserve essential client constraints.
+        let levels: Vec<String> = serde_json::from_value(target.clone())
+            .map_err(|_| Error::UnmetAuthenticationRequirements)?;
+        let claims = params.claims.get_or_insert_with(|| json!({}));
+        let acr = &mut claims["id_token"]["acr"];
+        let accepted: Vec<_> = levels
+            .into_iter()
+            .filter(|level| {
+                !level.is_empty()
+                    && (acr.get("essential") != Some(&Value::Bool(true))
+                        || matches_constraint(Some(&Value::String(level.clone())), acr))
+            })
+            .collect();
+        if accepted.is_empty()
+            || ctx
+                .decoration(KEY_TARGET_ACCR_COMPARISON)
+                .and_then(Value::as_str)
+                .is_some_and(|cmp| cmp != "exact" && cmp != "minimum")
+        {
+            return Err(Error::UnmetAuthenticationRequirements);
+        }
+        *acr = json!({"essential":true,"values":accepted});
+    }
     if params.sign_request.is_some() && !scope.split_whitespace().any(|s| s == APPROVAL) {
         return Err(Error::Authn(
             "upstream approval scope is not configured".into(),
@@ -281,17 +312,23 @@ pub fn check_result(params: &RequestObjectParameters, id: &Value, ui: &Value) ->
     Ok(())
 }
 
+/// Release only signed values that survived the response pipeline for this destination.
 pub fn release(
     req: &AuthorizationRequest,
     verified: &VerifiedOidc,
-    allow: &[String],
+    mapped: &std::collections::BTreeMap<String, Vec<String>>,
+    profile_release_claims: Option<&[String]>,
 ) -> AuthorizedClaims {
     let mut claims = AuthorizedClaims::default();
     for (dest, source, output) in [
         ("id_token", &verified.id_token, &mut claims.id_token),
         ("userinfo", &verified.userinfo, &mut claims.userinfo),
     ] {
-        for name in allow {
+        for (name, permitted) in mapped {
+            // Profile registration and requester-specific pipeline policy must both authorize the claim.
+            if profile_release_claims.is_some_and(|names| !names.contains(name)) {
+                continue;
+            }
             let by_scope = ((name == PIN || name == COORD) && req.scopes().contains(&NUMBER))
                 || (dest == "userinfo"
                     && ((NAMES.contains(&name.as_str()) && req.scopes().contains(&INFO))
@@ -302,10 +339,34 @@ pub fn release(
                 .as_ref()
                 .and_then(|v| v.get(dest))
                 .and_then(|v| v.get(name));
-            if let Some(value) = source.get(name) {
-                if by_scope || explicit.is_some_and(|s| matches_constraint(Some(value), s)) {
-                    output.insert(name.clone(), value.clone());
+            let Some(original) = source.get(name) else {
+                continue;
+            };
+            // Mapping represents scalar values as strings. Preserve their verified
+            // JSON types, but never reintroduce a removed or transformed value.
+            let keep = |v: &Value| match v {
+                Value::String(s) => permitted.contains(s),
+                Value::Bool(_) | Value::Number(_) => permitted.contains(&v.to_string()),
+                _ => false,
+            };
+            let value = match original {
+                Value::Array(items) => {
+                    // claims_to_attributes projects only string elements of arrays.
+                    let kept: Vec<_> = items
+                        .iter()
+                        .filter(|v| v.is_string() && keep(v))
+                        .cloned()
+                        .collect();
+                    if kept.is_empty() {
+                        continue;
+                    }
+                    Value::Array(kept)
                 }
+                v if keep(v) => v.clone(),
+                _ => continue,
+            };
+            if by_scope || explicit.is_some_and(|s| matches_constraint(Some(&value), s)) {
+                output.insert(name.clone(), value);
             }
         }
     }
@@ -551,26 +612,65 @@ mod tests {
     #[test]
     fn scopes_select_destinations_without_changing_values() {
         let id = json!({PIN:"012345678901","custom":{"nested":[1,true]}});
-        let ui = json!({PIN:"012345678901","given_name":"Eva","custom":[1,true]});
+        let ui = json!({PIN:"012345678901","given_name":"Eva","custom":["a","b"],"flag":true});
         let result = VerifiedOidc {
             id_token: id,
             userinfo: ui,
             subject: "s".into(),
             approval: false,
         };
-        let allow = [PIN, "given_name", "custom"].map(String::from);
-        let none = release(&request("openid"), &result, &allow);
+        let mut allow = tunnelbana_oidc::rp::claims_to_attributes(&result.userinfo);
+        let none = release(&request("openid"), &result, &allow, None);
         assert!(none.userinfo.is_empty() && none.id_token.is_empty());
         let mut req = request(&format!("openid {INFO} {NUMBER}"));
-        req.claims = Some(json!({"userinfo":{"custom":null}}));
-        let values = release(&req, &result, &allow);
+        req.claims = Some(json!({"userinfo":{"custom":null,"flag":null}}));
+        let values = release(&req, &result, &allow, None);
         assert_eq!(values.userinfo["given_name"], "Eva");
         assert!(!values.id_token.contains_key("given_name"));
         assert_eq!(values.id_token[PIN], "012345678901");
         assert_eq!(values.userinfo[PIN], values.id_token[PIN]);
-        assert_eq!(values.userinfo["custom"], json!([1, true]));
+        assert_eq!(values.userinfo["custom"], json!(["a", "b"]));
+        assert_eq!(values.userinfo["flag"], true);
         assert!(!values.id_token.contains_key("custom"));
-        assert!(!release(&req, &result, &[]).userinfo.contains_key(PIN));
+        let profile_names = [PIN.to_owned()];
+        let profile = release(&req, &result, &allow, Some(&profile_names));
+        assert_eq!(profile.userinfo.len(), 1);
+        assert_eq!(profile.userinfo[PIN], "012345678901");
+        allow.insert("custom".into(), vec!["b".into(), "new".into()]);
+        for permitted in [None, Some(vec![]), Some(vec!["replacement".into()])] {
+            allow.remove(PIN);
+            if let Some(values) = permitted {
+                allow.insert(PIN.into(), values);
+            }
+            let filtered = release(&req, &result, &allow, None);
+            let profile = release(&req, &result, &allow, Some(&profile_names));
+            assert!(profile.userinfo.is_empty());
+            assert!(profile.id_token.is_empty());
+            assert!(!filtered.userinfo.contains_key(PIN));
+            assert!(!filtered.id_token.contains_key(PIN));
+            assert_eq!(filtered.userinfo["custom"], json!(["b"]));
+        }
+    }
+
+    #[test]
+    fn operator_assurance_constrains_the_signed_request_and_verified_result() {
+        let mut ctx = Context::new(Default::default(), State::new());
+        ctx.target_frontend = Some("service".into());
+        ctx.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, json!(["loa4", "loa3"]));
+        let mut req = request("openid");
+        ctx.state.set_value("service", "authz_request", json!(req));
+        let (_, params) = parameters(&ctx, "openid").unwrap();
+        assert!(check_result(&params, &json!({"acr":"loa2","auth_time":1}), &json!({})).is_err());
+        assert!(check_result(&params, &json!({"acr":"loa4","auth_time":1}), &json!({})).is_ok());
+        req.claims = Some(json!({"id_token":{"acr":{"essential":true,"value":"loa3"}}}));
+        ctx.state.set_value("service", "authz_request", json!(req));
+        let (_, params) = parameters(&ctx, "openid").unwrap();
+        assert_eq!(
+            params.claims.unwrap()["id_token"]["acr"]["values"],
+            json!(["loa3"])
+        );
+        ctx.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, json!(["loa4"]));
+        assert!(parameters(&ctx, "openid").is_err());
     }
 
     #[test]

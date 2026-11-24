@@ -4,7 +4,9 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import secrets
+import socket
 import subprocess
 from pathlib import Path
 
@@ -135,14 +137,14 @@ def prepare(source, directory):
     return ["docker", "compose", "-f", str(directory / "compose.yaml")]
 
 
-def fetch(directory, url):
+def fetch(directory, url, *, quiet=False):
     from urllib.parse import urlsplit
 
     return subprocess.check_output(
         [
             "curl",
             "--silent",
-            "--show-error",
+            *([] if quiet else ["--show-error"]),
             "--fail",
             "--max-time",
             "8",
@@ -303,7 +305,19 @@ local = ["{fixtures}/sp-metadata.xml"]
     )
 
 
-def proxy_command(directory, binary):
+class ReplicaStartupError(RuntimeError):
+    """Startup diagnostics containing only a port, exit status or fixture hostname."""
+
+
+def proxy_command(directory, binary, config):
+    if os.environ.get("SVERIGEID_RUNNER_HOSTS") == "1":
+        # CI configures the fixture hostname on its disposable runner. Refuse
+        # to send test traffic anywhere else if that setup was missed.
+        addresses = {r[4][0] for r in socket.getaddrinfo(HOST, None)}
+        if addresses != {"127.0.0.1"}:
+            raise ReplicaStartupError("fixture hostname must resolve to IPv4 loopback")
+        return [str(binary), str(config)]
+
     # Mount the fixture trust store and hosts file only in the proxy's process
     # namespace. No host-wide DNS or certificate configuration is changed.
     return [
@@ -325,7 +339,7 @@ def proxy_command(directory, binary):
         "/etc/ssl/certs/ca-certificates.crt",
         "--",
         str(binary),
-        str(directory / "proxy.toml"),
+        str(config),
     ]
 
 

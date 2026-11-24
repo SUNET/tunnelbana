@@ -39,6 +39,10 @@ pub const KEY_TARGET_AUTHN_CONTEXT_CLASS_REF: &str = "target_authn_context_class
 /// Decoration key carrying the `Comparison` attribute to forward alongside
 /// [`KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`].
 pub const KEY_TARGET_ACCR_COMPARISON: &str = "target_accr_comparison";
+/// Upstream assurance levels permitted by all configured per-frontend minima.
+/// A bound OIDC request must satisfy these even when a different service has
+/// already selected the target authentication context.
+pub const KEY_PERMITTED_ACR: &str = "permitted_acr";
 /// Decoration key carrying trusted SAML IdP scope values. In MDQ mode these
 /// come from the selected entity's validated metadata; a static backend may
 /// supply the same values explicitly. Response-path services such as eduID's

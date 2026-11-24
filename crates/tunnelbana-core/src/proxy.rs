@@ -2,7 +2,10 @@
 //!
 //! This is the Rust analogue of SATOSA's `base.py:SATOSABase.run`.
 
-use crate::context::{Context, STATE_KEY_BASE};
+use crate::context::{
+    Context, KEY_PERMITTED_ACR, KEY_TARGET_ACCR_COMPARISON, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+    STATE_KEY_BASE,
+};
 use crate::error::{Error, Result};
 use crate::http::{HttpRequestData, Response};
 use crate::internal::InternalData;
@@ -257,8 +260,26 @@ impl Proxy {
         if backend.binds_frontend_request() {
             // A verified callback answers the request the frontend accepted. A
             // saved login, rewritten prompt or mutable session field cannot supply it.
-            (ctx.target_frontend, ctx.state, ctx.decorations, request) =
+            let (frontend, state, mut decorations, original_request) =
                 original.expect("binding backend snapshot");
+            let frontend =
+                frontend.ok_or_else(|| Error::State("missing originating frontend".into()))?;
+            ctx.state
+                .restore_protocol_state(&state, &[STATE_KEY_BASE, &frontend, &backend_name]);
+            // Keep the frontend's own constraints immutable. Policy hooks may add
+            // an upstream assurance constraint, which the backend checks as well.
+            for key in [
+                KEY_PERMITTED_ACR,
+                KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+                KEY_TARGET_ACCR_COMPARISON,
+            ] {
+                if let Some(value) = ctx.decorations.remove(key) {
+                    decorations.insert(key.into(), value);
+                }
+            }
+            ctx.target_frontend = Some(frontend);
+            ctx.decorations = decorations;
+            request = original_request;
             return backend.start_auth(ctx, request).await;
         }
         if !request.force_authn {
@@ -524,6 +545,7 @@ mod tests {
     }
 
     struct RecordingBackend {
+        bind_request: bool,
         received: std::sync::Arc<std::sync::Mutex<Option<crate::internal::InternalData>>>,
     }
 
@@ -531,6 +553,9 @@ mod tests {
     impl Backend for RecordingBackend {
         fn name(&self) -> &str {
             "backend"
+        }
+        fn binds_frontend_request(&self) -> bool {
+            self.bind_request
         }
         fn register_endpoints(&self) -> Vec<crate::plugin::Route> {
             Vec::new()
@@ -550,6 +575,66 @@ mod tests {
         ) -> crate::error::Result<BackendAction> {
             Ok(BackendAction::Respond(Response::text(200, "ok")))
         }
+    }
+
+    #[tokio::test]
+    async fn bound_request_keeps_response_policy_and_original_frontend_inputs() {
+        struct Policy;
+        #[async_trait::async_trait]
+        impl MicroService for Policy {
+            fn name(&self) -> &str {
+                "policy"
+            }
+
+            async fn process_request(
+                &self,
+                ctx: &mut Context,
+                mut request: InternalData,
+            ) -> Result<InternalData> {
+                ctx.state.set_str("frontend", "authz_request", "replaced");
+                ctx.state.set_str("policy", "minimum", "loa3");
+                ctx.decorate(
+                    KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+                    serde_json::json!(["loa3"]),
+                );
+                request.force_authn = false;
+                Ok(request)
+            }
+        }
+        let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let proxy = Proxy::new(
+            vec![],
+            vec![Box::new(RecordingBackend {
+                received: received.clone(),
+                bind_request: true,
+            })],
+            vec![Box::new(Policy)],
+            StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
+        );
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        ctx.target_frontend = Some("frontend".into());
+        ctx.state.set_str("frontend", "authz_request", "original");
+        let request = InternalData {
+            force_authn: true,
+            ..Default::default()
+        };
+        proxy
+            .finish_request(&mut ctx, request, 0, Some("backend".into()))
+            .await
+            .unwrap();
+        assert!(received.lock().unwrap().as_ref().unwrap().force_authn);
+        assert_eq!(
+            ctx.state.get_str("frontend", "authz_request").as_deref(),
+            Some("original")
+        );
+        assert_eq!(
+            ctx.state.get_str("policy", "minimum").as_deref(),
+            Some("loa3")
+        );
+        assert_eq!(
+            ctx.decoration(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF),
+            Some(&serde_json::json!(["loa3"]))
+        );
     }
 
     fn resume_proxy(
@@ -576,7 +661,10 @@ mod tests {
         let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
         Proxy::new(
             vec![],
-            vec![Box::new(RecordingBackend { received })],
+            vec![Box::new(RecordingBackend {
+                received,
+                bind_request: false,
+            })],
             services,
             sealer,
         )
@@ -963,6 +1051,7 @@ mod tests {
         let proxy = Proxy::new(
             vec![],
             vec![Box::new(RecordingBackend {
+                bind_request: false,
                 received: Default::default(),
             })],
             vec![Box::new(SavedLogin)],
