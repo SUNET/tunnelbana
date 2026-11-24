@@ -145,6 +145,11 @@ pub trait Backend: Send + Sync {
 
     fn register_endpoints(&self) -> Vec<Route>;
 
+    /// Whether this backend binds the original frontend request to its verified response.
+    fn binds_frontend_request(&self) -> bool {
+        false
+    }
+
     /// Begin authentication with the upstream IdP/OP (returns e.g. a redirect).
     async fn start_auth(&self, ctx: &mut Context, request: InternalData) -> Result<Response>;
 

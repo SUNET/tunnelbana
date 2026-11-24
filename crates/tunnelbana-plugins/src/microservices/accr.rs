@@ -23,8 +23,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use tunnelbana_core::context::{
-    Context, KEY_REQUESTED_ACCR, KEY_REQUESTED_ACCR_COMPARISON, KEY_TARGET_ACCR_COMPARISON,
-    KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_TARGET_FRONTEND, STATE_KEY_BASE,
+    Context, KEY_PERMITTED_ACR, KEY_REQUESTED_ACCR, KEY_REQUESTED_ACCR_COMPARISON,
+    KEY_TARGET_ACCR_COMPARISON, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_TARGET_FRONTEND,
+    STATE_KEY_BASE,
 };
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::internal::InternalData;
@@ -210,6 +211,14 @@ impl MicroService for Accr {
             if let Some(minimum) = self.lowest.get(vidp) {
                 if let Some(idx) = self.supported.iter().position(|s| s == minimum) {
                     accr_to_forward = self.supported[..=idx].to_vec();
+                    // A routing hook may already have selected a target. Bound
+                    // OIDC requests must still enforce every operator's minimum.
+                    let mut permitted = accr_to_forward.clone();
+                    if ctx.decoration(KEY_PERMITTED_ACR).is_some() {
+                        let previous = decoration_list(ctx, KEY_PERMITTED_ACR);
+                        permitted.retain(|level| previous.contains(level));
+                    }
+                    ctx.decorate(KEY_PERMITTED_ACR, json_strings(&permitted));
                 }
             }
         }
@@ -379,6 +388,34 @@ mod tests {
             decoration_list(&c, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF),
             vec![MFA.to_string(), SFA.to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn bound_oidc_request_enforces_minimum_after_another_hook_selected_the_target() {
+        let accr = build_accr(serde_json::json!({
+            "supported_accr_sorted_by_prio": [MFA, SFA, PWD],
+            "lowest_accepted_accr_for_virtual_idp": {"SunetIDP": SFA}
+        }));
+        let mut c = ctx();
+        c.target_frontend = Some("SunetIDP".into());
+        c.decorate(
+            KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+            json_strings(&[PWD.into(), MFA.into()]),
+        );
+        accr.process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        let (_, params) = crate::sweden_connect::parameters(&c, "openid").unwrap();
+        assert_eq!(
+            params.claims.unwrap()["id_token"]["acr"]["values"],
+            serde_json::json!([MFA])
+        );
+        c.decorate(
+            KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+            json_strings(&[PWD.into()]),
+        );
+        assert!(crate::sweden_connect::parameters(&c, "openid").is_err());
     }
 
     #[tokio::test]

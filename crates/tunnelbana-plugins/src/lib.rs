@@ -77,3 +77,5 @@ pub fn register_all(registry: &mut Registry) {
     registry.register_microservice("accr", microservices::Accr::build);
     registry.register_microservice("stepup", microservices::StepUp::build);
 }
+
+mod sweden_connect;

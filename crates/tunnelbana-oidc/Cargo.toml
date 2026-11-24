@@ -8,4 +8,4 @@ description = "Compatibility shim re-exporting the grindvakt OAuth2/OIDC/Federat
 
 [dependencies]
 # The protocol library now lives in grindvakt; this crate just re-exports it.
-grindvakt.workspace = true
+grindvakt = { workspace = true, features = ["redis"] }

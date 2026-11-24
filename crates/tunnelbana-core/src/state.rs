@@ -65,7 +65,7 @@ const HKDF_INFO: &[u8] = b"tunnelbana state seal: dir+A256GCM";
 const HOST_PREFIX: &str = "__Host-";
 
 /// The mutable per-request state map.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     data: Map<String, Value>,
     /// Original issue time of an unsealed envelope. This is deliberately kept
@@ -122,6 +122,26 @@ impl State {
     /// Fetch an arbitrary JSON value within a namespace.
     pub fn get_value(&self, namespace: &str, key: &str) -> Option<&Value> {
         self.data.get(namespace)?.as_object()?.get(key)
+    }
+
+    /// Discard protocol data when replacing a flow cookie with a transaction handle.
+    /// The handle inherits the absolute expiry of the original flow.
+    pub fn clear_payload(&mut self) {
+        self.data.clear();
+    }
+
+    /// Restore a bound request's protocol namespaces while retaining policy state
+    /// saved by request microservices for their response hooks.
+    pub(crate) fn restore_protocol_state(&mut self, original: &State, namespaces: &[&str]) {
+        self.issued_at = original.issued_at;
+        self.delete = original.delete;
+        for &namespace in namespaces {
+            if let Some(value) = original.get(namespace) {
+                self.data.insert(namespace.to_owned(), value.clone());
+            } else {
+                self.clear_namespace(namespace);
+            }
+        }
     }
 
     /// Remove a namespace entirely.
@@ -658,6 +678,35 @@ mod tests {
             .unwrap();
         let restored = sealer.unseal(Some(token));
         assert_eq!(restored.issued_at, Some(original_iat));
+    }
+
+    #[test]
+    fn transaction_handle_preserves_cookie_deadline_and_policy_state() {
+        let mut original = State {
+            issued_at: Some(now_unix() - 300),
+            ..Default::default()
+        };
+        original.set_str("frontend", "request", "accepted");
+        let mut state = State::new();
+        state.set_str("frontend", "request", "rewritten");
+        state.set_str("accr:policy", "minimum", "loa3");
+        state.restore_protocol_state(&original, &["frontend"]);
+        assert_eq!(
+            state.get_str("frontend", "request").as_deref(),
+            Some("accepted")
+        );
+        assert_eq!(
+            state.get_str("accr:policy", "minimum").as_deref(),
+            Some("loa3")
+        );
+        state.clear_payload();
+        state.set_str("rp", "handle", "opaque");
+        assert!(state.get("frontend").is_none());
+        assert_eq!(state.issued_at, original.issued_at);
+        let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE")
+            .with_ttl_seconds(Some(299));
+        // A 300-second-old flow cannot gain another 299 seconds by switching to a handle.
+        assert!(sealer.seal(&state).unwrap().contains("Max-Age=0"));
     }
 
     #[test]

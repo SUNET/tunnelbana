@@ -1,0 +1,8 @@
+{
+  "metadata-aggregator": "ghcr.io/swedenconnect/metadata-aggregator@sha256:a57974063ae9a5b43fc982c28b14c1cd0239d11ffaa93aea12e1036a65e943e7",
+  "openid-federation": "ghcr.io/swedenconnect/openid-federation-services@sha256:734a6b14ec6a2bfecb02272a95b97b88984cb02918788d38dba0a73016277be3",
+  "redis": "redis/redis-stack@sha256:5d5154123426693540ea6c1d9e638eae2bf2024879c839db6fcfdd7717e817c7",
+  "reference-authn-server": "ghcr.io/swedenconnect/sweden-connect-reference-authn-server@sha256:7413d0b1bc138acb4bfbaa44e0936d4fad1c48edff57de16e6af61ad4ce4aafd",
+  "test-client": "ghcr.io/swedenconnect/sweden-connect-test-client@sha256:8a7f1c5fc0a40cab7b1f88f68ee8bdf19ddbd4d30aad3a800bcadf1d31f15660",
+  "test-my-eid": "ghcr.io/swedenconnect/test-my-eid@sha256:3924c54623acd76585db78a1325396d302b1b9a2c1f5d555b7ba1dc7ecce05a8"
+}

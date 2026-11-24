@@ -92,6 +92,20 @@ fn default_request_object_max_age() -> u64 {
 
 #[derive(Debug, Deserialize)]
 struct FederationFrontendConfig {
+    #[serde(default)]
+    rotation: crate::sweden_connect::RotationConfig,
+    profile: Option<crate::sweden_connect::Profile>,
+    redis_url: Option<String>,
+    #[serde(default)]
+    approval_clients: Vec<String>,
+    #[serde(default)]
+    release_claims: Option<Vec<String>>,
+    #[serde(default)]
+    acr_values_supported: Vec<String>,
+    #[serde(default)]
+    presentation: serde_json::Map<String, Value>,
+    subject_secret: Option<String>,
+
     /// Federation entity identifier (the `iss`/`sub` of the entity
     /// configuration and the OP `issuer`). Defaults to the module base
     /// (`<base_url>/<name>`). Set this to publish the OP at a stable identifier
@@ -142,13 +156,20 @@ struct FederationFrontendConfig {
 }
 
 pub struct FederationFrontend {
+    protocol_keys: crate::sweden_connect::ProtocolKeys,
     name: String,
     issuer: String,
     /// Base URL the protocol endpoints are mounted under (`<base_url>/<name>`).
     /// Distinct from `issuer` when a custom `entity_id` is configured.
     endpoint_base: String,
     provider: Provider,
-    clients: Arc<InMemoryClientStore>,
+    clients: Arc<dyn ClientStore>,
+    profile: bool,
+    acr_values_supported: Vec<String>,
+    approval_clients: Vec<String>,
+    release_claims: Vec<String>,
+    subject_secret: String,
+
     mapper: Arc<AttributeMapper>,
     http: Arc<dyn HttpClient>,
     // Federation state.
@@ -199,6 +220,20 @@ impl FederationFrontend {
             fed.signing_key_id.as_deref(),
         )?;
 
+        let protocol_keys =
+            crate::sweden_connect::ProtocolKeys::load(cfg.rotation, &op_key, &fed_key)?;
+        let profile = cfg.profile.is_some();
+        if profile {
+            crate::sweden_connect::check_keys(&fed_key, &op_key)?;
+            if fed.trust_anchor.is_empty()
+                || cfg.id_token_ttl.is_some_and(|ttl| ttl > 300)
+                || cfg.acr_values_supported.is_empty()
+                || cfg.backend.is_none()
+                || cfg.subject_secret.as_ref().is_none_or(|s| s.len() < 32)
+            {
+                return Err(Error::Config("Sweden Connect OP requires a trust anchor, backend, acr_values_supported, stable subject_secret (32 bytes) and ID token TTL <= 300".into()));
+            }
+        }
         let mut metadata = ProviderMetadata::new(issuer.clone(), &module_base);
         metadata.id_token_signing_alg_values_supported = vec![op_key.alg().as_str().to_string()];
         crate::oidc_common::advertise_mapped_claims(&mut metadata, &bx.attribute_mapper);
@@ -208,10 +243,87 @@ impl FederationFrontend {
             serde_json::json!(["automatic"]),
         );
 
+        let release_claims = cfg.release_claims.unwrap_or_else(|| {
+            crate::sweden_connect::NAMES
+                .into_iter()
+                .chain([crate::sweden_connect::PIN, crate::sweden_connect::COORD])
+                .map(String::from)
+                .collect()
+        });
+        if profile {
+            use crate::sweden_connect::{APPROVAL, INFO, NUMBER};
+            metadata
+                .claims_supported
+                .extend(release_claims.iter().cloned());
+            metadata
+                .claims_supported
+                .extend(["acr".into(), "auth_time".into()]);
+            metadata.scopes_supported = ["openid", INFO, NUMBER].map(String::from).to_vec();
+            if !cfg.approval_clients.is_empty() {
+                metadata.scopes_supported.push(APPROVAL.into());
+            }
+            metadata.grant_types_supported = vec!["authorization_code".into()];
+            metadata.subject_types_supported = vec!["public".into(), "pairwise".into()];
+            metadata.token_endpoint_auth_methods_supported = vec!["private_key_jwt".into()];
+            metadata.claims_parameter_supported = true;
+            metadata
+                .extra
+                .extend(crate::sweden_connect::presentation(cfg.presentation)?);
+            metadata.extra.extend(serde_json::json!({
+                "ui_locales_supported":["sv","en"], "acr_values_supported":cfg.acr_values_supported,
+                "request_uri_parameter_supported":false,
+                "token_endpoint_auth_signing_alg_values_supported":["RS256","RS384","RS512","ES256","ES384","ES512"],
+                "userinfo_signing_alg_values_supported":[op_key.alg()],
+                "id_token_encryption_alg_values_supported":["RSA-OAEP","RSA-OAEP-256","ECDH-ES"],
+                "userinfo_encryption_alg_values_supported":["RSA-OAEP","RSA-OAEP-256","ECDH-ES"],
+                "id_token_encryption_enc_values_supported":["A128GCM","A256GCM","A128CBC-HS256","A256CBC-HS512"],
+                "userinfo_encryption_enc_values_supported":["A128GCM","A256GCM","A128CBC-HS256","A256CBC-HS512"]
+            }).as_object().unwrap().clone());
+        }
+        if profile {
+            let algs: std::collections::BTreeSet<_> = protocol_keys
+                .published
+                .keys
+                .iter()
+                .filter(|key| key.use_.as_deref() == Some("enc"))
+                .filter_map(|k| k.alg.as_ref())
+                .collect();
+            metadata.extra.insert(
+                "request_object_encryption_alg_values_supported".into(),
+                serde_json::json!(algs),
+            );
+            if !algs.is_empty() {
+                metadata.extra.insert(
+                    "request_object_encryption_enc_values_supported".into(),
+                    serde_json::json!(["A128GCM", "A256GCM", "A128CBC-HS256", "A256CBC-HS512"]),
+                );
+            }
+        }
         let client_list =
             crate::client_loader::load_clients(cfg.clients, cfg.clients_file.as_deref())?;
-        let store = Arc::new(InMemoryClientStore::with_clients(client_list));
-        let dyn_store: Arc<dyn tunnelbana_oidc::client::ClientStore> = store.clone();
+        let store: Arc<dyn ClientStore> = if let Some(url) = &cfg.redis_url {
+            Arc::new(
+                tunnelbana_oidc::client::RedisClientStore::new(
+                    url,
+                    format!("tunnelbana:{issuer}:client:"),
+                    client_list,
+                )
+                .map_err(|_| Error::Config("invalid client-store Redis configuration".into()))?,
+            )
+        } else {
+            Arc::new(InMemoryClientStore::with_clients(client_list))
+        };
+        let replay: Arc<dyn tunnelbana_oidc::provider::TokenUseStore> = if let Some(url) =
+            &cfg.redis_url
+        {
+            Arc::new(
+                tunnelbana_oidc::provider::RedisStore::new(url)
+                    .map_err(|_| Error::Config("invalid replay-store Redis configuration".into()))?
+                    .with_key_prefix(format!("tunnelbana:{issuer}:use:")),
+            )
+        } else {
+            Arc::new(InMemoryTokenUseStore::new())
+        };
         // Mix the frontend instance name into the sealing key material, so a
         // token sealed by one frontend cannot be opened by another frontend
         // sharing the same master secret.
@@ -224,20 +336,14 @@ impl FederationFrontend {
         let lifetimes = TokenLifetimes {
             code_ttl: cfg.code_ttl.unwrap_or(600),
             access_token_ttl: cfg.access_token_ttl.unwrap_or(3600),
-            id_token_ttl: cfg.id_token_ttl.unwrap_or(3600),
+            id_token_ttl: cfg.id_token_ttl.unwrap_or(if profile { 300 } else { 3600 }),
             refresh_token_ttl: cfg.refresh_token_ttl.unwrap_or(2_592_000),
         };
-        let mut provider = Provider::new(
-            metadata,
-            op_key,
-            dyn_store,
-            codec,
-            lifetimes,
-            Arc::new(InMemoryTokenUseStore::new()),
-        )?
-        // Tunnelbana's configured response pipeline supplies the final subject.
-        // Keep existing identifiers and enable Grindvakt's bound resolver API.
-        .with_caller_managed_pairwise_subjects();
+        let mut provider =
+            Provider::new(metadata, op_key, store.clone(), codec, lifetimes, replay)?
+                // Tunnelbana's configured response pipeline supplies the final subject.
+                // Keep existing identifiers and enable Grindvakt's bound resolver API.
+                .with_caller_managed_pairwise_subjects();
         // This frontend validates signed request objects before calling the provider.
         provider.metadata.request_parameter_supported = true;
         if let Some(max_age) = cfg.client_assertion_max_age {
@@ -263,7 +369,13 @@ impl FederationFrontend {
             issuer,
             endpoint_base: module_base,
             provider,
+            protocol_keys,
             clients: store,
+            profile,
+            acr_values_supported: cfg.acr_values_supported,
+            approval_clients: cfg.approval_clients,
+            release_claims,
+            subject_secret: cfg.subject_secret.unwrap_or_default(),
             mapper: bx.attribute_mapper.clone(),
             http: bx.http_client.clone(),
             fed_key,
@@ -365,7 +477,41 @@ impl FederationFrontend {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        let jwks =
+            if self.profile {
+                if rp_meta["token_endpoint_auth_method"] != "private_key_jwt" {
+                    return Err(Error::Authn("unsupported client authentication".into()));
+                }
+                for name in [
+                    "id_token_signed_response_alg",
+                    "userinfo_signed_response_alg",
+                ] {
+                    if rp_meta.get(name).and_then(Value::as_str).is_some_and(|a| {
+                        self.protocol_keys.published.keys[0].alg.as_deref() != Some(a)
+                    }) {
+                        return Err(Error::Authn(
+                            "registered response signing algorithm unavailable".into(),
+                        ));
+                    }
+                }
+                Some(
+                    federation::entity_metadata_jwks(
+                        &self.http,
+                        rp_meta,
+                        client_id,
+                        &resolved.subject_jwks,
+                    )
+                    .await?,
+                )
+            } else {
+                jwks
+            };
         let client = Client {
+            response_policy: if self.profile {
+                serde_json::from_value(rp_meta.clone())?
+            } else {
+                Default::default()
+            },
             client_id: client_id.to_string(),
             client_secret: None,
             redirect_uris,
@@ -386,6 +532,29 @@ impl FederationFrontend {
                 .to_string(),
             client_name,
         };
+        if self.profile {
+            if !matches!(client.subject_type.as_str(), "public" | "pairwise") {
+                return Err(Error::Authn("unsupported registered subject type".into()));
+            }
+            if let Some(uri) = &client.response_policy.sector_identifier_uri {
+                crate::url_check::require_https(uri, "sector_identifier_uri")?;
+                let doc = self.http.get(uri).await?;
+                if doc.status != 200 || doc.body.len() > 64 * 1024 {
+                    return Err(Error::Authn("invalid sector redirect list".into()));
+                }
+                let registered: Vec<String> = serde_json::from_slice(&doc.body)?;
+                if client.redirect_uris.is_empty()
+                    || !client
+                        .redirect_uris
+                        .iter()
+                        .all(|url| registered.contains(url))
+                {
+                    return Err(Error::Authn(
+                        "sector did not register this client's redirect URIs".into(),
+                    ));
+                }
+            }
+        }
         let cache_ttl =
             cache_ttl_bounded_by_trust(self.rp_cache_ttl, resolved.exp, "resolved federation RP")?;
         self.clients.put_with_ttl(client.clone(), cache_ttl).await;
@@ -403,7 +572,10 @@ impl FederationFrontend {
         let Some(index) = params.iter().position(|(name, _)| name == "request") else {
             return Ok(());
         };
-        let (_, request_jwt) = params.remove(index);
+        let (_, mut request_jwt) = params.remove(index);
+        if self.profile && request_jwt.split('.').count() == 5 {
+            request_jwt = self.protocol_keys.open(&request_jwt)?;
+        }
         let jwks = client
             .jwks
             .as_ref()
@@ -413,6 +585,25 @@ impl FederationFrontend {
             .with_audience(&self.issuer)
             .with_max_age(self.request_object_max_age)
             .require_exp();
+        let validation = if self.profile {
+            let algs = match client.response_policy.request_object_signing_alg.as_deref() {
+                Some(alg) => vec![alg.parse::<jose_rs::JwsAlgorithm>()?],
+                None => vec![
+                    jose_rs::JwsAlgorithm::RS256,
+                    jose_rs::JwsAlgorithm::RS384,
+                    jose_rs::JwsAlgorithm::RS512,
+                    jose_rs::JwsAlgorithm::ES256,
+                    jose_rs::JwsAlgorithm::ES384,
+                    jose_rs::JwsAlgorithm::ES512,
+                ],
+            };
+            for alg in &algs {
+                crate::oidc_common::validate_id_token_algorithm(*alg)?;
+            }
+            validation.with_allowed_algorithms(algs).require_kid()
+        } else {
+            validation
+        };
         let claims = tunnelbana_oidc::jwt::verify_with_jwks(jwks, &request_jwt, &validation)?;
 
         let inner_client_id = claims
@@ -429,6 +620,67 @@ impl FederationFrontend {
         // Outer parameters are often duplicated inside JAR. They may agree,
         // but a signed claim must never silently overwrite a different outer
         // value because that would split client lookup from request handling.
+        if self.profile {
+            // All outer protocol parameters must be covered by the JAR signature.
+            for (name, outer) in params.iter() {
+                let signed = claims
+                    .extra
+                    .get(name)
+                    .ok_or_else(|| Error::Authn("unsigned request parameter".into()))?;
+                if signed.as_str() != Some(outer)
+                    && serde_json::from_str::<Value>(outer).ok().as_ref() != Some(signed)
+                {
+                    return Err(Error::Authn(
+                        "request object conflicts with outer parameters".into(),
+                    ));
+                }
+            }
+            params.clear();
+            for (name, value) in &claims.extra {
+                let text = match value {
+                    Value::String(s) => s.clone(),
+                    Value::Object(_)
+                        if name == "claims" || name == crate::sweden_connect::SIGN_REQUEST =>
+                    {
+                        value.to_string()
+                    }
+                    Value::Number(_) if name == "max_age" => value.to_string(),
+                    _ => {
+                        return Err(Error::BadRequest(
+                            "unsupported structured request parameter".into(),
+                        ))
+                    }
+                };
+                params.push((name.clone(), text));
+            }
+            // A signed OIDC nonce identifies the request when the RP omits
+            // the optional JWT ID. Consume it under a separate namespace.
+            let request_id = match &claims.jti {
+                Some(id) if !id.is_empty() => format!("jti:{id}"),
+                None => format!(
+                    "nonce:{}",
+                    claims
+                        .extra
+                        .get("nonce")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| Error::Authn("missing signed request identifier".into()))?
+                ),
+                _ => return Err(Error::Authn("empty request identifier".into())),
+            };
+            let expiry = claims.exp.map(|e| e.as_secs()).unwrap_or(0);
+            self.provider
+                .consume_request_id(
+                    &client.client_id,
+                    &request_id,
+                    expiry.min(
+                        now_secs().saturating_add(self.request_object_max_age.saturating_add(120)),
+                    ),
+                )
+                .await
+                .map_err(|_| Error::Authn("request object expired or already used".into()))?;
+            return Ok(());
+        }
         let merged = serde_json::to_value(&claims.extra).unwrap_or_default();
         if let Some(obj) = merged.as_object() {
             for (k, v) in obj {
@@ -460,6 +712,9 @@ impl FederationFrontend {
 
     async fn handle_authorization(&self, ctx: &mut Context) -> Result<FrontendAction> {
         let mut params = ctx.request.query_pairs.clone();
+        if ctx.request.method == "POST" {
+            params.extend(ctx.request.form_pairs.clone());
+        }
         // JAR may supply required fields later, but duplicates must be rejected
         // before client lookup or request-object merging can erase ambiguity.
         let mut names = std::collections::BTreeSet::new();
@@ -509,6 +764,11 @@ impl FederationFrontend {
             },
         };
 
+        if self.profile && !params.iter().any(|(name, _)| name == "request") {
+            return Ok(FrontendAction::Respond(
+                OAuthError::invalid_request("signed request object required").to_response(),
+            ));
+        }
         // Unpack a request object if present.
         if params.iter().any(|(name, _)| name == "request") {
             if let Err(e) = self.unpack_request_object(&mut params, &client).await {
@@ -534,6 +794,37 @@ impl FederationFrontend {
             return Ok(FrontendAction::Respond(
                 error.to_redirect(&req.redirect_uri, req.use_fragment()),
             ));
+        }
+        if self.profile {
+            if !req.is_oidc()
+                || req.response_type != "code"
+                || req.nonce.as_ref().is_none_or(String::is_empty)
+                || req.code_challenge_method.as_deref() != Some("S256")
+            {
+                return Ok(FrontendAction::Respond(
+                    OAuthError::invalid_request("code, openid, nonce and S256 are required")
+                        .to_response(),
+                ));
+            }
+            let approval = self.approval_clients.contains(&client.client_id);
+            if req.scopes().contains(&crate::sweden_connect::APPROVAL) && !approval {
+                return Ok(FrontendAction::Respond(
+                    OAuthError::new(
+                        OAuthErrorCode::UnauthorizedClient,
+                        "client cannot request signature approval",
+                    )
+                    .with_state(req.state.clone())
+                    .to_redirect(&req.redirect_uri, req.use_fragment()),
+                ));
+            }
+            if crate::sweden_connect::validate_approval(&req, approval).is_err() {
+                return Ok(FrontendAction::Respond(
+                    OAuthError::invalid_request("invalid or unauthorized approval request")
+                        .to_response(),
+                ));
+            }
+            ctx.state
+                .set_value(&self.name, "approved_signature_client", approval.into());
         }
         self.store_authz_request(ctx, &req)?;
         crate::oidc_common::bind_authorization_client(ctx, &self.name, &client)?;
@@ -575,6 +866,15 @@ impl FederationFrontend {
         };
         // The federation frontend does not offer DPoP, so no proof is presented;
         // a DPoP-bound token reaching here is rejected by the provider.
+        if self.profile {
+            return match crate::sweden_connect::signed_userinfo(&self.provider, token).await {
+                Ok(jwt) => Response::new(200)
+                    .with_header("content-type", "application/jwt")
+                    .with_header("cache-control", "no-store")
+                    .with_body(jwt.into_bytes()),
+                Err(e) => e.to_response(),
+            };
+        }
         match self.provider.userinfo(token, None).await {
             Ok(claims) => Response::json(&claims).unwrap_or_else(|e| {
                 tracing::error!(frontend = %self.name, error = %e, "UserInfo serialization failed");
@@ -643,7 +943,7 @@ impl Frontend for FederationFrontend {
                 &self.provider.discovery_document(),
             )?)),
             "jwks" => Ok(FrontendAction::Respond(Response::json(
-                &self.provider.jwks_document(),
+                &self.protocol_keys.published,
             )?)),
             "authorization" => self.handle_authorization(ctx).await,
             "token" => Ok(FrontendAction::Respond(self.handle_token(ctx).await)),
@@ -669,27 +969,66 @@ impl Frontend for FederationFrontend {
             &mut external,
             response.auth_info.issuer.as_deref(),
         );
-        match self
-            .provider
-            .authorization_redirect_with_claims_subject_resolver_and_auth_time(
-                &req,
-                |client| {
-                    crate::oidc_common::resolve_authorization_subject(
-                        ctx,
-                        &self.name,
-                        client,
-                        &response,
-                        &self.mapper,
-                    )
-                    .map_err(|error| error.with_state(req.state.clone()))
-                },
-                &external,
-                acr,
-                &extra_claims,
-                auth_time,
+        if self.profile && ctx.verified_oidc.is_none() {
+            return Err(Error::Authn(
+                "Sweden Connect issuance requires a verified upstream callback".into(),
+            ));
+        }
+        let resolve = |client: &Client| {
+            let subject = crate::oidc_common::resolve_authorization_subject(
+                ctx,
+                &self.name,
+                client,
+                &response,
+                &self.mapper,
             )
-            .await
-        {
+            .map_err(|error| error.with_state(req.state.clone()))?;
+            if let Some(verified) = ctx.verified_oidc.as_ref().filter(|_| self.profile) {
+                return crate::sweden_connect::subject(
+                    &self.subject_secret,
+                    &self.issuer,
+                    client,
+                    response.auth_info.issuer.as_deref().unwrap_or_default(),
+                    &verified.subject,
+                );
+            }
+            Ok(subject)
+        };
+        let result = if let Some(verified) = &ctx.verified_oidc {
+            if req.scopes().contains(&crate::sweden_connect::APPROVAL) != verified.approval {
+                return Err(Error::Authn("approval transaction mismatch".into()));
+            }
+            if self.profile
+                && !acr
+                    .as_ref()
+                    .is_some_and(|v| self.acr_values_supported.contains(v))
+            {
+                return Err(Error::UnmetAuthenticationRequirements);
+            }
+            let claims = crate::sweden_connect::release(
+                &req,
+                verified,
+                &external,
+                self.profile.then_some(self.release_claims.as_slice()),
+            );
+            self.provider
+                .authorization_redirect_with_authorized_claims(
+                    &req, resolve, claims, acr, auth_time,
+                )
+                .await
+        } else {
+            self.provider
+                .authorization_redirect_with_claims_subject_resolver_and_auth_time(
+                    &req,
+                    resolve,
+                    &external,
+                    acr,
+                    &extra_claims,
+                    auth_time,
+                )
+                .await
+        };
+        match result {
             Ok(r) => Ok(r),
             Err(error) => {
                 Ok(

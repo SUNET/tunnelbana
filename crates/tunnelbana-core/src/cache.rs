@@ -76,6 +76,16 @@ where
         }
     }
 
+    /// Atomically remove and return an unexpired value.
+    pub fn take(&self, key: &str) -> Option<V> {
+        self.inner
+            .write()
+            .ok()?
+            .remove(key)
+            .filter(|entry| entry.expires_at > now_secs())
+            .map(|entry| entry.value)
+    }
+
     /// Insert with the default TTL.
     pub fn put(&self, key: impl Into<String>, value: V) {
         self.put_with_ttl(key, value, self.default_ttl);

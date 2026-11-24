@@ -1,0 +1,60 @@
+{
+  "local_federation": "5b67bedb42230fff6b8d89fb26c80e2084d2eb7b",
+  "images": {
+    "metadata-aggregator": "ghcr.io/swedenconnect/metadata-aggregator@sha256:a57974063ae9a5b43fc982c28b14c1cd0239d11ffaa93aea12e1036a65e943e7",
+    "openid-federation": "ghcr.io/swedenconnect/openid-federation-services@sha256:734a6b14ec6a2bfecb02272a95b97b88984cb02918788d38dba0a73016277be3",
+    "redis": "redis/redis-stack@sha256:5d5154123426693540ea6c1d9e638eae2bf2024879c839db6fcfdd7717e817c7",
+    "reference-authn-server": "ghcr.io/swedenconnect/sweden-connect-reference-authn-server@sha256:7413d0b1bc138acb4bfbaa44e0936d4fad1c48edff57de16e6af61ad4ce4aafd",
+    "test-client": "ghcr.io/swedenconnect/sweden-connect-test-client@sha256:8a7f1c5fc0a40cab7b1f88f68ee8bdf19ddbd4d30aad3a800bcadf1d31f15660",
+    "test-my-eid": "ghcr.io/swedenconnect/test-my-eid@sha256:3924c54623acd76585db78a1325396d302b1b9a2c1f5d555b7ba1dc7ecce05a8"
+  },
+  "sources": {
+    "tunnelbana": {
+      "commit": "67d5e44b2c061541e20c8d50b2eafba069a47d92",
+      "local_inputs_sha256": "689143253a0f51cc8ad9f6b54e4db55ea89b646c33f2230b3b059a546a14f1d8"
+    },
+    "grindvakt": {
+      "version": "0.13.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "6e13e31d549f0ea2a4afd3ea7ea665ca1b9da45ab06beb5ad0c37e640b686fa1"
+    },
+    "jose-rs": {
+      "version": "0.13.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "1d6ebddd6aa3fb294f9bda66f3c40cff14bc685ef94598c4f39fec57652a804b"
+    }
+  },
+  "checks": {
+    "reference-stack": "PASS",
+    "replica-startup": "PASS",
+    "signed-registrations-and-discovery": "PASS",
+    "registered-test-peer-metadata": "PASS",
+    "service-oidc-loa4-concurrent-redemption": "PASS",
+    "service-oidc-loa3-concurrent-redemption": "PASS",
+    "rp1-public-signed": "PASS",
+    "rp1-coordination-number": "PASS",
+    "rp1-openid-privacy-stable": "PASS",
+    "rp2-rsa-encrypted": "PASS",
+    "rp2-stable-pairwise": "PASS",
+    "rp3-ec-encrypted-signing-key-1": "PASS",
+    "rp3-ec-encrypted-signing-key-2": "PASS",
+    "test-my-eid-approve": "PASS",
+    "test-my-eid-cancel": "PASS",
+    "test-my-eid-unknown-signer": "PASS",
+    "service-saml-signed-assurance": "PASS",
+    "registered-sectors-and-original-auth-time": "PASS",
+    "retired-recipient-key-in-flight-restart": "PASS",
+    "upstream-wrong-issuer": "PASS",
+    "upstream-wrong-audience": "PASS",
+    "upstream-wrong-userinfo-sub": "PASS",
+    "upstream-unmet-acr": "PASS",
+    "upstream-wrong-signer": "PASS",
+    "upstream-ordinary-login": "PASS",
+    "upstream-unencrypted-id": "PASS",
+    "upstream-unencrypted-userinfo": "PASS",
+    "federation-withdrawn-loa": "PASS",
+    "federation-expired-op": "PASS",
+    "redis-replica-code-and-signing-rollover": "PASS"
+  },
+  "passed": true
+}

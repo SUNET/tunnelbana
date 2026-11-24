@@ -50,6 +50,7 @@ mod tests {
 
     fn payload() -> AuthCodePayload {
         AuthCodePayload {
+            registration_digest: None,
             client_id: "rp-1".into(),
             redirect_uri: "https://rp.example.com/cb".into(),
             scope: "openid".into(),
@@ -58,6 +59,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             claims: Default::default(),
+            userinfo_claims: None,
             auth_time: 1,
             exp: u64::MAX,
             acr: None,

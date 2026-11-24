@@ -39,6 +39,10 @@ pub const KEY_TARGET_AUTHN_CONTEXT_CLASS_REF: &str = "target_authn_context_class
 /// Decoration key carrying the `Comparison` attribute to forward alongside
 /// [`KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`].
 pub const KEY_TARGET_ACCR_COMPARISON: &str = "target_accr_comparison";
+/// Upstream assurance levels permitted by all configured per-frontend minima.
+/// A bound OIDC request must satisfy these even when a different service has
+/// already selected the target authentication context.
+pub const KEY_PERMITTED_ACR: &str = "permitted_acr";
 /// Decoration key carrying trusted SAML IdP scope values. In MDQ mode these
 /// come from the selected entity's validated metadata; a static backend may
 /// supply the same values explicitly. Response-path services such as eduID's
@@ -70,6 +74,10 @@ pub const KEY_STEPUP_INITIAL_POLICY: &str = "stepup_initial_policy";
 /// ad-hoc decorations between the frontend, micro-services and backend.
 /// Mirrors SATOSA's `satosa.context.Context`.
 pub struct Context {
+    /// Verified protocol data kept outside the mutable microservice attribute
+    /// and decoration maps. Only the upstream callback establishes this value.
+    pub verified_oidc: Option<VerifiedOidc>,
+
     /// The parsed inbound HTTP request.
     pub request: HttpRequestData,
     /// The name of the backend selected to handle this flow.
@@ -86,6 +94,7 @@ pub struct Context {
 impl Context {
     pub fn new(request: HttpRequestData, state: State) -> Self {
         Self {
+            verified_oidc: None,
             request,
             target_backend: None,
             target_frontend: None,
@@ -131,4 +140,13 @@ impl Context {
     pub fn requester(&self) -> Option<String> {
         self.state.get_str(STATE_KEY_BASE, KEY_REQUESTER)
     }
+}
+
+/// Upstream results retained until downstream issuance in the same callback.
+#[derive(Clone)]
+pub struct VerifiedOidc {
+    pub id_token: Value,
+    pub userinfo: Value,
+    pub subject: String,
+    pub approval: bool,
 }

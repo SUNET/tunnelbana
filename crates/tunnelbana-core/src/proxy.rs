@@ -2,7 +2,10 @@
 //!
 //! This is the Rust analogue of SATOSA's `base.py:SATOSABase.run`.
 
-use crate::context::{Context, STATE_KEY_BASE};
+use crate::context::{
+    Context, KEY_PERMITTED_ACR, KEY_TARGET_ACCR_COMPARISON, KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+    STATE_KEY_BASE,
+};
 use crate::error::{Error, Result};
 use crate::http::{HttpRequestData, Response};
 use crate::internal::InternalData;
@@ -90,7 +93,18 @@ impl Proxy {
 
         let mut response = match result {
             Ok(r) => r,
-            Err(e) => self.render_error(&mut ctx, e).await,
+            Err(e) => {
+                let result = self.render_error(&mut ctx, e).await;
+                if ctx
+                    .target_backend
+                    .as_ref()
+                    .and_then(|name| self.backends.get(name))
+                    .is_some_and(|backend| backend.binds_frontend_request())
+                {
+                    ctx.state.delete = true;
+                }
+                result
+            }
         };
 
         // Attach the (possibly cleared) state cookie. A response whose state
@@ -216,6 +230,18 @@ impl Proxy {
         start_index: usize,
         pinned_backend: Option<String>,
     ) -> Result<Response> {
+        let original = self
+            .backends
+            .values()
+            .any(|b| b.binds_frontend_request())
+            .then(|| {
+                (
+                    ctx.target_frontend.clone(),
+                    ctx.state.clone(),
+                    ctx.decorations.clone(),
+                    request.clone(),
+                )
+            });
         for ms in self.microservices.iter().skip(start_index) {
             request = ms.process_request(ctx, request).await?;
         }
@@ -231,6 +257,31 @@ impl Proxy {
             .get(&backend_name)
             .ok_or_else(|| Error::UnknownModule(backend_name.clone()))?;
 
+        if backend.binds_frontend_request() {
+            // A verified callback answers the request the frontend accepted. A
+            // saved login, rewritten prompt or mutable session field cannot supply it.
+            let (frontend, state, mut decorations, original_request) =
+                original.expect("binding backend snapshot");
+            let frontend =
+                frontend.ok_or_else(|| Error::State("missing originating frontend".into()))?;
+            ctx.state
+                .restore_protocol_state(&state, &[STATE_KEY_BASE, &frontend, &backend_name]);
+            // Keep the frontend's own constraints immutable. Policy hooks may add
+            // an upstream assurance constraint, which the backend checks as well.
+            for key in [
+                KEY_PERMITTED_ACR,
+                KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+                KEY_TARGET_ACCR_COMPARISON,
+            ] {
+                if let Some(value) = ctx.decorations.remove(key) {
+                    decorations.insert(key.into(), value);
+                }
+            }
+            ctx.target_frontend = Some(frontend);
+            ctx.decorations = decorations;
+            request = original_request;
+            return backend.start_auth(ctx, request).await;
+        }
         if !request.force_authn {
             for ms in &self.microservices {
                 if let Some(mut response) = ms.try_authenticate(ctx, &request).await? {
@@ -290,13 +341,34 @@ impl Proxy {
         mut response: InternalData,
         start_index: usize,
     ) -> Result<Response> {
+        let protected = ctx.verified_oidc.take().map(|claims| {
+            (
+                claims,
+                response.auth_info.clone(),
+                ctx.target_frontend.clone(),
+                ctx.state.clone(),
+            )
+        });
         for ms in self.microservices.iter().skip(start_index) {
             match ms.process_response_action(ctx, response).await? {
                 MicroServiceResponseAction::Continue(next) => response = next,
+                MicroServiceResponseAction::Respond(_) if protected.is_some() => {
+                    return Err(Error::Authn(
+                        "verified OIDC response cannot be suspended".into(),
+                    ));
+                }
                 MicroServiceResponseAction::Respond(http) => return Ok(http),
             }
         }
 
+        if let Some((claims, assurance, frontend, state)) = protected {
+            ctx.verified_oidc = Some(claims);
+            response.auth_info = assurance;
+            ctx.target_frontend = frontend;
+            ctx.state = state;
+        } else {
+            ctx.verified_oidc = None;
+        }
         let frontend_name = ctx
             .target_frontend
             .clone()
@@ -473,6 +545,7 @@ mod tests {
     }
 
     struct RecordingBackend {
+        bind_request: bool,
         received: std::sync::Arc<std::sync::Mutex<Option<crate::internal::InternalData>>>,
     }
 
@@ -480,6 +553,9 @@ mod tests {
     impl Backend for RecordingBackend {
         fn name(&self) -> &str {
             "backend"
+        }
+        fn binds_frontend_request(&self) -> bool {
+            self.bind_request
         }
         fn register_endpoints(&self) -> Vec<crate::plugin::Route> {
             Vec::new()
@@ -499,6 +575,66 @@ mod tests {
         ) -> crate::error::Result<BackendAction> {
             Ok(BackendAction::Respond(Response::text(200, "ok")))
         }
+    }
+
+    #[tokio::test]
+    async fn bound_request_keeps_response_policy_and_original_frontend_inputs() {
+        struct Policy;
+        #[async_trait::async_trait]
+        impl MicroService for Policy {
+            fn name(&self) -> &str {
+                "policy"
+            }
+
+            async fn process_request(
+                &self,
+                ctx: &mut Context,
+                mut request: InternalData,
+            ) -> Result<InternalData> {
+                ctx.state.set_str("frontend", "authz_request", "replaced");
+                ctx.state.set_str("policy", "minimum", "loa3");
+                ctx.decorate(
+                    KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
+                    serde_json::json!(["loa3"]),
+                );
+                request.force_authn = false;
+                Ok(request)
+            }
+        }
+        let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let proxy = Proxy::new(
+            vec![],
+            vec![Box::new(RecordingBackend {
+                received: received.clone(),
+                bind_request: true,
+            })],
+            vec![Box::new(Policy)],
+            StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
+        );
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        ctx.target_frontend = Some("frontend".into());
+        ctx.state.set_str("frontend", "authz_request", "original");
+        let request = InternalData {
+            force_authn: true,
+            ..Default::default()
+        };
+        proxy
+            .finish_request(&mut ctx, request, 0, Some("backend".into()))
+            .await
+            .unwrap();
+        assert!(received.lock().unwrap().as_ref().unwrap().force_authn);
+        assert_eq!(
+            ctx.state.get_str("frontend", "authz_request").as_deref(),
+            Some("original")
+        );
+        assert_eq!(
+            ctx.state.get_str("policy", "minimum").as_deref(),
+            Some("loa3")
+        );
+        assert_eq!(
+            ctx.decoration(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF),
+            Some(&serde_json::json!(["loa3"]))
+        );
     }
 
     fn resume_proxy(
@@ -525,7 +661,10 @@ mod tests {
         let sealer = StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE");
         Proxy::new(
             vec![],
-            vec![Box::new(RecordingBackend { received })],
+            vec![Box::new(RecordingBackend {
+                received,
+                bind_request: false,
+            })],
             services,
             sealer,
         )
@@ -751,9 +890,12 @@ mod tests {
 
         async fn handle_authn_response(
             &self,
-            _ctx: &mut Context,
+            ctx: &mut Context,
             response: crate::internal::InternalData,
         ) -> crate::error::Result<Response> {
+            if ctx.verified_oidc.is_some() {
+                return Response::json(&response.auth_info);
+            }
             Ok(Response::text(
                 200,
                 response.requester.unwrap_or_else(|| "missing".into()),
@@ -767,6 +909,67 @@ mod tests {
         ) -> crate::error::Result<Response> {
             Ok(Response::text(500, "frontend error"))
         }
+    }
+
+    #[tokio::test]
+    async fn response_services_cannot_replace_or_create_verified_assurance() {
+        use crate::context::VerifiedOidc;
+        struct Rewrite;
+        #[async_trait::async_trait]
+        impl MicroService for Rewrite {
+            fn name(&self) -> &str {
+                "rewrite"
+            }
+            async fn process_response(
+                &self,
+                ctx: &mut Context,
+                mut response: InternalData,
+            ) -> Result<InternalData> {
+                ctx.verified_oidc = Some(VerifiedOidc {
+                    id_token: serde_json::json!({}),
+                    userinfo: serde_json::json!({}),
+                    subject: "rewritten".into(),
+                    approval: true,
+                });
+                response.auth_info.auth_class_ref = Some("different".into());
+                response.auth_info.timestamp = None;
+                Ok(response)
+            }
+        }
+        let proxy = Proxy::new(
+            vec![Box::new(RecordingFrontend)],
+            vec![],
+            vec![Box::new(Rewrite)],
+            StateSealer::new("a-32-byte-or-longer-test-secret!!", "TB_STATE"),
+        );
+        let mut ctx = Context::new(HttpRequestData::default(), State::new());
+        ctx.target_frontend = Some("frontend".into());
+        let original = InternalData {
+            auth_info: crate::internal::AuthenticationInformation {
+                auth_class_ref: Some("loa3".into()),
+                timestamp: Some("2026-01-01T01:02:03Z".into()),
+                issuer: Some("upstream".into()),
+            },
+            ..Default::default()
+        };
+        proxy
+            .finish_response(&mut ctx, original.clone(), 0)
+            .await
+            .unwrap();
+        assert!(ctx.verified_oidc.is_none());
+        ctx.verified_oidc = Some(VerifiedOidc {
+            id_token: serde_json::json!({}),
+            userinfo: serde_json::json!({}),
+            subject: "original".into(),
+            approval: false,
+        });
+        let wire = proxy
+            .finish_response(&mut ctx, original.clone(), 0)
+            .await
+            .unwrap();
+        let values: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(values, serde_json::to_value(original.auth_info).unwrap());
+        assert_eq!(ctx.verified_oidc.unwrap().subject, "original");
     }
 
     #[tokio::test]
@@ -848,6 +1051,7 @@ mod tests {
         let proxy = Proxy::new(
             vec![],
             vec![Box::new(RecordingBackend {
+                bind_request: false,
                 received: Default::default(),
             })],
             vec![Box::new(SavedLogin)],

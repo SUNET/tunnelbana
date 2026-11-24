@@ -141,8 +141,14 @@ boundary, key rotation).
 
 ### Test coverage
 
+Cargo resolves Grindvakt 0.13.0 and jose-rs 0.13.0 from crates.io. The SverigeID
+release gate also uses Sweden Connect's pinned local federation. See the
+[setup and verification guide](docs/src/sverigeid.md) and the
+[SverigeID architecture decision](docs/adr/0059-sverigeid-federation-profile.md).
+
 ```
-cargo test            # workspace test suite, clippy clean
+cargo test                 # workspace test suite
+just test-sverigeid-local  # Sweden Connect reference clients and provider
 ```
 ## Running
 

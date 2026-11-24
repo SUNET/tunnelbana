@@ -57,3 +57,4 @@ accepted — supersede with a new record rather than editing history.
 | [0056](0056-eduid-mfa-stepup.md) | Native SAML response suspension for eduID MFA step-up | Accepted |
 | [0057](0057-inbound-tls-reload.md) | Optional inbound TLS with SIGHUP renewal | Accepted |
 | [0058](0058-grindvakt-081-subject-compatibility.md) | Grindvakt 0.8.1 and OIDC subject compatibility | Accepted |
+| [0059](0059-sverigeid-federation-profile.md) | SverigeID authentication and signature approval through Sweden Connect | Accepted |

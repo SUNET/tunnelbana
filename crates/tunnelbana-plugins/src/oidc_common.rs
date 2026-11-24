@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jose_rs::JwsAlgorithm;
-use sha2::{Digest, Sha256};
 use tunnelbana_core::attributes::AttributeMapper;
 use tunnelbana_core::context::Context;
 use tunnelbana_core::error::{Error, Result};
@@ -19,22 +17,6 @@ use tunnelbana_oidc::request::AuthorizationRequest;
 /// Compact registration binding stored inside the authenticated flow cookie.
 const AUTHORIZATION_CLIENT: &str = "authorization_client_v1";
 
-/// Hash all registration fields without storing client secrets or JWKs in the
-/// flow cookie. Separate flattened JWK extensions and canonicalize object order
-/// so neither overlapping field names nor map iteration affect the binding.
-fn client_fingerprint(client: &Client) -> Result<String> {
-    let mut registration = client.clone();
-    let extensions = registration.jwks.as_mut().map(|jwks| {
-        jwks.keys
-            .iter_mut()
-            .map(|key| std::mem::take(&mut key.extra))
-            .collect::<Vec<_>>()
-    });
-    let mut value = serde_json::to_value((registration, extensions))?;
-    value.sort_all_objects();
-    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&value)?)))
-}
-
 /// Bind response-pipeline output to the registration validated before login.
 pub(crate) fn bind_authorization_client(
     ctx: &mut Context,
@@ -44,7 +26,7 @@ pub(crate) fn bind_authorization_client(
     ctx.state.set_value(
         frontend,
         AUTHORIZATION_CLIENT,
-        serde_json::Value::String(client_fingerprint(client)?),
+        serde_json::Value::String(client.registration_fingerprint()?),
     );
     Ok(())
 }
@@ -63,7 +45,7 @@ pub(crate) fn resolve_authorization_subject(
 ) -> std::result::Result<String, OAuthError> {
     match ctx.state.get_value(frontend, AUTHORIZATION_CLIENT) {
         Some(saved) => {
-            let current = client_fingerprint(client).map_err(|_| {
+            let current = client.registration_fingerprint().map_err(|_| {
                 OAuthError::new(
                     OAuthErrorCode::ServerError,
                     "cannot compare client registration",
@@ -263,6 +245,10 @@ pub(crate) fn backend_authorization_error(
     interaction_required: bool,
 ) -> OAuthError {
     let (code, description) = match error {
+        Error::UnmetAuthenticationRequirements => (
+            OAuthErrorCode::UnmetAuthenticationRequirements,
+            "authentication requirements were not met",
+        ),
         Error::Authn(_) if req.has_prompt("none") && interaction_required => (
             OAuthErrorCode::LoginRequired,
             "silent authentication could not be completed",
@@ -289,7 +275,7 @@ mod tests {
             "jwks": {"keys": [{"kty": "EC", "kid": "original", "x-extra": {"a": 1, "b": 2}}]}
         }))
         .unwrap();
-        let original = client_fingerprint(&client).unwrap();
+        let original = client.registration_fingerprint().unwrap();
         let key = &mut client.jwks.as_mut().unwrap().keys[0];
         // preserve_order is enabled in Tunnelbana: equivalent incoming objects
         // must hash identically even when their insertion order differs.
@@ -297,12 +283,12 @@ mod tests {
             "x-extra".into(),
             serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap(),
         );
-        assert_eq!(client_fingerprint(&client).unwrap(), original);
+        assert_eq!(client.registration_fingerprint().unwrap(), original);
         client.client_name = Some("updated name".into());
-        assert_ne!(client_fingerprint(&client).unwrap(), original);
+        assert_ne!(client.registration_fingerprint().unwrap(), original);
         client.client_name = None;
         client.subject_type = "public".into();
-        assert_ne!(client_fingerprint(&client).unwrap(), original);
+        assert_ne!(client.registration_fingerprint().unwrap(), original);
     }
 
     /// Programmatic flattened JWK extensions must not hide a changed dedicated
@@ -316,10 +302,10 @@ mod tests {
         client.jwks.as_mut().unwrap().keys[0]
             .extra
             .insert("kid".into(), serde_json::json!("extension"));
-        let original = client_fingerprint(&client).unwrap();
+        let original = client.registration_fingerprint().unwrap();
         // The extension is unchanged; the independently accessible field is not.
         client.jwks.as_mut().unwrap().keys[0].kid = Some("updated".into());
-        assert_ne!(client_fingerprint(&client).unwrap(), original);
+        assert_ne!(client.registration_fingerprint().unwrap(), original);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::http::Response;
 use tunnelbana_core::internal::InternalData;
 use tunnelbana_core::plugin::{BuildContext, Frontend, FrontendAction, Route};
-use tunnelbana_oidc::client::InMemoryClientStore;
+use tunnelbana_oidc::client::{Client, InMemoryClientStore};
 use tunnelbana_oidc::metadata::ProviderMetadata;
 use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
 use tunnelbana_oidc::provider::{InMemoryTokenUseStore, Provider, TokenLifetimes, TokenUseStore};
@@ -223,27 +223,40 @@ impl Frontend for OidcFrontend {
             response.auth_info.issuer.as_deref(),
         );
 
-        match self
-            .provider
-            .authorization_redirect_with_claims_subject_resolver_and_auth_time(
-                &req,
-                |client| {
-                    crate::oidc_common::resolve_authorization_subject(
-                        ctx,
-                        &self.name,
-                        client,
-                        &response,
-                        &self.mapper,
-                    )
-                    .map_err(|error| error.with_state(req.state.clone()))
-                },
-                &external,
-                acr,
-                &extra_claims,
-                auth_time,
+        let resolve = |client: &Client| {
+            let subject = crate::oidc_common::resolve_authorization_subject(
+                ctx,
+                &self.name,
+                client,
+                &response,
+                &self.mapper,
             )
-            .await
-        {
+            .map_err(|error| error.with_state(req.state.clone()))?;
+            Ok(subject)
+        };
+        let result = if let Some(verified) = &ctx.verified_oidc {
+            if req.scopes().contains(&crate::sweden_connect::APPROVAL) != verified.approval {
+                return Err(Error::Authn("approval transaction mismatch".into()));
+            }
+            let claims = crate::sweden_connect::release(&req, verified, &external, None);
+            self.provider
+                .authorization_redirect_with_authorized_claims(
+                    &req, resolve, claims, acr, auth_time,
+                )
+                .await
+        } else {
+            self.provider
+                .authorization_redirect_with_claims_subject_resolver_and_auth_time(
+                    &req,
+                    resolve,
+                    &external,
+                    acr,
+                    &extra_claims,
+                    auth_time,
+                )
+                .await
+        };
+        match result {
             Ok(r) => Ok(r),
             Err(error) => {
                 Ok(
