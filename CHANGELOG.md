@@ -27,6 +27,16 @@
   binding under gamlastan 0.8, so the hole exists in released versions up to
   0.5.1, not only after the 0.11 bump.
 
+- **SAML frontend: signature placement.** The frontend inserted `ds:Signature`
+  as the first child of the Response and of the Assertion, before
+  `saml:Issuer`. SAML Core orders it after the Issuer. Responses are now signed
+  through gamlastan's `sign_response_xml_with`, which anchors the signature
+  after the Issuer by namespace and ID, and takes the signature method from the
+  signer instead of a hard-coded `rsa-sha256` template. SPs that
+  schema-validate responses could reject the old order. Asking to sign the
+  assertion when the response carries none is now an error rather than
+  silently skipped.
+
 - **Default attribute map:** sync the bundled map with SWAMID's Shibboleth
   attribute names, adding subject/pairwise identifiers, assurance certification,
   eduPerson, norEdu, SCHAC and directory attributes. Use `subject-id` instead of
