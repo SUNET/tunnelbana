@@ -10,8 +10,8 @@ use tunnelbana_core::context::{
 use tunnelbana_core::error::{Error, Result};
 use tunnelbana_core::state::State;
 use tunnelbana_oidc::client::Client;
-use tunnelbana_oidc::oauth_error::OAuthError;
-use tunnelbana_oidc::provider::AuthorizedClaims;
+use tunnelbana_oidc::oauth_error::{OAuthError, OAuthErrorCode};
+use tunnelbana_oidc::provider::{AuthorizedClaims, Provider};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::rp::RequestObjectParameters;
 
@@ -28,6 +28,92 @@ pub const NAMES: [&str; 5] = [
     "name",
     "birthdate",
 ];
+
+/// Issue the signed UserInfo representation consumed by Sweden Connect RPs.
+/// Grindvakt validates the access token, scope and sender binding and supplies
+/// the subject and authorized claims. The authenticated grant identifies the
+/// client whose registered encryption policy applies.
+pub async fn signed_userinfo(
+    provider: &Provider,
+    access_token: &str,
+) -> std::result::Result<String, OAuthError> {
+    let value = provider.userinfo(access_token, None).await?;
+    let grant = provider
+        .codec
+        .open_access_token(access_token)
+        .map_err(|_| OAuthError::invalid_grant("invalid access token"))?;
+    let client = provider
+        .clients
+        .get(&grant.client_id)
+        .await
+        .ok_or_else(|| OAuthError::invalid_grant("registration expired"))?;
+    let mut claims: jose_rs::jwt::Claims = serde_json::from_value(value)
+        .map_err(|_| OAuthError::invalid_grant("invalid UserInfo claims"))?;
+    let now = tunnelbana_core::util::now_secs();
+    claims.iss = Some(provider.metadata.issuer.clone());
+    claims.aud = Some(jose_rs::jwt::Audience::Single(grant.client_id));
+    claims.iat = Some(now.into());
+    claims.exp = Some(grant.exp.min(now + 300).into());
+
+    // The Swedish profile requires signed UserInfo. Test my eID accepts the
+    // generic JWT type, while Grindvakt's default is userinfo+jwt. All profile
+    // ID tokens carry a request nonce. Keep ID-token markers out of UserInfo
+    // even for older grants, since the OP signs both with the same key.
+    for marker in ["nonce", "auth_time", "acr", "at_hash", "c_hash"] {
+        claims.extra.remove(marker);
+    }
+    let signed = tunnelbana_oidc::jwt::sign(&provider.signing_key, &claims, Some("JWT"))
+        .map_err(|_| OAuthError::new(OAuthErrorCode::ServerError, "could not sign UserInfo"))?;
+    encrypt_userinfo(signed, &client)
+}
+
+/// Apply the RP's UserInfo encryption policy to the signed JWT, including the
+/// OIDC default content cipher when the registration specifies only an algorithm.
+fn encrypt_userinfo(signed: String, client: &Client) -> std::result::Result<String, OAuthError> {
+    let failed = || {
+        OAuthError::new(
+            OAuthErrorCode::ServerError,
+            "unusable UserInfo encryption policy",
+        )
+    };
+    let policy = &client.response_policy;
+    let (alg, enc) = match (
+        policy.userinfo_encrypted_response_alg.as_deref(),
+        policy.userinfo_encrypted_response_enc.as_deref(),
+    ) {
+        (None, None) => return Ok(signed),
+        (Some(alg @ ("RSA-OAEP" | "RSA-OAEP-256" | "ECDH-ES")), enc) => {
+            (alg, enc.unwrap_or("A128CBC-HS256"))
+        }
+        _ => return Err(failed()),
+    };
+    let algorithm = alg.parse().map_err(|_| failed())?;
+    let cipher = enc.parse().map_err(|_| failed())?;
+    // Rollover may leave several registered keys. Return a JWE only after an
+    // eligible recipient succeeds. Exhaustion is an issuance error.
+    for key in &client.jwks.as_ref().ok_or_else(failed)?.keys {
+        if key.use_.as_deref() != Some("enc")
+            || key.kid.as_deref().is_none_or(str::is_empty)
+            || key.alg.as_deref().is_some_and(|pin| pin != alg)
+        {
+            continue;
+        }
+        let mut recipient = key.clone();
+        recipient.alg = Some(alg.into());
+        let mut header = jose_rs::JoseHeader::for_jwe(algorithm, cipher);
+        header.kid = key.kid.clone();
+        header.cty = Some("JWT".into());
+        if let Ok(encrypted) = jose_rs::jwe::compact::encrypt_with_jwk_header(
+            &recipient,
+            header,
+            signed.as_bytes(),
+            cipher,
+        ) {
+            return Ok(encrypted);
+        }
+    }
+    Err(failed())
+}
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -601,6 +687,48 @@ impl ProtocolKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn userinfo_encryption_honors_registration_and_requires_a_usable_recipient() {
+        use jose_rs::jwk::{generate_ec, JwkSet};
+
+        let mut client: Client = serde_json::from_value(json!({"client_id":"rp"})).unwrap();
+        let signed = "header.payload.signature";
+        client.response_policy.id_token_encrypted_response_alg = Some("RSA-OAEP-256".into());
+        assert_eq!(encrypt_userinfo(signed.into(), &client).unwrap(), signed);
+        client.response_policy.userinfo_encrypted_response_enc = Some("A256GCM".into());
+        assert!(encrypt_userinfo(signed.into(), &client).is_err());
+        client.response_policy.userinfo_encrypted_response_alg = Some("ECDH-ES".into());
+        assert!(encrypt_userinfo(signed.into(), &client).is_err());
+
+        let mut key = generate_ec("P-256").unwrap();
+        key.use_ = Some("enc".into());
+        key.kid = Some("current".into());
+        key.alg = Some("ECDH-ES".into());
+        let mut retired = key.to_public_jwk();
+        retired.kid = Some("retired".into());
+        retired.x = None;
+        client.jwks = Some(JwkSet {
+            keys: vec![retired],
+        });
+        assert!(encrypt_userinfo(signed.into(), &client).is_err());
+        client.jwks.as_mut().unwrap().keys.push(key.to_public_jwk());
+        for enc in [Some("A256GCM"), None] {
+            client.response_policy.userinfo_encrypted_response_enc = enc.map(String::from);
+            let response = encrypt_userinfo(signed.into(), &client).unwrap();
+            let opened =
+                jose_rs::jwe::compact::decrypt_with_jwk_authenticated(&key, &response).unwrap();
+            assert_eq!(opened.protected.kid, key.kid);
+            assert_eq!(opened.protected.cty.as_deref(), Some("JWT"));
+            assert_eq!(
+                opened.protected.enc.as_deref(),
+                Some(enc.unwrap_or("A128CBC-HS256"))
+            );
+            assert_eq!(opened.value, signed.as_bytes());
+        }
+        client.response_policy.userinfo_encrypted_response_enc = Some("unknown".into());
+        assert!(encrypt_userinfo(signed.into(), &client).is_err());
+    }
 
     fn request(scope: &str) -> AuthorizationRequest {
         AuthorizationRequest {

@@ -867,7 +867,7 @@ impl FederationFrontend {
         // The federation frontend does not offer DPoP, so no proof is presented;
         // a DPoP-bound token reaching here is rejected by the provider.
         if self.profile {
-            return match self.provider.signed_userinfo(token, None).await {
+            return match crate::sweden_connect::signed_userinfo(&self.provider, token).await {
                 Ok(jwt) => Response::new(200)
                     .with_header("content-type", "application/jwt")
                     .with_header("cache-control", "no-store")

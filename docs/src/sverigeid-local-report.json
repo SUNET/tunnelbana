@@ -11,7 +11,7 @@
   "sources": {
     "tunnelbana": {
       "commit": "67d5e44b2c061541e20c8d50b2eafba069a47d92",
-      "local_inputs_sha256": "f3d169b587bc050a595f7ea762e3bf3b34d294721468618c5e34bdefa10a4d78"
+      "local_inputs_sha256": "689143253a0f51cc8ad9f6b54e4db55ea89b646c33f2230b3b059a546a14f1d8"
     },
     "grindvakt": {
       "version": "0.13.0",
@@ -38,9 +38,9 @@
     "rp2-stable-pairwise": "PASS",
     "rp3-ec-encrypted-signing-key-1": "PASS",
     "rp3-ec-encrypted-signing-key-2": "PASS",
-    "test-my-eid-approve": "FAIL (AssertionError, browser.py line 364)",
-    "test-my-eid-cancel": "FAIL (AssertionError, browser.py line 364)",
-    "test-my-eid-unknown-signer": "FAIL (AssertionError, browser.py line 364)",
+    "test-my-eid-approve": "PASS",
+    "test-my-eid-cancel": "PASS",
+    "test-my-eid-unknown-signer": "PASS",
     "service-saml-signed-assurance": "PASS",
     "registered-sectors-and-original-auth-time": "PASS",
     "retired-recipient-key-in-flight-restart": "PASS",
@@ -56,5 +56,5 @@
     "federation-expired-op": "PASS",
     "redis-replica-code-and-signing-rollover": "PASS"
   },
-  "passed": false
+  "passed": true
 }

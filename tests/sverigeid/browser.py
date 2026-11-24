@@ -46,7 +46,7 @@ def launch(playwright, directory):
     )
 
 
-def resolved_entity(directory, role):
+def resolved_entity(directory, role, *, quiet=False):
     entity = BASE + "/" + role
     anchor_key = jwt.PyJWK.from_dict(
         json.loads((directory / "config/common/oidf-trust-anchor.jwk").read_text())
@@ -54,6 +54,7 @@ def resolved_entity(directory, role):
     raw = fetch(
         directory,
         ANCHOR + "/resolve?" + urlencode({"sub": entity, "trust_anchor": ANCHOR}),
+        quiet=quiet,
     )
     resolved = jwt.decode(
         raw,
@@ -68,7 +69,7 @@ def resolved_entity(directory, role):
 
 def readiness(directory):
     for role in ["rp", "op"]:
-        resolved = resolved_entity(directory, role)
+        resolved = resolved_entity(directory, role, quiet=True)
         intermediate = ANCHOR.rsplit("/", 1)[0] + (
             "/im-reg-sc-op" if role == "op" else "/im-reg-sc"
         )
@@ -80,7 +81,9 @@ def readiness(directory):
         )
     assert BASE + "/op" in [
         op["entity_id"]
-        for op in json.loads(fetch(directory, RP + "/oidc/authn/info"))["ops"]
+        for op in json.loads(fetch(directory, RP + "/oidc/authn/info", quiet=True))[
+            "ops"
+        ]
     ]
 
 

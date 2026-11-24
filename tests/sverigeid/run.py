@@ -340,11 +340,9 @@ def run():
                     role = "probe-op"
                     loa = "https://id.swedenconnect.se/loa/loa3"
 
-                    def endorsed():
-                        return {
-                            m["trust_mark_type"]
-                            for m in resolved_entity(directory, role)["trust_marks"]
-                        }
+                    def endorsed(*, quiet=False):
+                        resolved = resolved_entity(directory, role, quiet=quiet)
+                        return {m["trust_mark_type"] for m in resolved["trust_marks"]}
 
                     assert loa in endorsed()
                     fixtures.withdraw_mark(role, loa)
@@ -354,7 +352,7 @@ def run():
                     deadline = time.monotonic() + 180
                     while True:
                         try:
-                            if loa not in endorsed():
+                            if loa not in endorsed(quiet=True):
                                 break
                         except (subprocess.CalledProcessError, KeyError):
                             pass
@@ -397,6 +395,11 @@ def run():
     finally:
         REPORT.parent.mkdir(exist_ok=True)
         REPORT.write_text(json.dumps(report, indent=2) + "\n")
+        failures = [
+            name for name, result in report["checks"].items() if result != "PASS"
+        ]
+        if failures:
+            print("Failed checks:", ", ".join(failures), flush=True)
         print(REPORT)
     return 0 if report["passed"] else 1
 

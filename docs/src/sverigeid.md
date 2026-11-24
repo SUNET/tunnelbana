@@ -90,7 +90,7 @@ Place Sweden Connect's `local-federation` checkout beside Tunnelbana. Check out 
 
 Run `just test-sverigeid-local`. The command creates disposable entities and keys, waits for signed resolution and discovery, runs the browser checks and tears down the fixture. `target/sverigeid-local-report.json` records the checks, reference image digests, Tunnelbana revision and local changes, and the crates.io versions and checksums for Grindvakt and jose-rs from `Cargo.lock`.
 
-With Grindvakt 0.13.0, the pinned Test my eID client rejects the protected `typ=userinfo+jwt` header during its initial login. The approve, cancel and unknown-signer checks fail before the consent screen. The gate runs the remaining checks and reports failure until this client can verify the signed response. [Recorded local verification](sverigeid-local-report.json) · [Test my eID UserInfo verifier](https://github.com/swedenconnect/test-my-eid/blob/f977c50e4c5e469da91c919e7d8870b20ce8d133/src/main/java/se/swedenconnect/eid/sp/oidc/OidcResponseProcessor.java#L280-L291)
+The Sweden Connect frontend signs UserInfo with the protected JOSE header `typ=JWT` for compatibility with Test my eID. The HTTP content type is `application/jwt`. When an RP registers encryption, it receives a JWE containing the signed JWT. Profile ID tokens carry the request nonce, and UserInfo omits that nonce. [Recorded local verification](sverigeid-local-report.json)
 
 | Requirement | Acceptance evidence |
 | --- | --- |

@@ -440,7 +440,8 @@ def transaction(fixtures, role, approval=False, rollover=None):
         wire = subprocess.check_output(
             curl + ["--data", urlencode(params), iss + "/token"]
         )
-        token = json.loads(wire)["id_token"]
+        tokens = json.loads(wire)
+        token = tokens["id_token"]
         kid = jwt.get_unverified_header(token)["kid"]
         keys = json.loads(fetch(fixtures.directory, iss + "/jwks"))["keys"]
         key = jwt.PyJWK.from_dict(next(k for k in keys if k["kid"] == kid)).key
@@ -452,4 +453,19 @@ def transaction(fixtures, role, approval=False, rollover=None):
             and claims["acr"] == LOA + "3"
             and claims["nonce"] == nonce
         )
+        # UserInfo and ID tokens can be signed by different replicas. Verify
+        # the protected type with the UserInfo signer's own registered key.
+        userinfo = subprocess.check_output(
+            curl + ["-H", "@-", iss + "/userinfo"],
+            input=f"Authorization: Bearer {tokens['access_token']}\n".encode(),
+        )
+        kid = jwt.get_unverified_header(userinfo)["kid"]
+        key = jwt.PyJWK.from_dict(next(k for k in keys if k["kid"] == kid)).key
+        verified = jwt.decode_complete(
+            userinfo, key, algorithms=["ES256"], audience=client, issuer=iss
+        )
+        assert verified["header"]["typ"] == "JWT"
+        ui = verified["payload"]
+        assert ui["sub"] == claims["sub"] and 0 < ui["exp"] - ui["iat"] <= 300
+        assert not {"nonce", "auth_time", "acr", "at_hash", "c_hash"}.intersection(ui)
         return None, claims["sub"]
