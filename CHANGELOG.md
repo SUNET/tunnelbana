@@ -1,15 +1,43 @@
 # Changelog
 
-## 0.6.0 Unreleased
+## 0.6.0 [2026-11-26]
 
-- Use the crates.io releases of Grindvakt 0.13.0 and jose-rs 0.13.0 for OIDC
-  and federation. Cargo, Docker, and CI build from the same lockfile.
+### Added
 
 - Add an opt-in Sweden Connect profile to the federation RP and OP. OIDC and
   SAML services can receive the assurance level and authentication time verified
   by the upstream provider. The profile supports Swedish identity claims,
   signature approval, signed and encrypted responses, and shared Redis state
   across replicas. See the [configuration and local release gate](docs/src/sverigeid.md).
+
+- **Optional saved-login reuse:** add `MicroService::try_authenticate`, the
+  Python `try_authenticate(context, data)` hook, read-only request cookies and
+  append-only response cookies. No session plugin is enabled or supplied by
+  default. Plugins own session verification, storage, expiry and logout.
+  Accepted records re-enter the complete response pipeline under the current
+  requester. Cookie output is validated and sent on error responses too.
+
+- **Session policy:** add fail-closed `Backend::restore_authn_context` acceptance.
+  The SAML backend binds reuse to the selected issuer and restores trusted
+  provider metadata; linked-account step-up and nonempty target authentication
+  context requirements decline reuse. OIDC/federation backends retain the
+  default refusal. Discovery issuer allowlists are also enforced on the
+  response path. Forced authentication skips
+  session hooks, and stale constraints from abandoned SAML flows do not decide
+  reuse for a new request.
+
+- **Shared OIDC replay storage for embedders:** add
+  `OidcFrontend::build_with_token_use_store` for injecting an atomic shared
+  `TokenUseStore` for authorization codes, rotated refresh tokens and
+  `private_key_jwt` assertions. The standard binary and existing `build` API
+  retain process-local storage. This does not change federation, DPoP or SAML
+  replay stores and adds no TOML storage setting.
+
+- Add Matrix contact information and documentation for upgrading, session reuse,
+  shared replay storage and the Pythonize compatibility patch. See
+  [Upgrading from 0.5.1](docs/src/upgrading.md) before deploying these changes.
+
+### Fixed
 
 - **SAML frontend: refuse non-POST ACS bindings.** Responses (and error
   responses) are always delivered by HTTP-POST to the ACS URL, but gamlastan
@@ -37,43 +65,30 @@
   assertion when the response carries none is now an error rather than
   silently skipped.
 
-- **Default attribute map:** sync the bundled map with SWAMID's Shibboleth
-  attribute names, adding subject/pairwise identifiers, assurance certification,
-  eduPerson, norEdu, SCHAC and directory attributes. Use `subject-id` instead of
-  `eduPersonPrincipalName` for `user_id_from_attrs` and the OpenID `sub` mapping;
-  remove `eduPersonTargetedID` from the bundled map. Replacing an existing map
-  can change composed identifiers and attribute release. Review account-linking
-  and release policy before adopting it; custom maps are not rewritten.
-- **Optional saved-login reuse:** add `MicroService::try_authenticate`, the
-  Python `try_authenticate(context, data)` hook, read-only request cookies and
-  append-only response cookies. No session plugin is enabled or supplied by
-  default. Plugins own session verification, storage, expiry and logout.
-  Accepted records re-enter the complete response pipeline under the current
-  requester. Cookie output is validated and sent on error responses too.
-- **Session policy:** add fail-closed `Backend::restore_authn_context` acceptance.
-  The SAML backend binds reuse to the selected issuer and restores trusted
-  provider metadata; linked-account step-up and nonempty target authentication
-  context requirements decline reuse. OIDC/federation backends retain the
-  default refusal. Discovery issuer allowlists are also enforced on the
-  response path. Forced authentication skips
-  session hooks, and stale constraints from abandoned SAML flows do not decide
-  reuse for a new request.
 - **Authentication freshness:** preserve upstream SAML `AuthnInstant` and
   validated OIDC `auth_time` through the internal model and downstream issuance.
   Reject invalid upstream OIDC timestamps. Both OIDC frontends validate
   `max_age` and conservatively force fresh authentication whenever it is present;
   combining it with `prompt=none` returns `login_required`. SAML responses now
   identify the upstream authenticating authority.
-- **Shared OIDC replay storage for embedders:** add
-  `OidcFrontend::build_with_token_use_store` for injecting an atomic shared
-  `TokenUseStore` for authorization codes, rotated refresh tokens and
-  `private_key_jwt` assertions. The standard binary and existing `build` API
-  retain process-local storage. This does not change federation, DPoP or SAML
-  replay stores and adds no TOML storage setting.
+
 - **Python boundary:** preserve JSON numbers with Pythonize's arbitrary-precision
   support. Upgrade PyO3, its FFI and build configuration to 0.30.1; vendor the
   released Pythonize 0.29 source with only its PyO3 dependency requirements
   adjusted. Retain its conversion source, tests and MIT license.
+
+### Changed
+
+- Use the crates.io releases of Grindvakt 0.13.0 and jose-rs 0.13.0 for OIDC
+  and federation. Cargo, Docker, and CI build from the same lockfile.
+
+- **Default attribute map:** sync the bundled map with SWAMID's Shibboleth
+  attribute names, adding subject/pairwise identifiers, assurance certification,
+  eduPerson, norEdu, SCHAC and directory attributes. Use `subject-id` instead of
+  `eduPersonPrincipalName` for `user_id_from_attrs` and the OpenID `sub` mapping.
+  Replacing an existing map can change composed identifiers and attribute release. Review account-linking
+  and release policy before adopting it; custom maps are not rewritten.
+
 - **Dependencies and build:** update Grindvakt/jose-rs to 0.11.0, Gamlastan/MDQ
   to 0.11.0, Bergshamra to 0.12.0, Uppsala to 0.12.1, Kryptering to 0.7.1,
   Actix Web to 4.19.0, rustls to 0.23.46 and TOML to 1.2.1. Move workspace
@@ -81,33 +96,93 @@
   identifier output. Outbound HTTP adapters now retain response headers for
   the updated protocol library. Rust 1.89 is the minimum supported version;
   Tera 1 templates and CPython 3.13 embedding remain supported.
+
+### Removed
+
+- Removed `eduPersonTargetedID` from the bundled attribute map.
+
 - **Dependency security:** remove the affected RSA and crypto-bigint releases
   (RUSTSEC-2023-0071 and RUSTSEC-2026-0387). The h2 0.3 advisory
   RUSTSEC-2026-0258 remains blocked by Actix's constraint; no advisory exception
   or HTTP/2 removal is added. Record compatibility decisions and verification
   in the [dependency ecosystem notes](docs/ecosystem.md).
-- Add Matrix contact information and documentation for upgrading, session reuse,
-  shared replay storage and the Pythonize compatibility patch. See
-  [Upgrading from 0.5.1](docs/src/upgrading.md) before deploying these changes.
 
 ## 0.5.1 [2026-09-29]
 
-- **Dependencies:** update Grindvakt to 0.8.2, Gamlastan and Gamlastan MDQ
-  to 0.9.1, jose-rs to 0.7.1, and Kryptering to 0.6.0. The resolved XML
-  security stack uses Bergshamra 0.9.2. JOSE now rejects RSA-PSS-specific
+### Fixed
+
+- JOSE now rejects RSA-PSS-specific
   PKCS#8/SPKI key imports that would lose algorithm restrictions during JWK
   conversion; ordinary RSA keys remain supported.
+
+### Changed
+
+- **Dependencies:** update Grindvakt to 0.8.2, Gamlastan and Gamlastan MDQ
+  to 0.9.1, jose-rs to 0.7.1, and Kryptering to 0.6.0. The resolved XML
+  security stack uses Bergshamra 0.9.2.
+
 - Update compatible workspace dependencies and migrate to Reqwest 0.13.5,
   TOML 1.1.6, Base64 0.23.1, rcgen 0.14.10, and nix 0.31.3. Adapt TLS test
   fixtures to rcgen's renamed signing-key field. Reqwest now uses platform
   certificate verification and the system trust store for outbound HTTPS;
   container deployments need their CA certificates installed there.
+
 - Keep Rust 1.88 support, the existing Tera 1 template language, and the
   RustCrypto generations required by the signing libraries. See the
   [dependency security notes](docs/dependency-security.md) for the two
   remaining upstream advisories.
 
 ## 0.5.0 [2026-09-24]
+
+### Added
+
+- **OIDC PQC signatures:** enable jose-rs 0.7.0's ML-DSA and composite ML-DSA
+  support in standard builds. Both OP frontends can issue PQC-signed ID tokens
+  in code flow; both RP backends can pin and verify these algorithms. AKP JWK
+  signing keys require an explicit `signing_algorithm`. Existing keys and the
+  default upstream `RS256` policy remain unchanged. Document configuration and
+  Grindvakt's restriction on response types requiring PQC `c_hash`/`at_hash`.
+
+- **Optional inbound TLS (ADR 0057):** configure `[tls]` with PEM `cert_path`
+  and `key_path` to serve HTTPS on `TUNNELBANA_BIND`. Unix SIGHUP atomically
+  reloads the pair for new full handshakes, retaining the previous certificate
+  on failure and preserving established connections. Omitting TLS keeps HTTP;
+  invalid startup material fails closed. The container health URL is selectable
+  through `TUNNELBANA_HEALTHCHECK_URL` for direct-TLS deployments.
+
+- **eduID MFA step-up (ADR 0056):** add the native `stepup` micro-service,
+  consuming the optional Python SCIM adapter's linked-account decoration. It
+  sends a signed, subject-bound exact-LoA SAML request; reuses the hardened
+  SAML backend for metadata, signature, audience, time, correlation and replay
+  validation; verifies the linked issuer and identifier; merges assurance
+  values from the same authenticated assertion; and resumes the original
+  response chain. The core now supports
+  response-path interruption/resumption. Trusted requester/provider entity
+  categories and assurance certifications support eduID's LoA policy mappings.
+  `behavior = "eduid"` reproduces the pinned eduID policy/output semantics;
+  the default `hardened` mode retains fail-closed Tunnelbana behavior. Initial
+  provider policy now overrides the ordinary backend's ACCR after trusted
+  metadata resolution, synthesized fallback policy cannot elevate a weaker
+  sibling ACCR, malformed linked accounts fail closed, discovery policy state
+  is bounded at startup, and resumed flows restore their original backend.
+  Configure services in `ScimAttributes`, `stepup`, `accr` order.
+
+- **eduID SCIM response attributes (ADR 0055):** add the bundled
+  `ScimAttributes` Python adapter, an opt-in detached attribute-map constructor
+  argument, and trusted SAML IdP scope publication for SCIM data-owner
+  selection. The adapter enriches profiles and group entitlements and publishes
+  linked MFA accounts as JSON for the separately configured native step-up
+  service; the adapter itself adds no routing or endpoints. Provider scopes are read-only to Python and
+  become available only after successful SAML response validation. An
+  explicitly configured adapter imports its eduID database classes during
+  startup and fails fast when the optional dependency is unavailable.
+
+### Fixed
+
+- Updated `cryptoki` to 0.12.1 to address RUSTSEC-2026-0286 in the optional
+  PKCS#11 backend.
+
+### Changed
 
 - **Grindvakt 0.8.1 (ADR 0058):** migrate OIDC and federation frontends/backends
   to the new protocol APIs, explicitly retain per-frontend in-memory token replay
@@ -129,58 +204,27 @@
   removed clients and revoked redirects receive local errors. Standard claims follow the granted
   scopes, and UserInfo requires an end-user `openid` grant. Custom HTTP adapters must populate
   `HttpRequestData.query_pairs` / `form_pairs` for OIDC endpoints.
-- **OIDC PQC signatures:** enable jose-rs 0.7.0's ML-DSA and composite ML-DSA
-  support in standard builds. Both OP frontends can issue PQC-signed ID tokens
-  in code flow; both RP backends can pin and verify these algorithms. AKP JWK
-  signing keys require an explicit `signing_algorithm`. Existing keys and the
-  default upstream `RS256` policy remain unchanged. Document configuration and
-  Grindvakt's restriction on response types requiring PQC `c_hash`/`at_hash`.
+
 - **Dependencies:** align the workspace `kryptering` requirement with 0.5.0
   and update `gamlastan` and `gamlastan-mdq` to 0.9.0, bringing the transitive
-  Bergshamra XML security crates to 0.9.1. Update `cryptoki` to 0.12.1
-  to address RUSTSEC-2026-0286 in the optional PKCS#11 backend.
+  Bergshamra XML security crates to 0.9.1.
+
 - **Security dependencies:** require rustls 0.23.45 (RUSTSEC-2026-0285),
   update `actix-web` to 4.15.0, `actix-http` to 3.13.6, and the yanked
-  `chacha20` 0.10.1 to 0.10.2,
-  and replace the unmaintained `rustls-pemfile` wrapper with the maintained
-  `rustls-pki-types` PEM API re-exported by rustls. Preserve full-chain parsing,
-  exactly-one-key validation, sanitized errors, and TLS reload behavior.
+  `chacha20` 0.10.1 to 0.10.2.
   The `h2` 0.3 advisory remains blocked by Actix's dependency constraint;
   the RSA timing advisory still has no patched release. See
   [dependency security notes](docs/dependency-security.md) for the constraints.
-- **Optional inbound TLS (ADR 0057):** configure `[tls]` with PEM `cert_path`
-  and `key_path` to serve HTTPS on `TUNNELBANA_BIND`. Unix SIGHUP atomically
-  reloads the pair for new full handshakes, retaining the previous certificate
-  on failure and preserving established connections. Omitting TLS keeps HTTP;
-  invalid startup material fails closed. The container health URL is selectable
-  through `TUNNELBANA_HEALTHCHECK_URL` for direct-TLS deployments.
-- **eduID MFA step-up (ADR 0056):** add the native `stepup` micro-service,
-  consuming the optional Python SCIM adapter's linked-account decoration. It
-  sends a signed, subject-bound exact-LoA SAML request; reuses the hardened
-  SAML backend for metadata, signature, audience, time, correlation and replay
-  validation; verifies the linked issuer and identifier; merges assurance
-  values from the same authenticated assertion; and resumes the original
-  response chain. The core now supports
-  response-path interruption/resumption. Trusted requester/provider entity
-  categories and assurance certifications support eduID's LoA policy mappings.
-  `behavior = "eduid"` reproduces the pinned eduID policy/output semantics;
-  the default `hardened` mode retains fail-closed Tunnelbana behavior. Initial
-  provider policy now overrides the ordinary backend's ACCR after trusted
-  metadata resolution, synthesized fallback policy cannot elevate a weaker
-  sibling ACCR, malformed linked accounts fail closed, discovery policy state
-  is bounded at startup, and resumed flows restore their original backend.
-  Configure services in `ScimAttributes`, `stepup`, `accr` order.
-- **eduID SCIM response attributes (ADR 0055):** add the bundled
-  `ScimAttributes` Python adapter, an opt-in detached attribute-map constructor
-  argument, and trusted SAML IdP scope publication for SCIM data-owner
-  selection. The adapter enriches profiles and group entitlements and publishes
-  linked MFA accounts as JSON for the separately configured native step-up
-  service; the adapter itself adds no routing or endpoints. Provider scopes are read-only to Python and
-  become available only after successful SAML response validation. An
-  explicitly configured adapter imports its eduID database classes during
-  startup and fails fast when the optional dependency is unavailable.
+
+### Removed
+
+- Replaced the unmaintained `rustls-pemfile` wrapper with the maintained
+  `rustls-pki-types` PEM API re-exported by rustls. Preserve full-chain parsing,
+  exactly-one-key validation, sanitized errors, and TLS reload behavior.
 
 ## 0.4.0 [2026-09-01]
+
+### Added
 
 - **OIDC authenticating authority:** the `oidc` and `oidc_federation` frontends
   can release the validated upstream IdP/OP issuer as an array-valued
@@ -190,7 +234,7 @@
   configured name is advertised in discovery and survives code and refresh
   exchanges unchanged. Mappings to provider-owned ID-token claims are rejected
   at startup rather than accepted and silently omitted during issuance.
-- **Dependencies:** update `grindvakt` to 0.7.2 for typed OP-asserted claims.
+
 - **`disco_to_target_issuer` micro-service (ADR 0053):** port of SATOSA's
   `DiscoToTargetIssuer`. The service snapshots the in-flight request into the
   encrypted state cookie, owns the discovery-return endpoint (exact paths that
@@ -208,6 +252,31 @@
   fallback routing) or an explicit `allow_any_issuer = true`. A 2 KB
   snapshot cap fails oversized flows with a protocol error before the
   discovery redirect (review findings on #26).
+
+### Fixed
+
+- **Micro-service state namespaces are kind-prefixed** (review finding on
+  #26): `disco_to_target_issuer` and `accr` store their per-flow state under
+  `disco_to_target_issuer:{name}` / `accr:{name}` instead of the bare
+  instance name. Config only deduplicates names within the micro-service
+  list and the router deliberately supports reusing a name across plugin
+  kinds, so a micro-service named like a frontend (e.g. `OIDC`) previously
+  shared that frontend's state namespace - and the consume-once
+  `clear_namespace` on the discovery return (or the ACCR response leg)
+  deleted the frontend's own flow data, breaking final response rendering.
+  Only transient in-flight state is affected by the rename; flows crossing
+  the deploy restart their discovery/ACCR hop.
+
+- **Seal failures now fail the request:** a response whose state cookie
+  cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
+  error with a state-clearing cookie, instead of being sent without a
+  `Set-Cookie` header and stranding the multi-step flow it belongs to
+  (review finding on #26).
+
+### Changed
+
+- **Dependencies:** update `grindvakt` to 0.7.2 for typed OP-asserted claims.
+
 - **State cookie compression (ADR 0054) - BREAKING:** the sealed state
   envelope is deflate-compressed before JWE encryption (typically 40-60%
   smaller), roughly doubling the effective headroom under the 4 KB browser
@@ -222,22 +291,7 @@
   change and has to log in again. Plan the rollout accordingly (the state
   cookie only spans an in-flight login/discovery flow, so the practical
   blast radius is flows crossing the deploy).
-- **Micro-service state namespaces are kind-prefixed** (review finding on
-  #26): `disco_to_target_issuer` and `accr` store their per-flow state under
-  `disco_to_target_issuer:{name}` / `accr:{name}` instead of the bare
-  instance name. Config only deduplicates names within the micro-service
-  list and the router deliberately supports reusing a name across plugin
-  kinds, so a micro-service named like a frontend (e.g. `OIDC`) previously
-  shared that frontend's state namespace - and the consume-once
-  `clear_namespace` on the discovery return (or the ACCR response leg)
-  deleted the frontend's own flow data, breaking final response rendering.
-  Only transient in-flight state is affected by the rename; flows crossing
-  the deploy restart their discovery/ACCR hop.
-- **Seal failures now fail the request:** a response whose state cookie
-  cannot be sealed (e.g. over the 4 KB limit) is replaced by an explicit
-  error with a state-clearing cookie, instead of being sent without a
-  `Set-Cookie` header and stranding the multi-step flow it belongs to
-  (review finding on #26).
+
 - **Flow-resuming micro-service endpoints (API break):**
   `MicroService::handle_endpoint` now returns `MicroServiceAction`
   (`Respond(Response)` or `ResumeRequest { request }`) instead of a bare
@@ -248,6 +302,8 @@
 
 ## 0.3.1 [2026-08-24]
 
+### Fixed
+
 - **OIDC prompt handling:** update to grindvakt 0.7.1 and propagate
   `prompt=login` / `prompt=none` from the OIDC and federation OP frontends
   through the backend pipeline as forced/passive authentication. A passive
@@ -256,6 +312,8 @@
   instead of entering interactive IdP discovery, fixing #23.
 
 ## 0.3.0 [2026-08-20]
+
+### Added
 
 - **Embedded Python micro-services:** add trusted, synchronous CPython 3.13
   micro-services through the isolated `tunnelbana-python` crate (ADR 0052).
@@ -267,6 +325,29 @@
   awaitable results, automatic discovery, Python endpoints, and runtime pip
   installation are unsupported. Build and runtime images now include the
   matching dynamically linked CPython packages.
+
+- **Embedded Python virtual environments:** new optional `python.venv` key
+  pointing at a venv directory (absolute or relative to `proxy.toml`). The
+  embedded interpreter adopts it exactly like a venv-launched Python via
+  `PyConfig.executable`: `pyvenv.cfg` is honored, `sys.prefix` moves into the
+  venv, and its site-packages (including `.pth` files) is processed, while
+  interpreter environment variables stay ignored. Create the venv with
+  `uv venv --python 3.13` (or `python3.13 -m venv`) at image build time; a
+  missing directory, `pyvenv.cfg`, or `bin/python` fails startup.
+
+- **Compatibility escape hatch:** `custom_logging` accepts
+  `allow_insecure_log_target = true` to restore SATOSA-style behavior
+  (follow symlinks, allow FIFO/stdout-linked targets) for container logging
+  setups; the hardened regular-file + `O_NOFOLLOW` behavior stays the
+  default (ADR 0036).
+
+- **Architecture record:** ADR 0033 is the authoritative record for the 0.3.0
+  fail-closed security boundaries. Earlier ADR files remain unchanged as
+  historical records, and the ADR index marks their conflicting portions as
+  superseded.
+
+### Fixed
+
 - **Embedded Python hardening (differential review F1-F3):** the interpreter
   starts with CPython's isolated configuration (`PYTHONPATH`/`PYTHONHOME`
   ignored, user site excluded, bytecode caches disabled, signal handlers left
@@ -279,29 +360,13 @@
   `primary_identifier` config is now ignored at error time - use an absolute
   URL). Runtime initialization is also serialized so concurrent initializers
   cannot race the single-module-path guard.
-- **Embedded Python virtual environments:** new optional `python.venv` key
-  pointing at a venv directory (absolute or relative to `proxy.toml`). The
-  embedded interpreter adopts it exactly like a venv-launched Python via
-  `PyConfig.executable`: `pyvenv.cfg` is honored, `sys.prefix` moves into the
-  venv, and its site-packages (including `.pth` files) is processed, while
-  interpreter environment variables stay ignored. Create the venv with
-  `uv venv --python 3.13` (or `python3.13 -m venv`) at image build time; a
-  missing directory, `pyvenv.cfg`, or `bin/python` fails startup.
+
 - **Embedded Python review fixes (PR #21):** the configured `class` must be a
   Python class (`inspect.isclass`), so factory functions and other callables
   fail startup as documented; and a `target_backend` returned by Python is
   validated against the configured backend names before commit on both the
   request and response paths instead of failing later or being silently
   retained.
-
-- **Dependencies:** grindvakt 0.7.0 and jose-rs 0.7.0, which carry the
-  protocol-layer fixes from the same audit (private_key_jwt assertions
-  require `exp` and single-use `jti`; id_token verification requires
-  `exp`/`iat`; authorization-request scope is checked against the client's
-  registered scope; token-endpoint auth is pinned to the registered method;
-  discovery requires https and an issuer match; JWTs pinning an unknown
-  `kid` and JWEs carrying `zip`/empty `crit` are rejected). See their
-  changelogs and ADRs for behavior-breaking details.
 
 - **Security:** a follow-up audit pass hardened configuration loading, error
   handling, and the outbound HTTP client (ADR 0037). `${ENV}` interpolation
@@ -373,11 +438,29 @@
   hides a value from `get`, it never reclaims the entry). See ADR 0036 and
   ADR 0042, whose security-boundaries tables were corrected accordingly.
 
-- **Compatibility escape hatch:** `custom_logging` accepts
-  `allow_insecure_log_target = true` to restore SATOSA-style behavior
-  (follow symlinks, allow FIFO/stdout-linked targets) for container logging
-  setups; the hardened regular-file + `O_NOFOLLOW` behavior stays the
-  default (ADR 0036).
+- **Protocol trust binding:** POST AuthnRequest signatures must cover the exact
+  parsed request and SAML IdP configurations must sign the response, assertion,
+  or both. Federation request objects require matching issuer, audience,
+  client id, issued-at and expiry claims and cannot conflict with outer
+  parameters. Federation metadata caches cannot outlive the trust anchor's
+  signed expiry, and OIDC UserInfo subjects must match the ID Token subject.
+
+- **ACCR assurance validation:** when an SP requests an AuthnContextClassRef,
+  missing or unrequested IdP responses now fail closed instead of being
+  replaced with the strongest value requested by the SP. Controlled
+  eduID-compatible deployments can opt into `allow_stronger_accr_fallback`; it
+  only normalizes a stronger assertion down and never promotes a weaker one.
+
+### Changed
+
+- **Dependencies:** grindvakt 0.7.0 and jose-rs 0.7.0, which carry the
+  protocol-layer fixes from the same audit (private_key_jwt assertions
+  require `exp` and single-use `jti`; id_token verification requires
+  `exp`/`iat`; authorization-request scope is checked against the client's
+  registered scope; token-endpoint auth is pinned to the registered method;
+  discovery requires https and an issuer match; JWTs pinning an unknown
+  `kid` and JWEs carrying `zip`/empty `crit` are rejected). See their
+  changelogs and ADRs for behavior-breaking details.
 
 - **Repository-wide security hardening:** state cookies now retain their
   original issue time across resealing; every rotation key must satisfy the
@@ -385,13 +468,6 @@
   deadlines and an 8 MiB default streamed-body cap; deployment keys are
   runtime-only mounts; and the Pages workflow verifies mdBook's SHA-256 while
   keeping publish credentials out of the build job.
-
-- **Protocol trust binding:** POST AuthnRequest signatures must cover the exact
-  parsed request and SAML IdP configurations must sign the response, assertion,
-  or both. Federation request objects require matching issuer, audience,
-  client id, issued-at and expiry claims and cannot conflict with outer
-  parameters. Federation metadata caches cannot outlive the trust anchor's
-  signed expiry, and OIDC UserInfo subjects must match the ID Token subject.
 
 - **Release-policy hardening:** attribute filtering is fail-closed unless
   `passthrough_unmatched` is explicitly enabled; primary identifiers use
@@ -410,12 +486,6 @@
   cannot accept this residual risk must not enable SAML assertion decryption;
   remove this exception when the ecosystem publishes a compatible fix.
 
-- **ACCR assurance validation:** when an SP requests an AuthnContextClassRef,
-  missing or unrequested IdP responses now fail closed instead of being
-  replaced with the strongest value requested by the SP. Controlled
-  eduID-compatible deployments can opt into `allow_stronger_accr_fallback`; it
-  only normalizes a stronger assertion down and never promotes a weaker one.
-
 - **SAML / JOSE dependency refresh:** upgraded `gamlastan` and
   `gamlastan-mdq` to 0.8.0 and `jose-rs` to 0.6.0. The SAML frontend now passes
   cryptographic AuthnRequest-signature proof into gamlastan's hardened IdP
@@ -426,20 +496,39 @@
   `want_authn_requests_signed`: without registered SP metadata keys that policy
   now fails configuration instead of being silently bypassed.
 
+### Removed
+
 - **Protocol-library releases:** upgraded to released `grindvakt` 0.6.2 and
   `jose-rs` 0.6.0 from crates.io, removing the temporary sibling-worktree
   patch used during integration.
 
-- **Architecture record:** ADR 0033 is the authoritative record for the 0.3.0
-  fail-closed security boundaries. Earlier ADR files remain unchanged as
-  historical records, and the ADR index marks their conflicting portions as
-  superseded.
-
 ## 0.2.0 [2026-07-07]
 
-- **Security / SAML dependency stack:** bumped `gamlastan` and `gamlastan-mdq`
-  from 0.5.x to 0.7.x, which brings in `bergshamra` 0.7.0 and `uppsala`
-  0.9.0. This is the main security update in this release.
+### Added
+
+- **Legacy identifier compatibility:** added guarded PySAML2 MD5 compatibility
+  for migrations from SATOSA / PySAML2 deployments. The new `legacy_eptid`
+  response micro-service can emit PySAML2-compatible MD5
+  `eduPersonTargetedID` values and, when explicitly requested, set the SAML
+  subject id for SPs that historically stored that value as their persistent
+  NameID. MD5 remains opt-in only: `allow_legacy_md5 = true` is required, and
+  `requesters` can scope the legacy value to known SP entity IDs. The
+  `hasher` and `attribute_processor` services also require the same guard
+  before accepting `md5`.
+
+- **Pairwise identifiers:** documented the preferred non-legacy path for new
+  SPs: `pairwiseid` derives a per-SP `pairwise-id` with
+  `HMAC-SHA256(pairwise_salt, "{requester}-{subject-id}")@scope`, and `nameid`
+  consumes the hash part for persistent SAML NameIDs. This avoids cross-SP
+  correlation while keeping legacy MD5 support isolated to migration flows.
+
+- **Docs:** added the "Legacy identifier compatibility" chapter and expanded
+  the built-in plugin and micro-service reference with PySAML2 compatibility,
+  `legacy_eptid`, guarded MD5 usage, `eduPersonTargetedID` wire shape,
+  pairwise identifier behavior, NameID selection, and scoping semantics.
+  Added ADR 0032 for the legacy identifier compatibility decision.
+
+### Fixed
 
 - **Uppsala 0.9.0 hardening:** the XML parser now fuses after direct pull-parser
   errors, validates computed XSLT element/attribute names as QNames, rejects
@@ -491,20 +580,16 @@
   clearing RUSTSEC-2026-0204 from the `tera` / `globwalk` / `ignore`
   dependency chain.
 
+### Changed
+
+- **Security / SAML dependency stack:** bumped `gamlastan` and `gamlastan-mdq`
+  from 0.5.x to 0.7.x, which brings in `bergshamra` 0.7.0 and `uppsala`
+  0.9.0. This is the main security update in this release.
+
 - **Audit note:** `cargo audit --deny warnings` still reports RUSTSEC-2023-0071
   for `rsa` 0.9.10. RustSec lists no fixed upgrade at release time; the crate is
   pulled in through the XML/OIDC crypto stack (`bergshamra`, `grindvakt`,
   `jose-rs`, and `kryptering`).
-
-- **Legacy identifier compatibility:** added guarded PySAML2 MD5 compatibility
-  for migrations from SATOSA / PySAML2 deployments. The new `legacy_eptid`
-  response micro-service can emit PySAML2-compatible MD5
-  `eduPersonTargetedID` values and, when explicitly requested, set the SAML
-  subject id for SPs that historically stored that value as their persistent
-  NameID. MD5 remains opt-in only: `allow_legacy_md5 = true` is required, and
-  `requesters` can scope the legacy value to known SP entity IDs. The
-  `hasher` and `attribute_processor` services also require the same guard
-  before accepting `md5`.
 
 - **SAML frontend compatibility:** `eduPersonTargetedID` is emitted as a
   NameID-valued SAML attribute when the attribute map identifies it by
@@ -515,25 +600,9 @@
   pass-through deployments that rely on attributes rather than durable
   transient subjects.
 
-- **Pairwise identifiers:** documented the preferred non-legacy path for new
-  SPs: `pairwiseid` derives a per-SP `pairwise-id` with
-  `HMAC-SHA256(pairwise_salt, "{requester}-{subject-id}")@scope`, and `nameid`
-  consumes the hash part for persistent SAML NameIDs. This avoids cross-SP
-  correlation while keeping legacy MD5 support isolated to migration flows.
-
-- **Docs:** added the "Legacy identifier compatibility" chapter and expanded
-  the built-in plugin and micro-service reference with PySAML2 compatibility,
-  `legacy_eptid`, guarded MD5 usage, `eduPersonTargetedID` wire shape,
-  pairwise identifier behavior, NameID selection, and scoping semantics.
-  Added ADR 0032 for the legacy identifier compatibility decision.
-
 ## 0.1.0 [2026-06-25]
 
-- **Dependencies:** bumped `grindvakt` 0.4 → 0.5 and `jose-rs` 0.3.1 → 0.5.0
-  (shared type universe). grindvakt 0.5 encapsulates `SigningKey` (private key
-  material is no longer a public field; signing goes through the `signer()` /
-  `alg()` / `public_jwk()` accessors). tunnelbana does **not** enable
-  grindvakt's optional `pkcs11` feature, so no HSM/`cryptoki` code is compiled.
+### Added
 
 - **Landing page:** the binary now serves a static page at `/` (logo, tagline,
   and project link) plus the logo at `/assets/tunnelbana.png`. A new top-level
@@ -556,21 +625,6 @@
   chosen `RequestedAuthnContext` into the outgoing AuthnRequest via new
   decorations (`KEY_REQUESTED_ACCR`, `KEY_TARGET_AUTHN_CONTEXT_CLASS_REF`, …).
   The attribute map gains literal `subject-id` / `pairwise-id` internal names.
-
-- **Performance:** the URL router now resolves literal endpoint paths through an
-  exact-match hash map instead of a linear regex scan, making `resolve` O(1) in
-  the number of mounted modules. Each frontend mounts five routes, so a proxy
-  fronting `N` frontends previously did up to `5N` regex matches per request
-  (and a non-matching path - the scan's worst case - walked the whole list);
-  this matters at federation scale (10-15k entities). `Route` gains
-  `Route::exact` (literal, no regex compiled) alongside the unchanged
-  `Route::new` (true regex, kept as a fallback); the `pattern` field is replaced
-  by `Route::matches`. First-match precedence is preserved (including a frontend
-  and backend that share a name and so both register e.g. `Saml2/metadata`).
-  Verified on the `toomanyfronts/` scale rig at 10000 frontends: first/last/miss
-  resolve within ~0.1 ms of each other (vs a 2.4 ms first-vs-last spread at 1000
-  before), boot drops the ~5N regex compilations, and RSS fell from ~95 MB
-  (1000) to ~71 MB (10000). See [ADR 0029](docs/adr/0029-router-exact-match-dispatch.md).
 
 - **Docs:** the book gained two end-to-end tutorial chapters - *SAML and OIDC
   over a SWAMID SP backend* (SAML2 IdP + OIDC OP frontends over a SWAMID
@@ -622,6 +676,18 @@
   access, refresh) now carries a verified type tag, so one kind can no longer
   be replayed as another.
 
+- The `oidc_federation` backend now sends an RFC 9101 **signed request
+  object** (grindvakt 0.3.1 `rp::signed_request_object`, signed with the
+  `private_key_jwt` client key) on every authorization request, closing the
+  ADR 0024 follow-up: OPs doing OpenID Federation automatic registration
+  (e.g. the Shibboleth OIDC OP plugin) authenticate the RP at the
+  authorization endpoint with it and resolve the RP's trust chain on the
+  fly. Plain query parameters are kept alongside for OPs that ignore the
+  `request` parameter; the proxy's own federation frontend verifies it
+  against the auto-registered client keys as before.
+
+### Fixed
+
 - Bumped `gamlastan`/`gamlastan-mdq` to 0.5.0. The SAML assertion validator's
   signature check (check 6) no longer trusts the mere presence of a
   `<ds:Signature>` element: `ValidationParams` now carries a required
@@ -634,15 +700,37 @@
   contained assertion), otherwise each individually verified assertion ID
   (cleartext and decrypted alike).
 
-- The `oidc_federation` backend now sends an RFC 9101 **signed request
-  object** (grindvakt 0.3.1 `rp::signed_request_object`, signed with the
-  `private_key_jwt` client key) on every authorization request, closing the
-  ADR 0024 follow-up: OPs doing OpenID Federation automatic registration
-  (e.g. the Shibboleth OIDC OP plugin) authenticate the RP at the
-  authorization endpoint with it and resolve the RP's trust chain on the
-  fly. Plain query parameters are kept alongside for OPs that ignore the
-  `request` parameter; the proxy's own federation frontend verifies it
-  against the auto-registered client keys as before.
+- Fixed response-path ordering in the proxy so response micro-services receive
+  the restored requester and originating frontend context before policy runs.
+  This makes requester-scoped `attribute_authorization` rules work in the real
+  auth flow.
+
+- Fixed `attribute_processor` `regex_sub` validation to reject missing or empty
+  `match_pattern` and `replace_pattern` values at startup, matching the SATOSA
+  contract instead of silently rewriting with an empty replacement.
+
+### Changed
+
+- **Dependencies:** bumped `grindvakt` 0.4 → 0.5 and `jose-rs` 0.3.1 → 0.5.0
+  (shared type universe). grindvakt 0.5 encapsulates `SigningKey` (private key
+  material is no longer a public field; signing goes through the `signer()` /
+  `alg()` / `public_jwk()` accessors). tunnelbana does **not** enable
+  grindvakt's optional `pkcs11` feature, so no HSM/`cryptoki` code is compiled.
+
+- **Performance:** the URL router now resolves literal endpoint paths through an
+  exact-match hash map instead of a linear regex scan, making `resolve` O(1) in
+  the number of mounted modules. Each frontend mounts five routes, so a proxy
+  fronting `N` frontends previously did up to `5N` regex matches per request
+  (and a non-matching path - the scan's worst case - walked the whole list);
+  this matters at federation scale (10-15k entities). `Route` gains
+  `Route::exact` (literal, no regex compiled) alongside the unchanged
+  `Route::new` (true regex, kept as a fallback); the `pattern` field is replaced
+  by `Route::matches`. First-match precedence is preserved (including a frontend
+  and backend that share a name and so both register e.g. `Saml2/metadata`).
+  Verified on the `toomanyfronts/` scale rig at 10000 frontends: first/last/miss
+  resolve within ~0.1 ms of each other (vs a 2.4 ms first-vs-last spread at 1000
+  before), boot drops the ~5N regex compilations, and RSS fell from ~95 MB
+  (1000) to ~71 MB (10000). See [ADR 0029](docs/adr/0029-router-exact-match-dispatch.md).
 
 - The `oidc_federation` backend's discovery mode now delegates OP selection to
   an external OpenID Federation discovery service (`discovery.service`, e.g.
@@ -650,16 +738,11 @@
   `<name>/initiate` endpoint accepts the OpenID Connect Core §4 third-party
   initiated login return, gated on an in-flight-flow marker in the state
   cookie and the trust-anchor resolution of `iss`. In discovery mode the RP
-  entity configuration now publishes `initiate_login_uri`. The in-proxy
-  OP-selection page (collection endpoint + HTML chooser) is retired but kept
+  entity configuration now publishes `initiate_login_uri`. (ADR 0025)
+
+### Removed
+
+- The in-proxy OP-selection page (collection endpoint + HTML chooser) is retired but kept
   commented out in `federation_backend.rs` for reference; its
   `collection_endpoint`/`page_title`/`cache_ttl` config keys are replaced by
   `service`. (ADR 0025)
-
-- Fixed response-path ordering in the proxy so response micro-services receive
-  the restored requester and originating frontend context before policy runs.
-  This makes requester-scoped `attribute_authorization` rules work in the real
-  auth flow.
-- Fixed `attribute_processor` `regex_sub` validation to reject missing or empty
-  `match_pattern` and `replace_pattern` values at startup, matching the SATOSA
-  contract instead of silently rewriting with an empty replacement.
