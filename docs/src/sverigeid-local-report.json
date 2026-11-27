@@ -10,8 +10,8 @@
   },
   "sources": {
     "tunnelbana": {
-      "commit": "67d5e44b2c061541e20c8d50b2eafba069a47d92",
-      "local_inputs_sha256": "689143253a0f51cc8ad9f6b54e4db55ea89b646c33f2230b3b059a546a14f1d8"
+      "commit": "ea1b769b3475e5f8e9e05a27d69c33e8ffb325de",
+      "local_inputs_sha256": "05ea2c1fc3d58b9760f65a19691ec9cb9a1d2b946e5e3b4568778e29998ab055"
     },
     "grindvakt": {
       "version": "0.13.0",
@@ -42,6 +42,7 @@
     "test-my-eid-cancel": "PASS",
     "test-my-eid-unknown-signer": "PASS",
     "service-saml-signed-assurance": "PASS",
+    "verified-loa4-released-as-loa3": "PASS",
     "registered-sectors-and-original-auth-time": "PASS",
     "retired-recipient-key-in-flight-restart": "PASS",
     "upstream-wrong-issuer": "PASS",

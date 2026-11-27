@@ -121,6 +121,9 @@ def prepare(source, directory):
             for field in p:
                 if field.startswith(("display_name", "client_name")):
                     p[field]["value"] = "Tunnelbana " + role.upper()
+        if role == "op":
+            levels = entry["policy"]["policy"]["openid_provider"]["acr_values_supported"]["value"]
+            levels.remove("http://id.elegnamnden.se/loa/1.0/loa4")
         subordinates.append(entry)
         for issuer in marks:
             for mark in issuer["trust-marks"]:
@@ -232,7 +235,7 @@ redis_url = "redis://:supersecret@127.0.0.1:10900/"
             cfg += f'''backend = "rp"
 subject_secret = "{secret}"
 approval_clients = ["https://{HOST}:11020/testmyeid", "{BASE}/sector-a"]
-acr_values_supported = ["http://id.elegnamnden.se/loa/1.0/loa2", "http://id.elegnamnden.se/loa/1.0/loa3", "http://id.elegnamnden.se/loa/1.0/loa4"]
+acr_values_supported = ["http://id.elegnamnden.se/loa/1.0/loa2", "http://id.elegnamnden.se/loa/1.0/loa3"]
 '''
         else:
             cfg += f"""environment = "local"
@@ -282,6 +285,12 @@ idp_key_path = "{fixtures}/idp-key.pem"
 idp_cert_path = "{fixtures}/idp-cert.pem"
 [frontend.config.metadata]
 local = ["{fixtures}/sp-metadata.xml"]
+
+[[microservice]]
+type = "accr"
+name = "accr"
+[microservice.config]
+supported_accr_sorted_by_prio = ["http://id.elegnamnden.se/loa/1.0/loa4", "http://id.elegnamnden.se/loa/1.0/loa3"]
 """
     attributes = directory / "attributes.toml"
     names = [

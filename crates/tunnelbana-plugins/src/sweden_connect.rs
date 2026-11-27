@@ -15,6 +15,9 @@ use tunnelbana_oidc::provider::{AuthorizedClaims, Provider};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::rp::RequestObjectParameters;
 
+pub(crate) const LOA3: &str = "http://id.elegnamnden.se/loa/1.0/loa3";
+pub const LOA4: &str = "http://id.elegnamnden.se/loa/1.0/loa4";
+
 pub const INFO: &str = "https://id.oidc.se/scope/naturalPersonInfo";
 pub const NUMBER: &str = "https://id.oidc.se/scope/naturalPersonNumber";
 pub const APPROVAL: &str = "https://id.oidc.se/scope/signApproval";
@@ -125,6 +128,9 @@ pub enum Profile {
 pub struct Transaction {
     pub state: State,
     pub params: RequestObjectParameters,
+    // Older transactions only recorded the constraints in the upstream request.
+    #[serde(default)]
+    pub downstream_acr: Option<Value>,
 }
 
 pub enum Transactions {
@@ -228,7 +234,10 @@ pub fn validate_approval(req: &AuthorizationRequest, authorized: bool) -> Result
     Ok(Some(request))
 }
 
-pub fn parameters(ctx: &Context, allowed_scope: &str) -> Result<(String, RequestObjectParameters)> {
+pub fn parameters(
+    ctx: &Context,
+    allowed_scope: &str,
+) -> Result<(String, RequestObjectParameters, Value)> {
     let req = ctx
         .target_frontend
         .as_deref()
@@ -277,14 +286,29 @@ pub fn parameters(ctx: &Context, allowed_scope: &str) -> Result<(String, Request
             .collect::<Vec<_>>()
             .join(" ")
     };
-    for target in [KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_PERMITTED_ACR]
-        .into_iter()
-        .filter_map(|key| ctx.decoration(key))
+    // The service requests the level Tunnelbana issues. Both a verified LoA3
+    // and a verified LoA4 can satisfy a request for a released LoA3.
+    let downstream_acr = match params
+        .claims
+        .as_mut()
+        .and_then(|claims| claims.pointer_mut("/id_token/acr"))
+        .filter(|spec| spec["essential"] == true)
     {
+        Some(spec) => upstream_acr_constraint(spec)?,
+        None => Value::Object(Default::default()),
+    };
+    for key in [KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_PERMITTED_ACR] {
+        let Some(target) = ctx.decoration(key) else {
+            continue;
+        };
         // Bind the operator's allowed levels into the signed request and the
         // transaction checked by check_result. Preserve essential client constraints.
         let levels: Vec<String> = serde_json::from_value(target.clone())
             .map_err(|_| Error::UnmetAuthenticationRequirements)?;
+        let levels = upstream_levels(levels, |index, level| {
+            key == KEY_TARGET_AUTHN_CONTEXT_CLASS_REF
+                && ctx.target_acr_is_request_derived(index, level)
+        });
         let claims = params.claims.get_or_insert_with(|| json!({}));
         let acr = &mut claims["id_token"]["acr"];
         let accepted: Vec<_> = levels
@@ -310,7 +334,48 @@ pub fn parameters(ctx: &Context, allowed_scope: &str) -> Result<(String, Request
             "upstream approval scope is not configured".into(),
         ));
     }
-    Ok((scope, params))
+    Ok((scope, params, downstream_acr))
+}
+
+// An operator target is already in upstream terms. A request for a released
+// LoA3 can also be met with upstream LoA4; a released LoA4 is unavailable.
+fn upstream_levels<T: PartialEq<str> + From<String>>(
+    levels: Vec<T>,
+    from_request: impl Fn(usize, &T) -> bool,
+) -> Vec<T> {
+    let mut allow_loa4 = false;
+    let mut upstream = Vec::with_capacity(levels.len());
+    for (index, level) in levels.into_iter().enumerate() {
+        if from_request(index, &level) {
+            if level == *LOA4 {
+                continue;
+            }
+            allow_loa4 |= level == *LOA3;
+        }
+        upstream.push(level);
+    }
+    if allow_loa4 && !upstream.iter().any(|level| level == LOA4) {
+        upstream.push(T::from(LOA4.to_owned()));
+    }
+    upstream
+}
+
+// Translate only the service's requirement. Operator restrictions are applied
+// separately to the actual upstream level and are never widened.
+fn upstream_acr_constraint(spec: &mut Value) -> Result<Value> {
+    let downstream = spec.clone();
+    if spec["value"] == LOA4 {
+        return Err(Error::UnmetAuthenticationRequirements);
+    }
+    if spec["value"] == LOA3 {
+        *spec = json!({"essential":true, "values":[LOA3, LOA4]});
+    } else if let Some(levels) = spec.get_mut("values").and_then(Value::as_array_mut) {
+        *levels = upstream_levels(std::mem::take(levels), |_, _| true);
+        if levels.is_empty() {
+            return Err(Error::UnmetAuthenticationRequirements);
+        }
+    }
+    Ok(downstream)
 }
 
 fn validate_claims(claims: &Value) -> Result<()> {
@@ -347,6 +412,19 @@ fn matches_constraint(value: Option<&Value>, spec: &Value) -> bool {
                 .get("values")
                 .is_none_or(|wanted| wanted.as_array().is_some_and(|list| list.contains(value)))
     })
+}
+
+/// Apply the release ceiling after validating the upstream ACR and its trust mark.
+pub fn released_acr(achieved: &Value, required: &Value) -> Result<Value> {
+    let released = if achieved == LOA4 {
+        json!(LOA3)
+    } else {
+        achieved.clone()
+    };
+    if required["essential"] == true && !matches_constraint(Some(&released), required) {
+        return Err(Error::UnmetAuthenticationRequirements);
+    }
+    Ok(released)
 }
 
 /// Verify signer and assurance constraints against the corresponding verified JWT.
@@ -787,18 +865,62 @@ mod tests {
         ctx.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, json!(["loa4", "loa3"]));
         let mut req = request("openid");
         ctx.state.set_value("service", "authz_request", json!(req));
-        let (_, params) = parameters(&ctx, "openid").unwrap();
+        let (_, params, _) = parameters(&ctx, "openid").unwrap();
         assert!(check_result(&params, &json!({"acr":"loa2","auth_time":1}), &json!({})).is_err());
         assert!(check_result(&params, &json!({"acr":"loa4","auth_time":1}), &json!({})).is_ok());
         req.claims = Some(json!({"id_token":{"acr":{"essential":true,"value":"loa3"}}}));
         ctx.state.set_value("service", "authz_request", json!(req));
-        let (_, params) = parameters(&ctx, "openid").unwrap();
+        let (_, params, _) = parameters(&ctx, "openid").unwrap();
         assert_eq!(
             params.claims.unwrap()["id_token"]["acr"]["values"],
             json!(["loa3"])
         );
         ctx.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, json!(["loa4"]));
         assert!(parameters(&ctx, "openid").is_err());
+    }
+
+    #[test]
+    fn sverigeid_releases_certified_loa4_as_loa3() {
+        let mut ctx = Context::new(Default::default(), State::new());
+        ctx.target_frontend = Some("service".into());
+        let mut req = request("openid");
+        let exact_three = json!({"essential":true,"value":LOA3});
+        req.claims = Some(json!({"id_token":{"acr":exact_three}}));
+        ctx.state.set_value("service", "authz_request", json!(req));
+        // The upstream policy may require more assurance than the service receives.
+        ctx.decorate(KEY_PERMITTED_ACR, json!([LOA4]));
+        let (_, params, downstream) = parameters(&ctx, "openid").unwrap();
+        assert_eq!(
+            params.claims.as_ref().unwrap()["id_token"]["acr"]["values"],
+            json!([LOA4])
+        );
+        assert_eq!(downstream, exact_three);
+        let id = json!({"acr":LOA4,"auth_time":123});
+        assert!(check_result(&params, &id, &json!({})).is_ok());
+        assert_eq!(released_acr(&id["acr"], &downstream).unwrap(), LOA3);
+        assert!(check_result(&params, &json!({"acr":LOA3,"auth_time":123}), &json!({})).is_err());
+
+        let lower = json!("http://id.elegnamnden.se/loa/1.0/loa2");
+        assert!(released_acr(&lower, &downstream).is_err());
+        assert_eq!(released_acr(&lower, &Value::Null).unwrap(), lower);
+        assert_eq!(released_acr(&json!(LOA3), &downstream).unwrap(), LOA3);
+    }
+
+    #[test]
+    fn exact_saml_request_must_accept_the_released_level() {
+        let mut ctx = Context::new(Default::default(), State::new());
+        ctx.decorate(KEY_REQUESTED_ACCR, json!([LOA4]));
+        assert!(parameters(&ctx, "openid").is_err());
+        ctx.decorate(KEY_REQUESTED_ACCR, json!([LOA3]));
+        let (_, params, downstream) = parameters(&ctx, "openid").unwrap();
+        assert_eq!(
+            params.claims.unwrap()["id_token"]["acr"]["values"],
+            json!([LOA3, LOA4])
+        );
+        assert_eq!(released_acr(&json!(LOA4), &downstream).unwrap(), LOA3);
+
+        // An in-flight transaction created before the ceiling may require LoA4.
+        assert!(released_acr(&json!(LOA4), &json!({"essential":true,"value":LOA4})).is_err());
     }
 
     #[test]
@@ -840,6 +962,7 @@ mod tests {
                 Transaction {
                     state: State::new(),
                     params: Default::default(),
+                    downstream_acr: None,
                 },
             )
             .await

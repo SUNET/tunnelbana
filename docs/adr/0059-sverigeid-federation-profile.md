@@ -2,6 +2,7 @@
 
 - **Status** Accepted
 - **Date** 2026-11-24
+- **Amended** 2026-11-27 to cap downstream certified Swedish assurance at LoA3.
 - **Components** Federation RP backend, federation OP frontend, proxy core and local federation release gate
 - **Related decisions** [Federation backend](0024-openid-federation-backend.md), [frontend backend selection](0027-frontend-backend-pin.md), [federation trust resolution](0042-federation-resolution-hardening.md), [OIDC subject compatibility](0058-grindvakt-081-subject-compatibility.md)
 
@@ -19,14 +20,20 @@ Enable the Sweden Connect rules explicitly with `profile = "sweden_connect"` on 
 
 Register the upstream-facing RP and downstream-facing OP under the registration intermediates for their respective roles. Publish separate leaf metadata, federation signing keys and protocol keys. Each environment has its own trust anchor and SverigeID issuer. Tunnelbana uses a signed resolution response from a configured anchor to establish a peer's metadata, keys and endorsed trust marks. Local cache lifetime is capped by the signed resolution's expiry. A withdrawn mark takes effect on fresh resolution. [Sweden Connect metadata requirements](https://docs.swedenconnect.se/federation/oidc-metadata-requirements.html)
 
-A trust mark establishes the provider's eligibility to assert a Swedish level of assurance (LoA). The signed ID token's `acr` identifies the level achieved by this user. For a Swedish LoA, Tunnelbana requires both the matching mark for that provider and an achieved level acceptable to the request. A per-frontend assurance minimum applies even if the client omitted `acr`. An empty intersection with an essential client requirement, a missing authentication time or an unacceptable result prevents downstream issuance. [Sweden Connect OIDC profile](https://docs.swedenconnect.se/technical-framework/october-2026/OpenID_Connect_Profile_for_Sweden_Connect.html)
+A trust mark establishes the provider's eligibility to assert a certified Swedish level of assurance (LoA). The signed ID token's `acr` identifies the level achieved by this user. Tunnelbana verifies the resolver-endorsed mark for that level and provider. A LoA4 login requires the LoA4 mark even when the service will receive LoA3. A per-frontend assurance minimum applies to the upstream result even if the client omitted `acr`. A missing authentication time or an unacceptable result prevents downstream issuance. [Sweden Connect OIDC profile](https://docs.swedenconnect.se/technical-framework/october-2026/OpenID_Connect_Profile_for_Sweden_Connect.html)
+
+### Downstream assurance for SverigeID logins
+
+Tunnelbana issues its own authentication statement and caps certified Swedish assurance at LoA3. When SverigeID returns `http://id.elegnamnden.se/loa/1.0/loa4`, Tunnelbana retains the verified upstream value as evidence and releases `http://id.elegnamnden.se/loa/1.0/loa3`. The released value goes in the OIDC ID token's `acr` or the SAML assertion's `AuthnContextClassRef`. A login at LoA3 or below keeps its verified level.
+
+An essential OIDC requirement or exact SAML request for LoA3 can therefore be satisfied by upstream LoA3 or LoA4, subject to the operator's upstream restrictions. Tunnelbana binds the service's original requirement to the transaction and checks it against the released level. If the service accepts only LoA4, authentication fails. [Assurance policy](../../crates/tunnelbana-plugins/src/sweden_connect.rs)
 
 ### One login across two protocol exchanges
 
 1. The downstream frontend records the accepted request and requester. A federation RP submits a signed Request Object. The OP checks its signature and replay identifier on every authorization, including when the registration is cached. The profile requires authorization code flow, a nonce and S256 PKCE.
 2. The backend creates fresh upstream state, nonce and PKCE verifier. It signs the upstream Request Object, binding the permitted scopes, essential claims and assurance constraints. Request microservices can tighten assurance policy. The proxy retains the original frontend request and the policy state needed on the response path.
 3. On callback, Tunnelbana checks state and consumes the one-use transaction. It redeems the code using PKCE and `private_key_jwt`. It verifies the ID token against the registered algorithm, issuer, audience and nonce, checks time constraints and validates applicable token hashes. It fetches signed UserInfo from the resolved OP and verifies its signature, issuer, audience and agreement with the ID token's subject. Registered encryption requires successful decryption before signature validation.
-4. The downstream frontend issues its own response. It preserves the verified `acr` and original `auth_time` through the response pipeline. An OIDC RP receives Tunnelbana's issuer, its own audience, its request nonce and the subject for its account binding. A SAML service receives the corresponding authentication context and instant.
+4. The downstream frontend issues its own response using the released authentication context and original authentication time. An OIDC RP receives Tunnelbana's issuer, its own audience, its request nonce and the subject for its account binding. A SAML service receives the corresponding authentication statement.
 
 ### Subjects and claim release
 
@@ -50,6 +57,8 @@ Only an explicitly allowed signature client can request `signApproval`. Tunnelba
 
 ## Operational consequences
 
+The Sweden Connect OP excludes certified LoA4 from its published `acr_values_supported`. If the registration intermediate pins this metadata, its list must also reflect the levels Tunnelbana can issue. When upgrading from 0.6.0, switch all replicas together because an older replica handling a callback can still issue LoA4. [Deployment guide](../src/sverigeid.md)
+
 The sealed browser cookie carries a transaction handle and OIDC state. The backend keeps the bound request, verifier and policy with the one-use transaction. A callback has at most ten minutes to consume it and must arrive before the original cookie deadline. Single-process deployments can use in-memory stores. Replicas need shared Redis for transactions, registrations and replay protection, along with consistent sealing and subject secrets. A process restart loses in-memory transactions. [Deployment and rollover guide](../src/sverigeid.md)
 
 Prepublish the next public signing key with a distinct `kid` before switching signers. Keep retired private decryption keys available for the lifetime of cached registrations and in-flight requests. This lets one replica begin an authorization while another finishes it across a key change.
@@ -60,7 +69,8 @@ Prepublish the next public signing key with a distinct `kid` before switching si
 
 | Boundary | Acceptance evidence |
 |---|---|
-| Existing services and identity | OIDC and SAML logins, original authentication time and achieved LoA, Swedish numbers, claim privacy and sector-specific subjects |
+| Existing services and identity | OIDC and SAML logins, original authentication time, Swedish numbers, claim privacy and sector-specific subjects |
+| Assurance release | A signed LoA4 fixture produces a downstream LoA3 ID token. A LoA4-only request fails. Withdrawing the provider's LoA4 mark prevents issuance. The SAML check verifies LoA3 in the signed assertion. |
 | Signed and encrypted responses | Test RP 1 verifies signed responses. Test RPs 2 and 3 decrypt RSA and EC responses. A registered fixture verifies the protected UserInfo type and the absence of ID-token markers. |
 | Signature approval | Test my eID completes approval, cancellation and unknown-signer flows. The browser checks the displayed message and exercises request reuse. |
 | Trust and continuity | Fixtures cover an expired peer, a withdrawn LoA mark, incorrect issuer, audience or subject, concurrent redemption, cross-replica completion and decryption-key rollover. |

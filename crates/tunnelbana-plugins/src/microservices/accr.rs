@@ -168,11 +168,11 @@ impl MicroService for Accr {
             .map(String::from);
 
         // Filter the SP request down to what we support (preserving SP order).
-        let mut supported_to_forward: Vec<String> = Vec::new();
+        let mut requested_filtered: Vec<String> = Vec::new();
         if !requested.is_empty() {
             for accr in &requested {
                 if self.supported.contains(accr) {
-                    supported_to_forward.push(accr.clone());
+                    requested_filtered.push(accr.clone());
                 } else {
                     tracing::info!(
                         microservice = %self.name,
@@ -181,22 +181,11 @@ impl MicroService for Accr {
                     );
                 }
             }
-            if supported_to_forward.is_empty() {
+            if requested_filtered.is_empty() {
                 return Err(Error::Authn(format!(
                     "accr {}: none of the requested AuthnContextClassRef values are supported",
                     self.name
                 )));
-            }
-        }
-
-        // The filtered (pre-rewrite) request is what the response path validates against.
-        let requested_filtered = supported_to_forward.clone();
-
-        // Apply the rewrite map to the forwarded copy.
-        let mut accr_to_forward = supported_to_forward;
-        for value in accr_to_forward.iter_mut() {
-            if let Some(rewritten) = self.rewrite.get(value) {
-                *value = rewritten.clone();
             }
         }
 
@@ -207,30 +196,31 @@ impl MicroService for Accr {
             .target_frontend
             .clone()
             .or_else(|| ctx.state.get_str(STATE_KEY_BASE, KEY_TARGET_FRONTEND));
-        if let Some(vidp) = vidp.as_deref() {
-            if let Some(minimum) = self.lowest.get(vidp) {
-                if let Some(idx) = self.supported.iter().position(|s| s == minimum) {
-                    accr_to_forward = self.supported[..=idx].to_vec();
-                    // A routing hook may already have selected a target. Bound
-                    // OIDC requests must still enforce every operator's minimum.
-                    let mut permitted = accr_to_forward.clone();
-                    if ctx.decoration(KEY_PERMITTED_ACR).is_some() {
-                        let previous = decoration_list(ctx, KEY_PERMITTED_ACR);
-                        permitted.retain(|level| previous.contains(level));
-                    }
-                    ctx.decorate(KEY_PERMITTED_ACR, json_strings(&permitted));
-                }
+        let minimum_range = vidp
+            .as_ref()
+            .and_then(|idp| self.lowest.get(idp))
+            .and_then(|minimum| self.supported.iter().position(|level| level == minimum))
+            .map(|idx| &self.supported[..=idx]);
+        if let Some(levels) = minimum_range {
+            // A routing hook may already have selected a target. Bound
+            // OIDC requests must still enforce every operator's minimum.
+            let mut permitted = levels.to_vec();
+            if ctx.decoration(KEY_PERMITTED_ACR).is_some() {
+                let previous = decoration_list(ctx, KEY_PERMITTED_ACR);
+                permitted.retain(|level| previous.contains(level));
             }
+            ctx.decorate(KEY_PERMITTED_ACR, json_strings(&permitted));
         }
 
         // Forward to the backend (first writer wins, mirroring KEY_TARGET_ENTITYID).
         if ctx.decoration(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF).is_none()
-            && !accr_to_forward.is_empty()
+            && (minimum_range.is_some() || !requested_filtered.is_empty())
         {
-            ctx.decorate(
-                KEY_TARGET_AUTHN_CONTEXT_CLASS_REF,
-                json_strings(&accr_to_forward),
-            );
+            if let Some(levels) = minimum_range {
+                ctx.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, json_strings(levels));
+            } else {
+                ctx.forward_requested_acrs(&requested_filtered, &self.rewrite);
+            }
             if let Some(cmp) = comparison.or_else(|| self.default_comparison.clone()) {
                 ctx.decorate(KEY_TARGET_ACCR_COMPARISON, Value::String(cmp));
             }
@@ -406,7 +396,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, params) = crate::sweden_connect::parameters(&c, "openid").unwrap();
+        let (_, params, _) = crate::sweden_connect::parameters(&c, "openid").unwrap();
         assert_eq!(
             params.claims.unwrap()["id_token"]["acr"]["values"],
             serde_json::json!([MFA])
@@ -416,6 +406,97 @@ mod tests {
             json_strings(&[PWD.into()]),
         );
         assert!(crate::sweden_connect::parameters(&c, "openid").is_err());
+    }
+
+    #[tokio::test]
+    async fn exact_saml_loa3_through_accr_accepts_verified_loa4() {
+        use crate::sweden_connect::{check_result, parameters, released_acr, LOA3, LOA4};
+        use serde_json::json;
+
+        let accr = build_accr(json!({"supported_accr_sorted_by_prio": [LOA4, LOA3]}));
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json!([LOA3]));
+        c.decorate(KEY_REQUESTED_ACCR_COMPARISON, json!("exact"));
+        accr.process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            c.decoration(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF),
+            Some(&json!([LOA3]))
+        );
+        let (_, params, downstream) = parameters(&c, "openid").unwrap();
+        assert_eq!(
+            params.claims.as_ref().unwrap()["id_token"]["acr"]["values"],
+            json!([LOA3, LOA4])
+        );
+        let verified = json!({"acr":LOA4, "auth_time":123});
+        check_result(&params, &verified, &json!({})).unwrap();
+        let mut response = response_from("sp");
+        response.auth_info.auth_class_ref = Some(
+            released_acr(&verified["acr"], &downstream)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .into(),
+        );
+        let response = accr.process_response(&mut c, response).await.unwrap();
+        assert_eq!(response.auth_info.auth_class_ref.as_deref(), Some(LOA3));
+    }
+
+    #[tokio::test]
+    async fn sverigeid_keeps_operator_targets_in_upstream_terms() {
+        use crate::sweden_connect::{parameters, LOA3, LOA4};
+        use serde_json::json;
+
+        let accr = build_accr(json!({"supported_accr_sorted_by_prio": [LOA4, LOA3]}));
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json!([LOA3]));
+        c.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, json!([LOA3]));
+        accr.process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+        let (_, params, _) = parameters(&c, "openid").unwrap();
+        assert_eq!(
+            params.claims.unwrap()["id_token"]["acr"]["values"],
+            json!([LOA3])
+        );
+
+        let mut c = ctx();
+        c.decorate(KEY_REQUESTED_ACCR, json!([LOA3]));
+        accr.process_request(&mut c, InternalData::request("sp"))
+            .await
+            .unwrap();
+        c.decorate(KEY_PERMITTED_ACR, json!([LOA4]));
+        let (_, params, _) = parameters(&c, "openid").unwrap();
+        assert_eq!(
+            params.claims.unwrap()["id_token"]["acr"]["values"],
+            json!([LOA4])
+        );
+    }
+
+    #[tokio::test]
+    async fn sverigeid_keeps_accr_rewrites_and_minimum_ranges_in_upstream_terms() {
+        use crate::sweden_connect::{parameters, LOA3, LOA4};
+        use serde_json::json;
+
+        for cfg in [
+            json!({"supported_accr_sorted_by_prio":[LOA4, LOA3], "internal_accr_rewrite_map":{(LOA3):LOA3}}),
+            json!({"supported_accr_sorted_by_prio":[LOA3], "lowest_accepted_accr_for_virtual_idp":{"saml":LOA3}}),
+        ] {
+            let accr = build_accr(cfg);
+            let mut c = ctx();
+            c.target_frontend = Some("saml".into());
+            c.decorate(KEY_REQUESTED_ACCR, json!([LOA3]));
+            accr.process_request(&mut c, InternalData::request("sp"))
+                .await
+                .unwrap();
+            let (_, params, _) = parameters(&c, "openid").unwrap();
+            assert_eq!(
+                params.claims.unwrap()["id_token"]["acr"]["values"],
+                json!([LOA3])
+            );
+        }
     }
 
     #[tokio::test]

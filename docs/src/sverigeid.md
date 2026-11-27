@@ -1,6 +1,6 @@
 # Connecting a service to SverigeID
 
-SverigeID authenticates the user or collects their signature approval. Tunnelbana verifies the signed result and issues an OIDC or SAML response to the service. The response carries the original authentication time and achieved assurance level. The downstream issuer, audience, nonce and subject belong to the downstream transaction.
+SverigeID authenticates the user or collects their signature approval. Tunnelbana verifies the signed result and issues an OIDC or SAML response to the service. The response carries the original authentication time. When SverigeID authenticates at certified Swedish LoA4, Tunnelbana releases `http://id.elegnamnden.se/loa/1.0/loa3` in the OIDC ID token’s `acr` or the SAML assertion’s `AuthnContextClassRef`. Lower levels retain their verified value. A service that requires LoA4 receives an authentication error. When upgrading a replicated deployment from 0.6.0, switch all replicas together. An older replica handling a callback can still issue LoA4. The downstream issuer, audience, nonce and subject belong to the downstream transaction.
 
 ## Existing OIDC or SAML service
 
@@ -41,11 +41,11 @@ Supply the anchor ID, intermediate ID and pinned public JWK from the same enviro
 | `qa` | `https://op.qa.sverigeid.se` |
 | `production` | `https://op.sverigeid.se` |
 
-The backend verifies the ID token and signed UserInfo against the RP's registered signing algorithm (`id_token_signed_response_alg`, default `RS256`). Both responses must identify the same user. Each certified Swedish LoA requires its corresponding resolver-endorsed trust mark. Use `required_trust_marks` for additional admission requirements. Essential ACR requirements that cannot be met end the transaction.
+The backend verifies the ID token and signed UserInfo against the RP's registered signing algorithm (`id_token_signed_response_alg`, default `RS256`). Both responses must identify the same user. Each certified Swedish LoA requires its corresponding resolver-endorsed trust mark. Tunnelbana verifies the LoA4 mark before releasing LoA3 for a LoA4 login. Use `required_trust_marks` for additional admission requirements. Essential ACR requirements that cannot be met end the transaction.
 
 ## Publishing a federation OP
 
-Add the following frontend alongside the backend above. Register its entity ID under the OP registration intermediate and supply its granted trust marks in `frontend.config.federation.trust_marks`. Each entry contains the `trust_mark_type` and issued compact `trust_mark`. The same structure is available for the RP's own marks.
+Add the following frontend alongside the backend above. Register its entity ID under the OP registration intermediate and supply its granted trust marks in `frontend.config.federation.trust_marks`. Each entry contains the `trust_mark_type` and issued compact `trust_mark`. The same structure is available for the RP's own marks. If the registration intermediate pins `acr_values_supported`, register the levels Tunnelbana can release and exclude certified LoA4.
 
 ```toml
 [[frontend]]
