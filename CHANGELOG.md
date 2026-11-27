@@ -4,6 +4,10 @@
 
 ### Added
 
+- Require an explicit `op_entity_id` for every Sweden Connect backend.
+  Operators can select the Sandbox Reference OP or SverigeID using the same RP
+  registration.
+
 - Add an opt-in Sweden Connect profile to the federation RP and OP. OIDC and
   SAML services receive the original authentication time. Tunnelbana releases
   certified SverigeID LoA4 as Swedish LoA3. A request that requires LoA4 fails.

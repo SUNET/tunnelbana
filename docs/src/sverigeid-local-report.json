@@ -10,8 +10,8 @@
   },
   "sources": {
     "tunnelbana": {
-      "commit": "de0b33aead71d3d4f09a084c8a8dcac903fea64f",
-      "local_inputs_sha256": "7d18096d024dffe8a6b775c40e7d64ba4a0e0220d52956cd398c8c00c7f63709"
+      "commit": "0507fac321c8747066fdb4447b34e33654ee6155",
+      "local_inputs_sha256": "0f09a019ffc0c7807c8c55799fd7b3e1f53c43b157c448663e6488e7c1e2e597"
     },
     "grindvakt": {
       "version": "0.13.0",

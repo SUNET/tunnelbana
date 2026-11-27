@@ -716,6 +716,11 @@ async fn sweden_connect_leaf_statements_publish_only_the_registered_role() {
         secret: "test-secret".into(),
         previous_secrets: vec![],
     };
+    let error = FederationBackend::build(&bx)
+        .err()
+        .expect("missing OP must fail at startup");
+    assert!(error.to_string().contains("op_entity_id"), "{error}");
+    bx.config["op_entity_id"] = json!(OP_ID);
     let rp = FederationBackend::build(&bx).unwrap();
     let BackendAction::Respond(rp_response) = rp
         .handle_endpoint(&mut ctx(), "entity_configuration")
@@ -837,7 +842,7 @@ async fn profile_callback_returns_registered_subject_type() {
                 name: "OIDFedRP".into(),
                 base_url: "https://proxy.example.com".into(),
                 config: serde_json::json!({
-                    "profile": "sweden_connect", "environment": "local", "op_entity_id": OP_ID,
+                    "profile": "sweden_connect", "environment": "sandbox", "op_entity_id": OP_ID,
                     "subject_type": registered, "id_token_signed_response_alg": "ES256",
                     "signing_jwk": protocol_key,
                     "federation": {

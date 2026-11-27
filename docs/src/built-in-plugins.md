@@ -464,6 +464,8 @@ The upstream ID-token, audience, UserInfo, and endpoint policies described for
 the `oidc` backend also apply here. `id_token_signed_response_alg` is published
 in the signed RP metadata so upstream OPs know which algorithm to use.
 
+With `profile = "sweden_connect"`, configure both `environment` and the exact upstream `op_entity_id`. Startup fails if the OP is omitted. See the [Sandbox backend example](sverigeid.md#configure-the-sandbox-rp) for RP registration, trust anchors, response signing algorithms and issuer-specific authorization.
+
 ```toml
 [[backend]]
 type = "oidc_federation"
