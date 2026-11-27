@@ -15,7 +15,7 @@ use tunnelbana_oidc::provider::{AuthorizedClaims, Provider};
 use tunnelbana_oidc::request::AuthorizationRequest;
 use tunnelbana_oidc::rp::RequestObjectParameters;
 
-const LOA3: &str = "http://id.elegnamnden.se/loa/1.0/loa3";
+pub(crate) const LOA3: &str = "http://id.elegnamnden.se/loa/1.0/loa3";
 pub const LOA4: &str = "http://id.elegnamnden.se/loa/1.0/loa4";
 
 pub const INFO: &str = "https://id.oidc.se/scope/naturalPersonInfo";
@@ -297,14 +297,18 @@ pub fn parameters(
         Some(spec) => upstream_acr_constraint(spec)?,
         None => Value::Object(Default::default()),
     };
-    for target in [KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_PERMITTED_ACR]
-        .into_iter()
-        .filter_map(|key| ctx.decoration(key))
-    {
+    for key in [KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, KEY_PERMITTED_ACR] {
+        let Some(target) = ctx.decoration(key) else {
+            continue;
+        };
         // Bind the operator's allowed levels into the signed request and the
         // transaction checked by check_result. Preserve essential client constraints.
         let levels: Vec<String> = serde_json::from_value(target.clone())
             .map_err(|_| Error::UnmetAuthenticationRequirements)?;
+        let levels = upstream_levels(levels, |index, level| {
+            key == KEY_TARGET_AUTHN_CONTEXT_CLASS_REF
+                && ctx.target_acr_is_request_derived(index, level)
+        });
         let claims = params.claims.get_or_insert_with(|| json!({}));
         let acr = &mut claims["id_token"]["acr"];
         let accepted: Vec<_> = levels
@@ -333,6 +337,29 @@ pub fn parameters(
     Ok((scope, params, downstream_acr))
 }
 
+// An operator target is already in upstream terms. A request for a released
+// LoA3 can also be met with upstream LoA4; a released LoA4 is unavailable.
+fn upstream_levels<T: PartialEq<str> + From<String>>(
+    levels: Vec<T>,
+    from_request: impl Fn(usize, &T) -> bool,
+) -> Vec<T> {
+    let mut allow_loa4 = false;
+    let mut upstream = Vec::with_capacity(levels.len());
+    for (index, level) in levels.into_iter().enumerate() {
+        if from_request(index, &level) {
+            if level == *LOA4 {
+                continue;
+            }
+            allow_loa4 |= level == *LOA3;
+        }
+        upstream.push(level);
+    }
+    if allow_loa4 && !upstream.iter().any(|level| level == LOA4) {
+        upstream.push(T::from(LOA4.to_owned()));
+    }
+    upstream
+}
+
 // Translate only the service's requirement. Operator restrictions are applied
 // separately to the actual upstream level and are never widened.
 fn upstream_acr_constraint(spec: &mut Value) -> Result<Value> {
@@ -343,10 +370,7 @@ fn upstream_acr_constraint(spec: &mut Value) -> Result<Value> {
     if spec["value"] == LOA3 {
         *spec = json!({"essential":true, "values":[LOA3, LOA4]});
     } else if let Some(levels) = spec.get_mut("values").and_then(Value::as_array_mut) {
-        levels.retain(|level| level != LOA4);
-        if levels.iter().any(|level| level == LOA3) {
-            levels.push(json!(LOA4));
-        }
+        *levels = upstream_levels(std::mem::take(levels), |_, _| true);
         if levels.is_empty() {
             return Err(Error::UnmetAuthenticationRequirements);
         }

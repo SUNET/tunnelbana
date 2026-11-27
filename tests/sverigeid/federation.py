@@ -285,6 +285,12 @@ idp_key_path = "{fixtures}/idp-key.pem"
 idp_cert_path = "{fixtures}/idp-cert.pem"
 [frontend.config.metadata]
 local = ["{fixtures}/sp-metadata.xml"]
+
+[[microservice]]
+type = "accr"
+name = "accr"
+[microservice.config]
+supported_accr_sorted_by_prio = ["http://id.elegnamnden.se/loa/1.0/loa4", "http://id.elegnamnden.se/loa/1.0/loa3"]
 """
     attributes = directory / "attributes.toml"
     names = [

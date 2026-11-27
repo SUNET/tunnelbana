@@ -88,6 +88,10 @@ pub struct Context {
     pub state: State,
     /// Ad-hoc per-request data not persisted to the cookie.
     pub decorations: BTreeMap<String, Value>,
+    // Positions in the forwarded target that came directly from the SP request.
+    // Kept outside decorations so a plugin returning decorations cannot mark
+    // an operator restriction as eligible for downstream-to-upstream translation.
+    request_derived_acrs: Vec<Option<String>>,
     pub set_cookies: Vec<String>,
 }
 
@@ -100,6 +104,7 @@ impl Context {
             target_frontend: None,
             state,
             decorations: BTreeMap::new(),
+            request_derived_acrs: Vec::new(),
             set_cookies: Vec::new(),
         }
     }
@@ -111,7 +116,36 @@ impl Context {
 
     /// Store a non-persistent decoration.
     pub fn decorate(&mut self, key: impl Into<String>, value: Value) {
-        self.decorations.insert(key.into(), value);
+        let key = key.into();
+        if key == KEY_TARGET_AUTHN_CONTEXT_CLASS_REF {
+            self.request_derived_acrs.clear();
+        }
+        self.decorations.insert(key, value);
+    }
+
+    /// Forward the filtered SP request, retaining the origin of each target.
+    /// Configured rewrites are already expressed in upstream terms.
+    pub fn forward_requested_acrs(
+        &mut self,
+        requested: &[String],
+        rewrites: &BTreeMap<String, String>,
+    ) {
+        let mut levels = Vec::with_capacity(requested.len());
+        let mut origins = Vec::with_capacity(requested.len());
+        for level in requested {
+            let rewritten = rewrites.get(level);
+            levels.push(rewritten.unwrap_or(level).clone());
+            origins.push(rewritten.is_none().then(|| level.clone()));
+        }
+        self.decorate(KEY_TARGET_AUTHN_CONTEXT_CLASS_REF, Value::from(levels));
+        self.request_derived_acrs = origins;
+    }
+
+    pub fn target_acr_is_request_derived(&self, index: usize, level: &str) -> bool {
+        self.request_derived_acrs
+            .get(index)
+            .and_then(Option::as_deref)
+            == Some(level)
     }
 
     /// Fetch a decoration.

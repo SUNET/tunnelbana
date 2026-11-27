@@ -300,7 +300,15 @@ def saml(browser, directory):
 
     try:
         page.route(acs, accept)
-        page.goto(BASE + "/saml/sso?" + urlencode({"SAMLRequest": wire}))
+        with page.expect_request(lambda req: urlsplit(req.url).path == "/oidc/authorize") as authorization:
+            page.goto(BASE + "/saml/sso?" + urlencode({"SAMLRequest": wire}))
+        query = parse_qs(urlsplit(authorization.value.url).query)
+        # The reference OP verifies the signed request. Inspect the levels
+        # offered on the wire before checking the assertion issued to the SP.
+        jar = jwt.decode(query["request"][0], options={"verify_signature": False})
+        assert jar["claims"]["id_token"]["acr"] == {
+            "essential": True, "values": [LOA + "3", LOA + "4"]
+        }
         authenticate(page)
         page.wait_for_url(acs)
         path = directory / "response.xml"
