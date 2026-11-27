@@ -406,7 +406,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, params) = crate::sweden_connect::parameters(&c, "openid").unwrap();
+        let (_, params, _) = crate::sweden_connect::parameters(&c, "openid").unwrap();
         assert_eq!(
             params.claims.unwrap()["id_token"]["acr"]["values"],
             serde_json::json!([MFA])

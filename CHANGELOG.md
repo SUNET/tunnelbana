@@ -1,12 +1,13 @@
 # Changelog
 
-## 0.6.0 [2026-11-26]
+## 0.6.0 [2026-11-27]
 
 ### Added
 
 - Add an opt-in Sweden Connect profile to the federation RP and OP. OIDC and
-  SAML services can receive the assurance level and authentication time verified
-  by the upstream provider. The profile supports Swedish identity claims,
+  SAML services receive the original authentication time. Tunnelbana releases
+  certified SverigeID LoA4 as Swedish LoA3. A request that requires LoA4 fails.
+  Lower assurance levels keep their verified value. The profile supports Swedish identity claims,
   signature approval, signed and encrypted responses, and shared Redis state
   across replicas. See the [configuration and local release gate](docs/src/sverigeid.md).
 

@@ -192,7 +192,7 @@ pub struct FederationFrontend {
 
 impl FederationFrontend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Frontend>> {
-        let cfg: FederationFrontendConfig = bx.parse_config()?;
+        let mut cfg: FederationFrontendConfig = bx.parse_config()?;
         crate::oidc_common::validate_authenticating_authority_mapping(
             &bx.attribute_mapper,
             &bx.name,
@@ -224,6 +224,8 @@ impl FederationFrontend {
             crate::sweden_connect::ProtocolKeys::load(cfg.rotation, &op_key, &fed_key)?;
         let profile = cfg.profile.is_some();
         if profile {
+            cfg.acr_values_supported
+                .retain(|acr| acr != crate::sweden_connect::LOA4);
             crate::sweden_connect::check_keys(&fed_key, &op_key)?;
             if fed.trust_anchor.is_empty()
                 || cfg.id_token_ttl.is_some_and(|ttl| ttl > 300)

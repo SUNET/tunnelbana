@@ -673,8 +673,10 @@ impl FederationBackend {
         };
         let mut client = self.client.clone();
         let mut params = rp::RequestObjectParameters::default();
+        let downstream_acr;
         if self.transactions.is_some() {
-            (client.scope, params) = crate::sweden_connect::parameters(ctx, &self.client.scope)?;
+            (client.scope, params, downstream_acr) =
+                crate::sweden_connect::parameters(ctx, &self.client.scope)?;
             if let Some(prompt) = ctx.state.get_str(&self.name, "forced_prompt") {
                 params.prompt = Some(prompt);
             }
@@ -685,6 +687,8 @@ impl FederationBackend {
             {
                 return Err(Error::Authn("upstream does not support approval".into()));
             }
+        } else {
+            downstream_acr = Value::Null;
         }
         let request_object = rp::signed_request_object_with(
             &op.provider,
@@ -716,6 +720,7 @@ impl FederationBackend {
                     crate::sweden_connect::Transaction {
                         state: ctx.state.clone(),
                         params,
+                        downstream_acr: Some(downstream_acr),
                     },
                 )
                 .await?;
@@ -986,7 +991,7 @@ impl FederationBackend {
             return Err(Error::Authn("state mismatch".into()));
         }
 
-        let params = if let Some(store) = &self.transactions {
+        let (params, downstream_acr) = if let Some(store) = &self.transactions {
             let handle = ctx
                 .state
                 .get_str(&self.name, "handle")
@@ -996,9 +1001,9 @@ impl FederationBackend {
             if ctx.state.get_str(&self.name, "oidc_state").as_deref() != Some(got_state) {
                 return Err(Error::State("transaction binding mismatch".into()));
             }
-            Some(transaction.params)
+            (Some(transaction.params), transaction.downstream_acr)
         } else {
-            None
+            (None, None)
         };
         if let Some(err) = ctx.request.param("error") {
             if params.is_some() && err == "unmet_authentication_requirements" {
@@ -1092,6 +1097,11 @@ impl FederationBackend {
 
         // Merge id_token claims and userinfo.
         let mut merged = serde_json::to_value(&id_claims.extra).unwrap_or_default();
+        let mut auth_class_ref = id_claims
+            .extra
+            .get("acr")
+            .and_then(Value::as_str)
+            .map(String::from);
         if let Some(params) = &params {
             let ep = op.provider.require_userinfo_endpoint()?;
             let mut raw = rp::fetch_userinfo_response(
@@ -1149,6 +1159,12 @@ impl FederationBackend {
                 subject: sub.clone(),
                 approval: params.sign_request.is_some(),
             });
+            let required = downstream_acr
+                .as_ref()
+                .or_else(|| params.claims.as_ref()?.pointer("/id_token/acr"))
+                .unwrap_or(&Value::Null);
+            merged["acr"] = crate::sweden_connect::released_acr(&merged["acr"], required)?;
+            auth_class_ref = merged["acr"].as_str().map(String::from);
             merge_json(&mut merged, &ui);
         } else if let Some(userinfo_ep) = &op.provider.userinfo_endpoint {
             let userinfo = rp::fetch_userinfo(
@@ -1168,11 +1184,7 @@ impl FederationBackend {
 
         let response = InternalData {
             auth_info: AuthenticationInformation {
-                auth_class_ref: id_claims
-                    .extra
-                    .get("acr")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
+                auth_class_ref,
                 timestamp: crate::authentication_time::from_oidc(id_claims.extra.get("auth_time"))?,
                 issuer: Some(op.provider.issuer.clone()),
             },

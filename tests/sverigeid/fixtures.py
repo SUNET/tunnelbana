@@ -293,6 +293,8 @@ class Peers:
                 claims["iss"] = BASE + "/another-op"
             if self.mode == "wrong-audience":
                 claims["aud"] = BASE + "/another-rp"
+            if self.mode == "achieved-loa4":
+                claims["acr"] = LOA + "4"
             if self.mode == "unmet-acr":
                 claims["acr"] = LOA + "2"
             if SIGN in jar:
@@ -341,7 +343,7 @@ class Peers:
         return answer(404, "", "text/plain")
 
 
-def transaction(fixtures, role, approval=False, rollover=None):
+def transaction(fixtures, role, approval=False, rollover=None, required_acr=LOA + "3"):
     """Exercise a registered RP with its own sector, key, nonce and verifier."""
     iss = BASE + "/op"
     client = BASE + "/" + role
@@ -362,7 +364,7 @@ def transaction(fixtures, role, approval=False, rollover=None):
         "state": state,
         "code_challenge": challenge(verifier),
         "code_challenge_method": "S256",
-        "claims": {"id_token": {"acr": {"essential": True, "value": LOA + "3"}}},
+        "claims": {"id_token": {"acr": {"essential": True, "value": required_acr}}},
     }
     if approval:
         req.update(scope="openid " + APPROVAL, prompt="login consent")

@@ -218,8 +218,9 @@ def direct(browser, directory, level):
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
+            "acr_values": level,
             "claims": json.dumps(
-                {"id_token": {"acr": {"essential": True, "values": [level]}}}
+                {"id_token": {"acr": {"essential": True, "values": [LOA + "3"]}}}
             ),
         }
         page.route(
@@ -270,7 +271,7 @@ def direct(browser, directory, level):
         )
         assert (
             claims["nonce"] == nonce
-            and claims["acr"] == level
+            and claims["acr"] == LOA + "3"
             and claims[PIN] == person
             and claims["auth_time"] <= claims["iat"]
         )
@@ -283,7 +284,7 @@ def saml(browser, directory):
     acs = "https://proxy.example.com/SP/acs"
     req_id = "_" + secrets.token_hex(16)
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    xml = f'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="{ns}" Version="2.0" ID="{req_id}" IssueInstant="{now}" Destination="{BASE}/saml/sso" AssertionConsumerServiceURL="{acs}"><saml:Issuer>https://proxy.example.com/SP</saml:Issuer><samlp:RequestedAuthnContext Comparison="exact"><saml:AuthnContextClassRef>{LOA}4</saml:AuthnContextClassRef></samlp:RequestedAuthnContext></samlp:AuthnRequest>'
+    xml = f'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="{ns}" Version="2.0" ID="{req_id}" IssueInstant="{now}" Destination="{BASE}/saml/sso" AssertionConsumerServiceURL="{acs}"><saml:Issuer>https://proxy.example.com/SP</saml:Issuer><samlp:RequestedAuthnContext Comparison="exact"><saml:AuthnContextClassRef>{LOA}3</saml:AuthnContextClassRef></samlp:RequestedAuthnContext></samlp:AuthnRequest>'
     compression = zlib.compressobj(wbits=-15)
     wire = base64.b64encode(
         compression.compress(xml.encode()) + compression.flush()
@@ -322,7 +323,7 @@ def saml(browser, directory):
             statement = doc.find(f".//{{{ns}}}AuthnStatement")
             assert (
                 doc.get("InResponseTo") == req_id
-                and statement.find(f".//{{{ns}}}AuthnContextClassRef").text == LOA + "4"
+                and statement.find(f".//{{{ns}}}AuthnContextClassRef").text == LOA + "3"
             )
             assert (
                 abs(
@@ -373,10 +374,19 @@ def eid(browser, directory, mode):
             requests[path][1] for path in ["/op/authorization", "/oidc/authorize"]
         ]
         field = "https://id.oidc.se/param/signRequest"
-        assert (
-            downstream[field] == upstream[field]
-            and downstream["claims"] == upstream["claims"]
-        )
+        assert downstream[field] == upstream[field]
+        # The signer constraints stay identical. The upstream ACR constraint
+        # also permits certified LoA4 when the service will accept LoA3.
+        requested = downstream["claims"]
+        forwarded = upstream["claims"]
+        acr = requested["id_token"].pop("acr")
+        upstream_acr = forwarded["id_token"].pop("acr")
+        assert requested == forwarded and acr["essential"] and upstream_acr["essential"]
+        levels = acr.get("values", [acr.get("value")])
+        allowed = set(levels) - {LOA + "4"}
+        if LOA + "3" in allowed:
+            allowed.add(LOA + "4")
+        assert set(upstream_acr.get("values", [upstream_acr.get("value")])) == allowed
         assert set(upstream["prompt"].split()) == {"login", "consent"}
         message = base64.b64decode(
             upstream[field]["sign_message"]["message"], validate=True

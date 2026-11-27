@@ -255,7 +255,7 @@ def run():
                         browser, directory, n, LOA + level, scope, key, method
                     )
 
-                public = check("rp1-public-signed", lambda: rp(1, "4", scopes))
+                public = check("rp1-public-signed", lambda: rp(1, "3", scopes))
                 check(
                     "rp1-coordination-number",
                     lambda: reference_client(
@@ -291,6 +291,18 @@ def run():
                     )
                 check("service-saml-signed-assurance", lambda: saml(browser, directory))
                 restart("probe-op")
+
+                def loa4_release():
+                    fixtures.mode = "achieved-loa4"
+                    try:
+                        assert transaction(fixtures, "sector-a")[0] is None
+                        assert transaction(
+                            fixtures, "sector-a", required_acr=LOA + "4"
+                        ) == ("unmet_authentication_requirements", None)
+                    finally:
+                        fixtures.mode = "valid"
+
+                check("verified-loa4-released-as-loa3", loa4_release)
 
                 def sectors():
                     a = transaction(fixtures, "sector-a")
@@ -338,7 +350,7 @@ def run():
 
                 def withdrawn_mark():
                     role = "probe-op"
-                    loa = "https://id.swedenconnect.se/loa/loa3"
+                    loa = "https://id.swedenconnect.se/loa/loa4"
 
                     def endorsed(*, quiet=False):
                         resolved = resolved_entity(directory, role, quiet=quiet)
@@ -360,7 +372,7 @@ def run():
                             raise TimeoutError("resolver did not observe withdrawal")
                         time.sleep(2)
                     restart(role)
-                    fixtures.mode = "valid"
+                    fixtures.mode = "achieved-loa4"
                     assert transaction(fixtures, "sector-a") == (
                         "unmet_authentication_requirements",
                         None,
