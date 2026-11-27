@@ -10,8 +10,8 @@
   },
   "sources": {
     "tunnelbana": {
-      "commit": "c2b84183a2812b9afc35cafe13ad8093c892c90d",
-      "local_inputs_sha256": "8d01aa3b4ec5be33ab923ab0393843a8aec68ef63cb0f263965d5c69abd4ca37"
+      "commit": "de0b33aead71d3d4f09a084c8a8dcac903fea64f",
+      "local_inputs_sha256": "7d18096d024dffe8a6b775c40e7d64ba4a0e0220d52956cd398c8c00c7f63709"
     },
     "grindvakt": {
       "version": "0.13.0",
@@ -43,8 +43,11 @@
     "test-my-eid-unknown-signer": "PASS",
     "service-saml-signed-assurance": "PASS",
     "verified-loa4-released-as-loa3": "PASS",
+    "upstream-listed-id-alg": "PASS",
     "registered-sectors-and-original-auth-time": "PASS",
     "retired-recipient-key-in-flight-restart": "PASS",
+    "upstream-unlisted-id-alg": "PASS",
+    "upstream-additional-userinfo-alg": "PASS",
     "upstream-wrong-issuer": "PASS",
     "upstream-wrong-audience": "PASS",
     "upstream-wrong-userinfo-sub": "PASS",

@@ -170,7 +170,7 @@ def run():
                     if issuer:
                         contents = contents.replace(
                             'environment = "local"',
-                            f'environment = "local"\nop_entity_id = "{BASE}/{issuer}"\nid_token_signed_response_alg = "ES256"',
+                            f'environment = "local"\nop_entity_id = "{BASE}/{issuer}"\nid_token_signed_response_alg = "ES256"\nid_token_signing_alg_values_supported = ["ES256", "ES384"]',
                         )
                         ring = fixtures.encryption_config(rotated)
                         contents = contents.replace(
@@ -304,6 +304,16 @@ def run():
 
                 check("verified-loa4-released-as-loa3", loa4_release)
 
+                def listed_id_algorithm():
+                    fixtures.mode = "listed-id-alg"
+                    try:
+                        error, subject = transaction(fixtures, "sector-a")
+                        assert error is None and subject
+                    finally:
+                        fixtures.mode = "valid"
+
+                check("upstream-listed-id-alg", listed_id_algorithm)
+
                 def sectors():
                     a = transaction(fixtures, "sector-a")
                     b = transaction(fixtures, "sector-b")
@@ -337,6 +347,8 @@ def run():
                         assert error == "unmet_authentication_requirements"
 
                 for mode in [
+                    "unlisted-id-alg",
+                    "additional-userinfo-alg",
                     "wrong-issuer",
                     "wrong-audience",
                     "wrong-userinfo-sub",
