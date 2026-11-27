@@ -262,7 +262,7 @@ pub struct FederationBackend {
 
 impl FederationBackend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
-        let mut cfg: FederationBackendConfig = bx.parse_config()?;
+        let cfg: FederationBackendConfig = bx.parse_config()?;
         let module_base = bx.module_base();
         let entity_id = cfg.entity_id.clone().unwrap_or_else(|| module_base.clone());
         let redirect_uri = format!("{module_base}/callback");
@@ -297,26 +297,20 @@ impl FederationBackend {
             crate::oidc_common::validate_id_token_algorithm(alg)?;
         }
         let transactions = if profile {
-            let issuer = match cfg.environment.as_deref() {
-                Some("sandbox") => "https://op.sandbox.sverigeid.se",
-                Some("qa") => "https://op.qa.sverigeid.se",
-                Some("production") => "https://op.sverigeid.se",
-                Some("local") => cfg
-                    .op_entity_id
-                    .as_deref()
-                    .unwrap_or("https://local.fed.swedenconnect.se:11010"),
-                _ => {
-                    return Err(Error::Config(
-                        "Sweden Connect requires an explicit environment".into(),
-                    ))
-                }
-            };
-            if cfg.op_entity_id.as_ref().is_some_and(|id| id != issuer) {
+            if !matches!(
+                cfg.environment.as_deref(),
+                Some("local" | "sandbox" | "qa" | "production")
+            ) {
                 return Err(Error::Config(
-                    "issuer differs from selected environment".into(),
+                    "Sweden Connect requires environment to be local, sandbox, qa or production"
+                        .into(),
                 ));
             }
-            cfg.op_entity_id = Some(issuer.to_owned());
+            let issuer = cfg.op_entity_id.as_deref().ok_or_else(|| {
+                Error::Config("Sweden Connect requires an explicit op_entity_id".into())
+            })?;
+            rp::validate_issuer(issuer)
+                .map_err(|e| Error::Config(format!("invalid op_entity_id: {e}")))?;
             Some(crate::sweden_connect::Transactions::new(
                 cfg.redis_url.as_deref(),
                 &entity_id,

@@ -36,6 +36,7 @@ from federation import (
     BASELINE,
     HERE,
     HOST,
+    REFERENCE,
     ReplicaStartupError,
     fetch,
     prepare,
@@ -169,8 +170,8 @@ def run():
                 for port, config, contents in zip([11051, 11052], configs, original):
                     if issuer:
                         contents = contents.replace(
-                            'environment = "local"',
-                            f'environment = "local"\nop_entity_id = "{BASE}/{issuer}"\nid_token_signed_response_alg = "ES256"\nid_token_signing_alg_values_supported = ["ES256", "ES384"]',
+                            f'op_entity_id = "{REFERENCE}"',
+                            f'op_entity_id = "{BASE}/{issuer}"\nid_token_signed_response_alg = "ES256"\nid_token_signing_alg_values_supported = ["ES256", "ES384"]',
                         )
                         ring = fixtures.encryption_config(rotated)
                         contents = contents.replace(

@@ -239,6 +239,7 @@ acr_values_supported = ["http://id.elegnamnden.se/loa/1.0/loa2", "http://id.eleg
 '''
         else:
             cfg += f"""environment = "local"
+op_entity_id = "{REFERENCE}"
 scope = "openid profile {info} {number} {approval}"
 """
         cfg += f'''[{prefix}.presentation]
