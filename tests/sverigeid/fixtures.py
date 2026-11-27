@@ -45,6 +45,14 @@ class Peers:
         self.auth_calls = 0
         self.errors = []
 
+        # Both extra keys belong to the trusted probe OP. The RP accepts
+        # ES384 for ID tokens only and does not register ES512 at all.
+        self.probe_signers = {}
+        for alg, curve in [("ES384", "P-384"), ("ES512", "P-521")]:
+            key = jwk.JWK.generate(kty="EC", crv=curve)
+            key.update(kid=key.thumbprint(), use="sig", alg=alg)
+            self.probe_signers[alg] = key
+
         self.recipients = []
         for label in ["initial", "next"]:
             recipient = jwk.JWK.generate(kty="RSA", size=2048)
@@ -82,8 +90,16 @@ class Peers:
             fields.append(f'rotation.retired_decryption_jwk_paths = ["{initial}"]')
         return "\n".join(fields)
 
-    def response(self, role, claims, recipient, plain):
-        wire = self.sign(role, claims)
+    def response(self, role, claims, recipient, plain, alg=None):
+        if alg is None:
+            wire = self.sign(role, claims)
+        else:
+            assert role == "probe-op"
+            signer = self.probe_signers[alg]
+            wire = jwt.encode(
+                claims, jwt.PyJWK.from_json(signer.export_private()).key,
+                algorithm=alg, headers={"typ": "JWT", "kid": signer["kid"]},
+            )
         if plain:
             return wire
         message = jwe.JWE(
@@ -222,9 +238,10 @@ class Peers:
                 return answer(503, "", "text/plain")
             return answer(200, self.entity(role), "application/entity-statement+jwt")
         if endpoint == "keys":
-            return answer(
-                200, json.dumps({"keys": [self.keys(role)[1]]}), "application/json"
-            )
+            keys = [self.keys(role)[1]]
+            if role == "probe-op":
+                keys.extend(k.export_public(as_dict=True) for k in self.probe_signers.values())
+            return answer(200, json.dumps({"keys": keys}), "application/json")
         query = urlsplit(handler.path).query
         if handler.command == "POST":
             query = handler.rfile.read(
@@ -314,7 +331,8 @@ class Peers:
                         if self.mode == "ordinary-login"
                         else jar["scope"],
                         "id_token": self.response(
-                            role, claims, recipient, self.mode == "unencrypted-id"
+                            role, claims, recipient, self.mode == "unencrypted-id",
+                            {"listed-id-alg": "ES384", "unlisted-id-alg": "ES512"}.get(self.mode),
                         ),
                     }
                 ),
@@ -337,6 +355,7 @@ class Peers:
                     claims,
                     self.tokens[token],
                     self.mode == "unencrypted-userinfo",
+                    "ES384" if self.mode == "additional-userinfo-alg" else None,
                 ),
                 "application/jwt",
             )
