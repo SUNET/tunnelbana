@@ -273,7 +273,12 @@ impl FederationBackend {
         {
             return Err(Error::Config("subject_type and id_token_signing_alg_values_supported require the Sweden Connect profile".into()));
         }
-        let subject_type = cfg.subject_type.unwrap_or(SubjectType::Public);
+        // Unprofiled federation callbacks historically report pairwise subjects.
+        let subject_type = cfg.subject_type.unwrap_or(if profile {
+            SubjectType::Public
+        } else {
+            SubjectType::Pairwise
+        });
         if !matches!(subject_type, SubjectType::Public | SubjectType::Pairwise) {
             return Err(Error::Config(
                 "OIDC subject_type must be public or pairwise".into(),
@@ -1215,7 +1220,7 @@ impl FederationBackend {
             requester: None,
             requester_name: Vec::new(),
             subject_id: Some(sub),
-            subject_type: SubjectType::Pairwise,
+            subject_type: self.subject_type,
             attributes: internal_attrs,
             force_authn: false,
             is_passive: false,

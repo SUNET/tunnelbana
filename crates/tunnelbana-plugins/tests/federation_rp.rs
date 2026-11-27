@@ -36,6 +36,7 @@ struct NetworkConfig {
     key_distribution: KeyDistribution,
     /// Serve the OP's endpoints over plain http in the resolved metadata.
     insecure_op_endpoints: bool,
+    signed_userinfo: bool,
 }
 
 impl Default for NetworkConfig {
@@ -46,6 +47,7 @@ impl Default for NetworkConfig {
             provider_issuer: Some(OP_ID),
             key_distribution: KeyDistribution::Inline,
             insecure_op_endpoints: false,
+            signed_userinfo: false,
         }
     }
 }
@@ -182,6 +184,24 @@ impl HttpClient for MockNetwork {
         form: &[(String, String)],
         _headers: &[(String, String)],
     ) -> CoreResult<HttpFetchResponse> {
+        let now = tunnelbana_core::util::now_secs();
+        let mut claims = jose_rs::jwt::Claims {
+            iss: Some(OP_ID.to_string()),
+            sub: Some("fed-user-1".to_string()),
+            aud: Some(jose_rs::jwt::Audience::Single(RP_ENTITY.to_string())),
+            iat: Some(now.into()),
+            exp: Some((now + 600).into()),
+            ..Default::default()
+        };
+        if self.config.signed_userinfo && url == format!("{OP_ID}/userinfo") {
+            let jwt = tunnelbana_oidc::jwt::sign(&self.op_key, &claims, Some("JWT")).unwrap();
+            return Ok(HttpFetchResponse {
+                status: 200,
+                body: jwt.into_bytes(),
+                content_type: Some("application/jwt".into()),
+                ..Default::default()
+            });
+        }
         if url != format!("{OP_ID}/token") {
             return Ok(HttpFetchResponse {
                 status: 404,
@@ -206,15 +226,6 @@ impl HttpClient for MockNetwork {
             .expect("client assertion must verify against the RP jwks");
 
         // Issue an id_token for the RP, echoing the captured nonce.
-        let now = tunnelbana_core::util::now_secs();
-        let mut claims = jose_rs::jwt::Claims {
-            iss: Some(OP_ID.to_string()),
-            sub: Some("fed-user-1".to_string()),
-            aud: Some(jose_rs::jwt::Audience::Single(RP_ENTITY.to_string())),
-            iat: Some(now.into()),
-            exp: Some((now + 600).into()),
-            ..Default::default()
-        };
         if let Some(nonce) = self.nonce.lock().unwrap().clone() {
             claims
                 .extra
@@ -223,6 +234,10 @@ impl HttpClient for MockNetwork {
         claims
             .extra
             .insert("email".into(), serde_json::json!("fed@example.org"));
+        if self.config.signed_userinfo {
+            claims.extra.insert("auth_time".into(), now.into());
+            claims.extra.insert("acr".into(), "urn:example:acr".into());
+        }
         let id_token = tunnelbana_oidc::jwt::sign(&self.op_key, &claims, None).unwrap();
 
         let body = serde_json::json!({
@@ -274,6 +289,12 @@ fn provider_metadata(op_key: &SigningKey, config: &NetworkConfig) -> serde_json:
         "client_registration_types_supported": ["automatic"]
     });
     let object = metadata.as_object_mut().unwrap();
+    if config.signed_userinfo {
+        object.insert(
+            "userinfo_endpoint".into(),
+            format!("{op_url}/userinfo").into(),
+        );
+    }
     if let Some(issuer) = config.provider_issuer {
         object.insert("issuer".into(), serde_json::Value::String(issuer.into()));
     }
@@ -799,6 +820,58 @@ async fn callback_rejects_unregistered_id_token_algorithm() {
         error.to_string().to_lowercase().contains("algorithm"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn profile_callback_returns_registered_subject_type() {
+    for registered in [SubjectType::Public, SubjectType::Pairwise] {
+        let (net, protocol_key, anchor) = network_with(
+            &ec_jwk("rp-protocol"),
+            NetworkConfig {
+                signed_userinfo: true,
+                ..Default::default()
+            },
+        );
+        let backend =
+            tunnelbana_plugins::federation_backend::FederationBackend::build(&BuildContext {
+                name: "OIDFedRP".into(),
+                base_url: "https://proxy.example.com".into(),
+                config: serde_json::json!({
+                    "profile": "sweden_connect", "environment": "local", "op_entity_id": OP_ID,
+                    "subject_type": registered, "id_token_signed_response_alg": "ES256",
+                    "signing_jwk": protocol_key,
+                    "federation": {
+                        "signing_jwk": ec_jwk("rp-federation"),
+                        "trust_anchor": [{"entity_id": TA_ID, "keys": [anchor]}]
+                    }
+                }),
+                attribute_mapper: mapper(),
+                http_client: net.clone(),
+                secret: "test-secret".into(),
+                previous_secrets: vec![],
+            })
+            .unwrap();
+        let mut context = ctx();
+        let response = backend
+            .start_auth(&mut context, InternalData::request("https://sp.example"))
+            .await
+            .unwrap();
+        let url = location(&response);
+        *net.nonce.lock().unwrap() = qp(&url, "nonce");
+        context.request.query.extend([
+            ("state".into(), qp(&url, "state").unwrap()),
+            ("code".into(), "authcode".into()),
+            ("iss".into(), OP_ID.into()),
+        ]);
+        let BackendAction::AuthResponse(data) = backend
+            .handle_endpoint(&mut context, "callback")
+            .await
+            .unwrap()
+        else {
+            panic!("expected authentication response");
+        };
+        assert_eq!(data.subject_type, registered);
+    }
 }
 
 #[tokio::test]
