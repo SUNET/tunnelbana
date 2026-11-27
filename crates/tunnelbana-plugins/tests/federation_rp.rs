@@ -660,6 +660,99 @@ async fn rp_entity_configuration_is_served_and_self_signed() {
 }
 
 #[tokio::test]
+async fn sweden_connect_leaf_statements_publish_only_the_registered_role() {
+    use serde_json::json;
+    use tunnelbana_core::plugin::{FrontendAction, NullHttpClient};
+    use tunnelbana_plugins::{
+        federation_backend::FederationBackend, federation_frontend::FederationFrontend,
+    };
+
+    let mut bx = BuildContext {
+        name: "sandbox".into(),
+        base_url: "https://proxy.example.com".into(),
+        config: json!({
+            "profile": "sweden_connect",
+            "environment": "sandbox",
+            "subject_type": "pairwise",
+            "id_token_signed_response_alg": "ES384",
+            "id_token_signing_alg_values_supported": ["RS256","RS384","RS512","ES256","ES384","ES512"],
+            "presentation": {
+                "organization_identifier": "urn:glue:iso6523:0007:1234567890",
+                "organization_name#sv": "Exempelorganisation",
+                "organization_name#en": "Example Organization"
+            },
+            "signing_jwk": ec_jwk("protocol"),
+            "federation": {
+                "signing_jwk": ec_jwk("federation"),
+                "authority_hints": [TA_ID],
+                "trust_anchor": [{"entity_id": TA_ID, "keys": [ec_key("ta").public_jwk()]}],
+                "organization_name": "Example Organization",
+                "organization_uri": "https://example.org/"
+            }
+        }),
+        attribute_mapper: mapper(),
+        http_client: Arc::new(NullHttpClient),
+        secret: "test-secret".into(),
+        previous_secrets: vec![],
+    };
+    let rp = FederationBackend::build(&bx).unwrap();
+    let BackendAction::Respond(rp_response) = rp
+        .handle_endpoint(&mut ctx(), "entity_configuration")
+        .await
+        .unwrap()
+    else {
+        panic!("expected RP entity configuration");
+    };
+
+    bx.config.as_object_mut().unwrap().remove("presentation");
+    bx.config.as_object_mut().unwrap().remove("environment");
+    bx.config["backend"] = json!("upstream");
+    bx.config["subject_secret"] = json!("stable-test-subject-secret-32-bytes");
+    bx.config["acr_values_supported"] = json!(["http://id.elegnamnden.se/loa/1.0/loa3"]);
+    let op = FederationFrontend::build(&bx).unwrap();
+    let FrontendAction::Respond(op_response) = op
+        .handle_endpoint(&mut ctx(), "entity_configuration")
+        .await
+        .unwrap()
+    else {
+        panic!("expected OP entity configuration");
+    };
+
+    for (role, response) in [
+        ("openid_relying_party", rp_response),
+        ("openid_provider", op_response),
+    ] {
+        assert_eq!(response.status, 200);
+        let jwt = std::str::from_utf8(&response.body).unwrap();
+        let stmt = tunnelbana_oidc::federation::verify_self_signed(jwt).unwrap();
+        let metadata = stmt.claims["metadata"].as_object().unwrap();
+        assert_eq!(metadata.keys().collect::<Vec<_>>(), [role]);
+        assert_eq!(metadata[role]["organization_name"], "Example Organization");
+        assert_eq!(metadata[role]["organization_uri"], "https://example.org/");
+        if role == "openid_relying_party" {
+            assert_eq!(metadata[role]["subject_type"], "pairwise");
+            assert_eq!(
+                metadata[role]["id_token_signing_alg_values_supported"],
+                json!(["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"])
+            );
+            assert_eq!(
+                metadata[role]["organization_identifier"],
+                "urn:glue:iso6523:0007:1234567890"
+            );
+            assert_eq!(
+                metadata[role]["organization_name#sv"],
+                "Exempelorganisation"
+            );
+            assert_eq!(
+                metadata[role]["organization_name#en"],
+                "Example Organization"
+            );
+        }
+        assert_eq!(stmt.authority_hints(), [TA_ID]);
+    }
+}
+
+#[tokio::test]
 async fn start_auth_rejects_authn_constraints_it_cannot_honor() {
     let rp_fed_jwk = ec_jwk("rp-fed-1");
     let (net, fed_jwk, ta_pub) = network(&rp_fed_jwk);

@@ -41,7 +41,11 @@ Supply the anchor ID, intermediate ID and pinned public JWK from the same enviro
 | `qa` | `https://op.qa.sverigeid.se` |
 | `production` | `https://op.sverigeid.se` |
 
-The backend verifies the ID token and signed UserInfo against the RP's registered signing algorithm (`id_token_signed_response_alg`, default `RS256`). Both responses must identify the same user. Each certified Swedish LoA requires its corresponding resolver-endorsed trust mark. Tunnelbana verifies the LoA4 mark before releasing LoA3 for a LoA4 login. Use `required_trust_marks` for additional admission requirements. Essential ACR requirements that cannot be met end the transaction.
+Under `backend.config`, `subject_type` selects the upstream subject type (`public` by default, or `pairwise`). The RP accepts ID tokens signed with `id_token_signed_response_alg` (default `RS256`). To accept additional algorithms, set `id_token_signing_alg_values_supported` to a list that includes the registered algorithm. Tunnelbana publishes this list and enforces it during ID-token verification. Signed UserInfo uses `id_token_signed_response_alg`. Both responses must identify the same user.
+
+Use `backend.config.presentation` for the organization identifier, localized organization names, and privacy policy URL. For a Swedish organization, set `organization_identifier` to `urn:glue:iso6523:0007:` followed by its ten-digit organization number without a hyphen.
+
+Each certified Swedish LoA requires its corresponding resolver-endorsed trust mark. Tunnelbana verifies the LoA4 mark before releasing LoA3 for a LoA4 login. Use `required_trust_marks` for additional admission requirements. Essential ACR requirements that cannot be met end the transaction.
 
 ## Publishing a federation OP
 

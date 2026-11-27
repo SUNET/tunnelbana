@@ -616,21 +616,23 @@ pub fn presentation(
     fields: serde_json::Map<String, Value>,
 ) -> Result<serde_json::Map<String, Value>> {
     for k in fields.keys() {
-        if !matches!(
-            k.split('#').next(),
-            Some(
-                "contacts"
-                    | "logo_uri"
-                    | "client_uri"
-                    | "client_name"
-                    | "display_name"
-                    | "organization_name"
-                    | "policy_uri"
-                    | "tos_uri"
-                    | "op_policy_uri"
-                    | "op_tos_uri"
+        if k != "organization_identifier"
+            && !matches!(
+                k.split('#').next(),
+                Some(
+                    "contacts"
+                        | "logo_uri"
+                        | "client_uri"
+                        | "client_name"
+                        | "display_name"
+                        | "organization_name"
+                        | "policy_uri"
+                        | "tos_uri"
+                        | "op_policy_uri"
+                        | "op_tos_uri"
+                )
             )
-        ) {
+        {
             return Err(Error::Config(format!(
                 "unsupported presentation metadata {k}"
             )));

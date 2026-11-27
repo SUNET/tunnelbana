@@ -137,6 +137,9 @@ struct FederationBackendConfig {
     #[serde(default)]
     presentation: serde_json::Map<String, Value>,
 
+    /// Sweden Connect registration choices. Omitted values preserve the single-algorithm registration.
+    subject_type: Option<SubjectType>,
+    id_token_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// Registered algorithm accepted for upstream ID tokens (RS256 by default).
     #[serde(default = "crate::oidc_common::default_id_token_algorithm")]
     id_token_signed_response_alg: JwsAlgorithm,
@@ -239,6 +242,8 @@ pub struct FederationBackend {
     op_entity_id: Option<String>,
     discovery: Option<Discovery>,
     client: RpClient,
+    subject_type: SubjectType,
+    id_token_signing_alg_values_supported: Vec<JwsAlgorithm>,
     id_token_signed_response_alg: JwsAlgorithm,
     http: Arc<dyn HttpClient>,
     mapper: Arc<AttributeMapper>,
@@ -258,12 +263,34 @@ pub struct FederationBackend {
 impl FederationBackend {
     pub fn build(bx: &BuildContext) -> Result<Box<dyn Backend>> {
         let mut cfg: FederationBackendConfig = bx.parse_config()?;
-        crate::oidc_common::validate_id_token_algorithm(cfg.id_token_signed_response_alg)?;
         let module_base = bx.module_base();
         let entity_id = cfg.entity_id.clone().unwrap_or_else(|| module_base.clone());
         let redirect_uri = format!("{module_base}/callback");
 
         let profile = cfg.profile.is_some();
+        if !profile
+            && (cfg.subject_type.is_some() || cfg.id_token_signing_alg_values_supported.is_some())
+        {
+            return Err(Error::Config("subject_type and id_token_signing_alg_values_supported require the Sweden Connect profile".into()));
+        }
+        let subject_type = cfg.subject_type.unwrap_or(SubjectType::Public);
+        if !matches!(subject_type, SubjectType::Public | SubjectType::Pairwise) {
+            return Err(Error::Config(
+                "OIDC subject_type must be public or pairwise".into(),
+            ));
+        }
+        let id_token_signing_alg_values_supported = cfg
+            .id_token_signing_alg_values_supported
+            .unwrap_or_else(|| vec![cfg.id_token_signed_response_alg]);
+        if !id_token_signing_alg_values_supported.contains(&cfg.id_token_signed_response_alg) {
+            return Err(Error::Config(
+                "id_token_signing_alg_values_supported must include id_token_signed_response_alg"
+                    .into(),
+            ));
+        }
+        for &alg in &id_token_signing_alg_values_supported {
+            crate::oidc_common::validate_id_token_algorithm(alg)?;
+        }
         let transactions = if profile {
             let issuer = match cfg.environment.as_deref() {
                 Some("sandbox") => "https://op.sandbox.sverigeid.se",
@@ -417,6 +444,8 @@ impl FederationBackend {
 
         Ok(Box::new(FederationBackend {
             transactions,
+            subject_type,
+            id_token_signing_alg_values_supported,
             id_token_encryption: cfg.id_token_encryption,
             userinfo_encryption: cfg.userinfo_encryption,
             required_trust_marks: cfg.required_trust_marks,
@@ -449,11 +478,11 @@ impl FederationBackend {
             let alg = self.protocol_keys.published.keys[0].alg.as_ref();
             relying_party.extend(
                 serde_json::json!({
-                    "require_auth_time":true, "subject_type":"public",
+                    "require_auth_time":true, "subject_type":self.subject_type,
                     "request_object_signing_alg":alg, "token_endpoint_auth_signing_alg":alg,
                     "userinfo_signed_response_alg": self.id_token_signed_response_alg,
                     "userinfo_signing_alg_values_supported":[self.id_token_signed_response_alg],
-                    "id_token_signing_alg_values_supported":[self.id_token_signed_response_alg]
+                    "id_token_signing_alg_values_supported":self.id_token_signing_alg_values_supported
                 })
                 .as_object()
                 .unwrap()
@@ -516,18 +545,13 @@ impl FederationBackend {
                 .or_insert_with(|| Value::String(n.clone()));
         }
 
-        let mut federation_entity = serde_json::Map::new();
-        if let Some(n) = &self.organization_name {
-            federation_entity.insert("organization_name".into(), Value::String(n.clone()));
-        }
-        if let Some(u) = &self.organization_uri {
-            federation_entity.insert("homepage_uri".into(), Value::String(u.clone()));
-        }
-
-        let metadata = serde_json::json!({
-            "openid_relying_party": Value::Object(relying_party),
-            "federation_entity": Value::Object(federation_entity),
-        });
+        let metadata = crate::oidc_common::federation_leaf_metadata(
+            "openid_relying_party",
+            Value::Object(relying_party),
+            self.transactions.is_some(),
+            self.organization_name.as_deref(),
+            self.organization_uri.as_deref(),
+        );
 
         federation::build_entity_configuration(
             &self.fed_key,
@@ -1085,7 +1109,7 @@ impl FederationBackend {
             &op.provider.issuer,
             &self.client.client_id,
             Some(&nonce),
-            &[self.id_token_signed_response_alg],
+            &self.id_token_signing_alg_values_supported,
             &[],
             &verification,
         )?;

@@ -428,18 +428,13 @@ impl FederationFrontend {
             );
         }
 
-        let mut federation_entity = serde_json::Map::new();
-        if let Some(n) = &self.organization_name {
-            federation_entity.insert("organization_name".into(), Value::String(n.clone()));
-        }
-        if let Some(u) = &self.organization_uri {
-            federation_entity.insert("homepage_uri".into(), Value::String(u.clone()));
-        }
-
-        let metadata = serde_json::json!({
-            "openid_provider": openid_provider,
-            "federation_entity": Value::Object(federation_entity),
-        });
+        let metadata = crate::oidc_common::federation_leaf_metadata(
+            "openid_provider",
+            openid_provider,
+            self.profile,
+            self.organization_name.as_deref(),
+            self.organization_uri.as_deref(),
+        );
 
         federation::build_entity_configuration(
             &self.fed_key,

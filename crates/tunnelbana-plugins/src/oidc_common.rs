@@ -17,6 +17,33 @@ use tunnelbana_oidc::request::AuthorizationRequest;
 /// Compact registration binding stored inside the authenticated flow cookie.
 const AUTHORIZATION_CLIENT: &str = "authorization_client_v1";
 
+/// Sweden Connect leaves publish organization details under their protocol role
+/// (OIDC Metadata Requirements, sections 2 and 3).
+pub(crate) fn federation_leaf_metadata(
+    role: &str,
+    protocol_metadata: serde_json::Value,
+    sweden_connect: bool,
+    organization_name: Option<&str>,
+    organization_uri: Option<&str>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({(role): protocol_metadata});
+    let (organization, uri_field) = if sweden_connect {
+        (&mut metadata[role], "organization_uri")
+    } else {
+        metadata["federation_entity"] = serde_json::json!({});
+        (&mut metadata["federation_entity"], "homepage_uri")
+    };
+    for (field, value) in [
+        ("organization_name", organization_name),
+        (uri_field, organization_uri),
+    ] {
+        if let (Some(value), None) = (value, organization.get(field)) {
+            organization[field] = value.into();
+        }
+    }
+    metadata
+}
+
 /// Bind response-pipeline output to the registration validated before login.
 pub(crate) fn bind_authorization_client(
     ctx: &mut Context,
